@@ -1,3 +1,6 @@
+# Backups locais (dump de banco + sessões WhatsApp) — nunca versionar dado de produção.
+/backups/
+
 # Dependencies
 node_modules/
 # Sem a barra tambem: `node_modules/` casa so com diretorio, e um SYMLINK

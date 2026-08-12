@@ -45,6 +45,14 @@ import {
   crmSaveOrgMemory,
 } from "./evolucao";
 import { crmListContactOrders, crmSearchProducts } from "./comercio";
+import {
+  pousadaConsultarDisponibilidade,
+  pousadaVerificarOuCadastrarHospede,
+  pousadaCriarReserva,
+  pousadaGerarCobrancaPix,
+  pousadaConsultarStatusReserva,
+  pousadaConsultarDataAtual,
+} from "./pousada";
 import { crmListPrivacyRequests } from "./privacidade";
 import {
   crmArchiveStage,
@@ -133,6 +141,14 @@ export const allTools: ReadonlyArray<McpToolDefinition> = [
   crmAddCaseNote,
   crmCloseHumanCase,
   crmResumeAiAttendance,
+  // write — pousada (reservas de hospedagem)
+  pousadaVerificarOuCadastrarHospede,
+  pousadaCriarReserva,
+  pousadaGerarCobrancaPix,
+  // read — pousada
+  pousadaConsultarDisponibilidade,
+  pousadaConsultarStatusReserva,
+  pousadaConsultarDataAtual,
   // handoff (special)
   crmRequestHumanHandoff,
 ] as unknown as ReadonlyArray<McpToolDefinition>;

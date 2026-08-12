@@ -144,6 +144,11 @@ const schema = z.object({
     .default("false")
     .transform((v) => v === "true"),
 
+  // Pousada Por do Sol — integração com o PMS proprietário da pousada
+  // (disponibilidade/reservas/PIX). Opcional: só as tools do domínio
+  // "pousada" dependem disso; o resto do CRM não é afetado se ficar vazio.
+  POUSADA_PMS_BASE_URL: z.string().optional().default(""),
+
   // App URLs
   NEXT_PUBLIC_APP_URL: z
     .string()
