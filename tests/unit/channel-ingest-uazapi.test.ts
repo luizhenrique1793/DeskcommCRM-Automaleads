@@ -96,7 +96,10 @@ const MSG = {
   senderName: "Cliente",
   isGroup: false,
   fromMe: false,
-  messageType: "text",
+  // `type`, não `messageType`, é o discriminante de mídia — ver o cabeçalho
+  // de `../../lib/channels/uazapi/webhook.ts`.
+  type: "text",
+  messageType: "Conversation",
   messageTimestamp: 1755000000000,
   text: "oi",
 };
@@ -162,7 +165,7 @@ describe("ingestUazapiInbound — o que grava", () => {
     await ingestUazapiInbound(admin, {
       organizationId: "org-1",
       channelSessionId: "sess-1",
-      msg: parsed({ messageType: "image", fileURL: "https://cdn/img.jpg" }),
+      msg: parsed({ type: "image", fileURL: "https://cdn/img.jpg" }),
     });
     const ins = ops.find((o) => o.tabela === "messages" && o.op === "insert")?.payload as Record<
       string,
@@ -177,7 +180,7 @@ describe("ingestUazapiInbound — o que grava", () => {
     await ingestUazapiInbound(admin, {
       organizationId: "org-1",
       channelSessionId: "sess-1",
-      msg: parsed({ messageType: "ptt", fileURL: undefined }),
+      msg: parsed({ type: "ptt", fileURL: undefined }),
     });
     const evt = ops.find((o) => o.op === "emit_event");
     expect(evt, "não pediu persistência da mídia").toBeTruthy();

@@ -1,11 +1,22 @@
 /**
  * Entrada do UAZAPI — leitura pura do payload do webhook.
  *
- * Envelope confirmado no OpenAPI 2.1.1 (`WebhookEvent`): `{event, instance,
- * data}`, com `event` em `message | status | presence | group | connection`.
- * `data` é `additionalProperties: true` — o formato de cada evento é o mesmo
- * schema `Message` usado nas respostas de envio, então o parser lê os MESMOS
- * campos dos dois lados.
+ * ⚠️ MEDIDO em homologação real (2026-08-13), e DIVERGE do que o OpenAPI
+ * 2.1.1 documenta. O `WebhookEvent` do spec promete `{event, instance, data}`
+ * — este parser foi escrito em cima disso, e o primeiro teste com instância
+ * real devolveu "evento_sem_interesse" para TODO evento (mensagem de texto e
+ * mudança de conexão), porque o payload de verdade é outro:
+ *
+ *   evento de mensagem:  { EventType: "messages", message: {...}, chat: {...},
+ *                          instanceName: "...", owner, token, BaseUrl }
+ *   evento de conexão:   { EventType: "connection", instance: {name, status,
+ *                          qrcode?, paircode?}, instanceName: "...", ... }
+ *
+ * Chave PascalCase (`EventType`, não `event`), sem envelope `data` genérico,
+ * e a instância identifica-se por `instanceName`/`instance.name` — nunca por
+ * um `instance.id` solto. Este parser aceita OS DOIS formatos (o medido e o
+ * documentado): instalações diferentes do UAZAPI podem rodar versões de
+ * backend diferentes, e não há necessidade de escolher um para sempre.
  *
  * PURO de propósito, como `../zernio/webhook.ts`: nada aqui toca banco, rede
  * ou relógio — só decide o que o payload diz. `null` sempre que o evento não
@@ -44,9 +55,27 @@ export interface UazapiEnvelope {
 export function parseUazapiEnvelope(payload: unknown): UazapiEnvelope | null {
   const p = obj(payload);
   if (!p) return null;
-  const event = str(p.event);
+
+  // `EventType` é o campo REAL (medido); `event` é o documentado no OpenAPI.
+  const event = str(p.EventType) ?? str(p.event);
   if (!event) return null;
-  return { event, instance: str(p.instance), data: obj(p.data) };
+
+  // A instância se identifica por NOME nos dois formatos reais observados —
+  // `instanceName` (string, topo) para evento de mensagem, `instance.name`
+  // (dentro do objeto) para evento de conexão. `resolveUazapiCreds`/
+  // `getStatus` também leem `instance.name` (não `.id`) por este MESMO
+  // motivo — ver o porquê em `./client.ts`.
+  const instanceObj = obj(p.instance);
+  const instanceComoString = typeof p.instance === "string" ? str(p.instance) : null;
+  const instance = str(p.instanceName) ?? (instanceObj ? str(instanceObj.name) : instanceComoString);
+
+  // Onde o CORPO do evento mora, dependendo do formato:
+  //   real, evento de mensagem: `message` (objeto solto no topo)
+  //   real, evento de conexão:  `instance` (o mesmo objeto lido acima)
+  //   documentado:               `data`
+  const data = obj(p.message) ?? instanceObj ?? obj(p.data);
+
+  return { event, instance, data };
 }
 
 /** `+E164` ou `lid:<digitos>` — mesmo vocabulário de `contacts.wa_identity`. */
@@ -145,11 +174,21 @@ const STATUS_MAP: Record<string, "sent" | "delivered" | "read" | "failed"> = {
 };
 
 /**
- * Lê um evento `message`. `null` quando não interessa: grupo, sem `sender`
+ * `EventType`/`event` que carregam um objeto de MENSAGEM — real (`messages`,
+ * plural, medido) e documentado (`message`, singular, OpenAPI). O evento de
+ * DESFECHO (`parseUazapiStatus`) usa a MESMA lista: não há um `EventType`
+ * separado para isso na realidade medida — o que distingue as duas coisas é
+ * o campo `status` dentro do objeto (vazio numa mensagem normal, preenchido
+ * num desfecho), não o nome do evento.
+ */
+const EVENTOS_DE_MENSAGEM = new Set(["messages", "message"]);
+
+/**
+ * Lê um evento de mensagem. `null` quando não interessa: grupo, sem `sender`
  * usável, ou faltam os dois ids que identificam a linha.
  */
 export function parseUazapiMessage(env: UazapiEnvelope): UazapiInboundMessage | null {
-  if (env.event !== "message" || !env.data) return null;
+  if (!EVENTOS_DE_MENSAGEM.has(env.event) || !env.data) return null;
   const m = env.data;
 
   if (m.isGroup === true) return null; // grupos: SKIP CRM binding (política do produto)
@@ -162,8 +201,15 @@ export function parseUazapiMessage(env: UazapiEnvelope): UazapiInboundMessage | 
   const identity = fromMe ? identityFromChatId(chatId, str(m.senderName)) : resolveUazapiIdentity(m);
   if (!identity.anchor) return null; // sem quem, não há a quem atribuir
 
-  const messageType = str(m.messageType) ?? "text";
-  const isMedia = messageType !== "text" && messageType !== "chat";
+  // `type` é o rótulo SIMPLES ("text","image","ptt",...) — o MESMO vocabulário
+  // de `/send/media`. `messageType` é o nome do protobuf interno do WhatsApp
+  // ("Conversation","ImageMessage",...) — medido em produção: uma mensagem de
+  // TEXTO PURO chega com `type:"text"` e `messageType:"Conversation"` ao
+  // mesmo tempo. Usar `messageType` como discriminante de mídia classificaria
+  // TODO texto como mídia; `type` é quem bate com o vocabulário que
+  // `../ingest.ts` já sabe traduzir (`tipoDeMidia`/`mimeHintDeMidia`).
+  const tipo = str(m.type);
+  const isMedia = !!tipo && tipo !== "text";
   const ts = typeof m.messageTimestamp === "number" && m.messageTimestamp > 0 ? m.messageTimestamp : null;
 
   return {
@@ -172,7 +218,7 @@ export function parseUazapiMessage(env: UazapiEnvelope): UazapiInboundMessage | 
     chatId,
     externalId,
     text: str(m.text),
-    mediaType: isMedia ? messageType : null,
+    mediaType: isMedia ? tipo : null,
     fileUrl: isMedia ? str(m.fileURL) : null,
     sentAt: ts ? new Date(ts).toISOString() : null,
     identity,
@@ -180,11 +226,18 @@ export function parseUazapiMessage(env: UazapiEnvelope): UazapiInboundMessage | 
 }
 
 /**
- * Lê um evento `status` — só atualiza o desfecho de uma mensagem que já
+ * Lê um evento de DESFECHO — só atualiza o status de uma mensagem que já
  * existe (mesma lógica do canal intermediado: nunca cria linha).
+ *
+ * Compartilha o `EventType` com `parseUazapiMessage` (ver o porquê acima) —
+ * o campo `status` NÃO-VAZIO dentro do objeto é o que diferencia um desfecho
+ * de uma mensagem normal (que chega com `status: ""`). Também aceita
+ * `EventType: "status"`, caso algum backend do UAZAPI o envie separado, como
+ * o OpenAPI sugere.
  */
 export function parseUazapiStatus(env: UazapiEnvelope): UazapiInboundMessage | null {
-  if (env.event !== "status" || !env.data) return null;
+  const eventoValido = EVENTOS_DE_MENSAGEM.has(env.event) || env.event === "status";
+  if (!eventoValido || !env.data) return null;
   const m = env.data;
 
   const externalId = str(m.messageid);
@@ -273,4 +326,68 @@ export function mapUazapiHealthStatus(status: string): CanonicalChannelStatus {
     default:
       return "STOPPED";
   }
+}
+
+/**
+ * Redação do segredo que o PRÓPRIO UAZAPI embute no corpo do webhook.
+ *
+ * ⚠️ MEDIDO em homologação real (2026-08-13): o payload real inclui um campo
+ * `token` — o token da instância, em TEXTO PURO — direto na raiz do evento,
+ * tanto para mensagem quanto para conexão. Não é desenho nosso: é o UAZAPI
+ * ecoando o próprio segredo de volta em cada chamada. O problema é que
+ * `webhook_events_log.raw_body`/`payload_parsed` arquivam o corpo cru SEM
+ * cifra — desenho válido para todo provider que NÃO vaza segredo no corpo
+ * (WAHA, Meta, Zernio não fazem isso) — então, sem isto, o token do operador
+ * ficaria gravado em claro a cada evento recebido.
+ *
+ * ─── Onde isto entra, e onde NÃO entra ──────────────────────────────────────
+ *
+ * Só na CÓPIA que vai para o arquivo (`../arquivo-de-webhook.ts`). O parser
+ * (`parseUazapiEnvelope` e o resto deste módulo) continua lendo o corpo
+ * ORIGINAL, intacto — redigir o que o parser vê arriscaria produzir um
+ * desfecho diferente do que o UAZAPI de fato mandou, e o objetivo aqui é só
+ * não PERSISTIR o segredo, não impedir de processá-lo.
+ *
+ * ─── Por que uma LISTA de chaves, não um regex "parece token" ──────────────
+ *
+ * Uma heurística genérica (campo com >20 caracteres, por exemplo) apagaria
+ * dado útil de verdade: `messageid`, `chatid`, `sender_pn`/`sender_lid` são
+ * todos strings longas e são exatamente o que a investigação de um bug real
+ * precisa enxergar. A lista cobre variações de grafia plausíveis do MESMO
+ * conceito (token da instância/API) — não qualquer string comprida.
+ */
+const CAMPOS_DE_TOKEN = new Set([
+  "token",
+  "Token",
+  "apiToken",
+  "apitoken",
+  "ApiToken",
+  "instanceToken",
+  "instance_token",
+  "adminToken",
+  "admintoken",
+]);
+
+type ValorJson = string | number | boolean | null | ValorJson[] | { [k: string]: ValorJson };
+
+function redigirCamposDeToken(valor: unknown): unknown {
+  if (Array.isArray(valor)) return valor.map(redigirCamposDeToken);
+  const o = obj(valor);
+  if (!o) return valor;
+  const saida: Bruto = {};
+  for (const [k, v] of Object.entries(o)) {
+    saida[k] = CAMPOS_DE_TOKEN.has(k) ? "[REDACTED]" : redigirCamposDeToken(v);
+  }
+  return saida;
+}
+
+/**
+ * A cópia SEGURA de um payload UAZAPI já parseado, para arquivar — nunca
+ * usada para decidir o que o evento significa (isso é papel do parser, que
+ * lê o corpo original). Percorre em qualquer profundidade: o UAZAPI pode
+ * aninhar o campo diferente numa versão futura de backend, e a defesa não
+ * deve depender de saber o caminho exato.
+ */
+export function redactUazapiSecrets(payload: unknown): ValorJson {
+  return redigirCamposDeToken(payload) as ValorJson;
 }

@@ -33,6 +33,9 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { logger } from "@/lib/logger";
 
+import { CHANNEL_PROVIDER_UAZAPI } from "./capabilities";
+import { redactUazapiSecrets } from "./uazapi/webhook";
+
 /** Cabeçalhos que NUNCA entram no arquivo, por menor que seja a chance. */
 const PROIBIDOS = ["authorization", "cookie", "x-api-key"];
 
@@ -79,6 +82,27 @@ export async function abrirArquivoDoWebhook(
     parsed = null;
   }
 
+  // ─── UAZAPI ecoa o próprio token no CORPO do webhook ───────────────────────
+  //
+  // Medido em produção: o payload real inclui `token` (a instância, em texto
+  // puro) na raiz do evento. `raw_body`/`payload_parsed` NÃO são cifrados —
+  // desenho correto para todo provider que não faz isso —, então sem esta
+  // troca o token do operador ficaria gravado em claro a cada evento. A cópia
+  // sanitizada é só para o QUE VAI PARA O BANCO: `entrada.rawBody` (usado
+  // pelo chamador para `handleInboundWebhook` logo em seguida) não é tocado —
+  // strings são imutáveis em JS, e a variável do chamador nem está visível
+  // aqui dentro. Sem JSON válido (`parsed === null`), não há como redigir com
+  // segurança e o corpo cru segue como está — mas o UAZAPI sempre manda JSON,
+  // medido nos três eventos reais recebidos até aqui.
+  const paraArquivar =
+    entrada.provider === CHANNEL_PROVIDER_UAZAPI && parsed
+      ? (redactUazapiSecrets(parsed) as Record<string, unknown>)
+      : parsed;
+  const corpoParaArquivar =
+    entrada.provider === CHANNEL_PROVIDER_UAZAPI && parsed
+      ? JSON.stringify(paraArquivar)
+      : entrada.rawBody;
+
   try {
     const { data, error } = await admin
       .from("webhook_events_log")
@@ -90,8 +114,8 @@ export async function abrirArquivoDoWebhook(
         provider: entrada.provider,
         http_method: "POST",
         headers: cabecalhosSeguros(entrada.headers),
-        raw_body: entrada.rawBody,
-        payload_parsed: parsed,
+        raw_body: corpoParaArquivar,
+        payload_parsed: paraArquivar,
         status: "received",
         attempts: 0,
       })

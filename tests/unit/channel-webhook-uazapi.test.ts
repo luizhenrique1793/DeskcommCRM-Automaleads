@@ -27,7 +27,12 @@ const BASE_MSG = {
   senderName: "Maria",
   isGroup: false,
   fromMe: false,
-  messageType: "text",
+  // `type` é o discriminante REAL de mídia (medido em produção: texto puro
+  // chega com `type:"text"` e `messageType:"Conversation"` ao mesmo tempo —
+  // ver o cabeçalho de `../uazapi/webhook.ts`). `messageType` fica aqui só
+  // como fixture realista, não como o que o parser lê para decidir mídia.
+  type: "text",
+  messageType: "Conversation",
   messageTimestamp: 1755000000000,
   text: "Olá, tudo bem?",
 };
@@ -72,11 +77,12 @@ describe("parseUazapiMessage — texto", () => {
 
 // 13 — webhook de imagem
 describe("parseUazapiMessage — mídia (imagem)", () => {
-  it("messageType 'image' com fileURL vira mediaType+fileUrl", () => {
+  it("type 'image' com fileURL vira mediaType+fileUrl", () => {
     const msg = parseUazapiMessage(
       envelope("message", {
         ...BASE_MSG,
-        messageType: "image",
+        type: "image",
+        messageType: "ImageMessage",
         fileURL: "https://cdn/img.jpg",
         text: "legenda",
       }),
@@ -87,9 +93,15 @@ describe("parseUazapiMessage — mídia (imagem)", () => {
 
 // 14 — webhook de áudio
 describe("parseUazapiMessage — mídia (áudio/PTT)", () => {
-  it("messageType 'ptt' vira mediaType 'ptt'", () => {
+  it("type 'ptt' vira mediaType 'ptt'", () => {
     const msg = parseUazapiMessage(
-      envelope("message", { ...BASE_MSG, messageType: "ptt", fileURL: "https://cdn/a.ogg", text: null }),
+      envelope("message", {
+        ...BASE_MSG,
+        type: "ptt",
+        messageType: "AudioMessage",
+        fileURL: "https://cdn/a.ogg",
+        text: null,
+      }),
     );
     expect(msg?.mediaType).toBe("ptt");
     expect(msg?.fileUrl).toBe("https://cdn/a.ogg");
@@ -226,5 +238,95 @@ describe("parseUazapiConnection + mapUazapiHealthStatus", () => {
     for (const bruto of ["connected", "connecting", "disconnected", "hibernated", "lixo"]) {
       expect(CANONICOS.has(mapUazapiHealthStatus(bruto))).toBe(true);
     }
+  });
+});
+
+/**
+ * Formato REAL — medido em homologação, 2026-08-13. Estrutura fiel, valores
+ * fabricados (nenhum dado de instância/contato real). Divergiu do OpenAPI
+ * 2.1.1 em três pontos: chave `EventType` (não `event`), sem envelope `data`
+ * genérico (o corpo do evento fica solto em `message`/`instance`), e a
+ * instância se identifica por NOME (`instanceName`), não por um `id` solto.
+ * O primeiro teste com instância real devolvia "evento_sem_interesse" para
+ * TUDO até este formato ser reconhecido — estes casos são a rede que falta
+ * para não regredir.
+ */
+describe("formato REAL do payload (não o do OpenAPI)", () => {
+  const mensagemReal = {
+    chat: { id: "5511999999999@s.whatsapp.net", wa_name: "Cliente Teste" },
+    owner: "5511888888888",
+    token: "tok-nao-usado-neste-teste-36-chars--",
+    BaseUrl: "https://free.uazapi.com",
+    message: {
+      id: "3EB0REAL0001",
+      text: "oi, teste",
+      type: "text",
+      chatid: "5511999999999@s.whatsapp.net",
+      fromMe: false,
+      sender: "5511999999999@s.whatsapp.net",
+      source: "android",
+      messageid: "3EB0REAL0001",
+      sender_pn: "5511999999999@s.whatsapp.net",
+      senderName: "Cliente Teste",
+      sender_lid: "123456789@lid",
+      messageType: "Conversation",
+      messageTimestamp: 1755000000000,
+      isGroup: false,
+    },
+    EventType: "messages",
+    chatSource: "updated",
+    instanceName: "YiKQrN",
+  };
+
+  const conexaoReal = (status: string, extra: Record<string, unknown> = {}) => ({
+    owner: "",
+    token: "tok-nao-usado-neste-teste-36-chars--",
+    BaseUrl: "https://free.uazapi.com",
+    event_id: "evt-fabricado-0001",
+    instance: { name: "YiKQrN", status, ...extra },
+    EventType: "connection",
+    instanceName: "YiKQrN",
+  });
+
+  it("envelope: lê EventType (não 'event') e instanceName (não 'instance' string)", () => {
+    const env = parseUazapiEnvelope(mensagemReal);
+    expect(env).toMatchObject({ event: "messages", instance: "YiKQrN" });
+  });
+
+  it("mensagem de texto real vira UazapiInboundMessage corretamente", () => {
+    const env = parseUazapiEnvelope(mensagemReal)!;
+    const msg = parseUazapiMessage(env);
+    expect(msg).toMatchObject({
+      direction: "inbound",
+      kind: "message",
+      chatId: "5511999999999@s.whatsapp.net",
+      externalId: "3EB0REAL0001",
+      text: "oi, teste",
+      mediaType: null, // type:"text" -> não é mídia, mesmo com messageType:"Conversation"
+    });
+    expect(msg?.identity.phone).toBe("+5511999999999");
+  });
+
+  it("evento connection real (objeto {name,status}) vira UazapiConnectionEvent", () => {
+    const env = parseUazapiEnvelope(conexaoReal("connected"))!;
+    const conexao = parseUazapiConnection(env);
+    expect(conexao).toEqual({ status: "connected" });
+  });
+
+  it("evento connection real com QR (connecting) também funciona", () => {
+    const env = parseUazapiEnvelope(conexaoReal("connecting", { qrcode: "data:image/png;base64,AAAA" }))!;
+    const conexao = parseUazapiConnection(env);
+    expect(conexao).toEqual({ status: "connecting" });
+  });
+
+  it("retrocompatível: o formato documentado no OpenAPI (event/instance string/data) continua funcionando", () => {
+    const env = parseUazapiEnvelope({
+      event: "message",
+      instance: "algum-id-antigo",
+      data: { ...mensagemReal.message },
+    });
+    expect(env).toMatchObject({ event: "message", instance: "algum-id-antigo" });
+    const msg = parseUazapiMessage(env!);
+    expect(msg?.externalId).toBe("3EB0REAL0001");
   });
 });

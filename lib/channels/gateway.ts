@@ -43,11 +43,13 @@ export type GatewayValidation =
       profileName: string | null;
       ownerJid: string | null;
       /**
-       * O `instance.id` AUTORITATIVO devolvido pela própria API — não o que o
-       * operador digitou no formulário. É este valor, e só ele, que deve virar
-       * `uazapi_instance_id` gravado: é o mesmo valor que chega no campo
-       * `instance` do envelope de webhook, e é contra ELE que `../inbound.ts`
-       * cruza a sessão. `null` no caso (raro) de a resposta não trazer `id`.
+       * O `instance.name` AUTORITATIVO devolvido pela própria API — não o que
+       * o operador digitou no formulário. É este valor, e só ele, que deve
+       * virar `uazapi_instance_id` gravado: é o MESMO valor que o webhook
+       * devolve em `instanceName`, e é contra ele que `../inbound.ts` cruza a
+       * sessão (`uazapiClient.getStatus` já lê `instance.name`, não
+       * `instance.id` — ver o porquê em `../uazapi/client.ts`). `null` no
+       * caso (raro) de a resposta não trazer nada.
        */
       instanceId: string | null;
     }

@@ -35,14 +35,16 @@ export interface UazapiInstanceStatus {
   profilePicUrl: string | null;
   ownerJid: string | null;
   /**
-   * `instance.id` — o identificador AUTORITATIVO, gerado pelo próprio UAZAPI.
+   * `instance.name` — o AUTORITATIVO para cruzamento de webhook.
    *
-   * Existe aqui porque o webhook manda de volta este MESMO valor no campo
-   * `instance` do envelope (`WebhookEvent.instance`), e é contra ele que
-   * `../inbound.ts` cruza a sessão resolvida pelo token. Se o que a tela grava
-   * como `uazapi_instance_id` vier de um campo digitado pelo operador (nome
-   * escolhido por ele, por exemplo) em vez desta resposta, o cruzamento
-   * reprovaria TODO webhook legítimo — id interno é diferente de nome.
+   * ⚠️ O UAZAPI expõe DOIS identificadores por instância: `instance.id`
+   * (interno, formato `r<hex>`) e `instance.name` (curto, o que o operador vê
+   * no painel). Medido em produção (2026-08-13): o webhook desta instalação
+   * devolve `instanceName` — o MESMO valor de `instance.name` — e NUNCA o
+   * `id` interno. Guardar o `id` fazia `../inbound.ts` rejeitar todo webhook
+   * real como "instance_mismatch", porque o valor que chegava (`name`) nunca
+   * batia com o que estava gravado (`id`). É por isso que este campo lê
+   * `instance?.name`, não `instance?.id` — apesar do nome do campo aqui.
    */
   instanceId: string | null;
 }
@@ -128,7 +130,13 @@ export const uazapiClient = {
       profileName: asString(instance?.profileName),
       profilePicUrl: asString(instance?.profilePicUrl),
       ownerJid: jid ? (asString(jid.user) ?? null) : null,
-      instanceId: asString(instance?.id),
+      // `instance.name`, NÃO `instance.id` — medido em homologação real
+      // (2026-08-13): o webhook desta instalação devolve `instanceName` (o
+      // MESMO valor de `instance.name` aqui), nunca `instance.id`. Guardar o
+      // `id` interno fazia todo webhook real ser rejeitado como
+      // "instance_mismatch" — os dois formatos coexistem na resposta, mas só
+      // um deles volta no payload que o cruzamento em `../inbound.ts` compara.
+      instanceId: asString(instance?.name),
     };
   },
 
