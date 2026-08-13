@@ -19,11 +19,15 @@ vi.mock("@/lib/channels/uazapi/credentials", () => ({
 }));
 
 const disconnectMock = vi.fn().mockResolvedValue(undefined);
+const getStatusMock = vi.fn();
 vi.mock("@/lib/channels/uazapi/client", () => ({
-  uazapiClient: { disconnect: (...args: unknown[]) => disconnectMock(...args) },
+  uazapiClient: {
+    disconnect: (...args: unknown[]) => disconnectMock(...args),
+    getStatus: (...args: unknown[]) => getStatusMock(...args),
+  },
 }));
 
-import { disconnectGateway, saveGatewaySession } from "@/lib/channels/gateway";
+import { disconnectGateway, saveGatewaySession, validateGatewayCredentials } from "@/lib/channels/gateway";
 
 const CREDS = { instanceId: "r183e2ef9597845", token: "tok", baseUrl: "https://x", source: "session" as const };
 
@@ -56,6 +60,7 @@ beforeEach(() => {
   ops = [];
   credsRef.current = CREDS;
   disconnectMock.mockClear();
+  getStatusMock.mockReset();
 });
 
 // 1 — criação inicial da sessão
@@ -131,5 +136,63 @@ describe("disconnectGateway — desconectar", () => {
     expect(ok).toBe(false);
     expect(disconnectMock).not.toHaveBeenCalled();
     expect(ops.some((o) => o.tabela === "channel_sessions")).toBe(false);
+  });
+});
+
+/**
+ * Homologação real, 2026-08-13: o `instance_id` digitado pelo operador no
+ * formulário é usado só para dar erro cedo (campo vazio) — nunca é enviado à
+ * API (o `token` sozinho autentica e endereça toda chamada, confirmado em
+ * `../uazapi/client.ts`). O que deve virar `uazapi_instance_id` gravado é o
+ * `instance.id` que a PRÓPRIA API devolve, porque é ESSE valor que chega de
+ * volta no campo `instance` do envelope de webhook — e é contra ele que o
+ * cruzamento de instância em `lib/channels/inbound.ts` compara. Se o digitado
+ * (nome escolhido pelo operador, por exemplo) divergir do `id` interno, TODO
+ * webhook legítimo seria rejeitado como "instance_mismatch".
+ */
+describe("validateGatewayCredentials — instância AUTORITATIVA vem da resposta, não do formulário", () => {
+  it("devolve o instance.id da API, mesmo que o operador tenha digitado outra coisa", async () => {
+    getStatusMock.mockResolvedValue({
+      status: "connected",
+      connected: true,
+      loggedIn: true,
+      qrcode: null,
+      paircode: null,
+      profileName: "Loja Teste",
+      profilePicUrl: null,
+      ownerJid: "5511999999999",
+      instanceId: "r183e2ef9597845",
+    });
+
+    const v = await validateGatewayCredentials({
+      baseUrl: "https://free.uazapi.com",
+      // O operador digitou um NOME/apelido — diferente do id interno.
+      instanceId: "minha-instancia-apelido",
+      token: "tok_abc",
+    });
+
+    expect(v).toMatchObject({ ok: true, instanceId: "r183e2ef9597845" });
+  });
+
+  it("resposta sem id — instanceId vem null, o chamador decide o fallback", async () => {
+    getStatusMock.mockResolvedValue({
+      status: "connected",
+      connected: true,
+      loggedIn: true,
+      qrcode: null,
+      paircode: null,
+      profileName: null,
+      profilePicUrl: null,
+      ownerJid: null,
+      instanceId: null,
+    });
+
+    const v = await validateGatewayCredentials({
+      baseUrl: "https://free.uazapi.com",
+      instanceId: "digitado",
+      token: "tok_abc",
+    });
+
+    expect(v).toMatchObject({ ok: true, instanceId: null });
   });
 });

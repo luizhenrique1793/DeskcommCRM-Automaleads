@@ -34,6 +34,17 @@ export interface UazapiInstanceStatus {
   profileName: string | null;
   profilePicUrl: string | null;
   ownerJid: string | null;
+  /**
+   * `instance.id` — o identificador AUTORITATIVO, gerado pelo próprio UAZAPI.
+   *
+   * Existe aqui porque o webhook manda de volta este MESMO valor no campo
+   * `instance` do envelope (`WebhookEvent.instance`), e é contra ele que
+   * `../inbound.ts` cruza a sessão resolvida pelo token. Se o que a tela grava
+   * como `uazapi_instance_id` vier de um campo digitado pelo operador (nome
+   * escolhido por ele, por exemplo) em vez desta resposta, o cruzamento
+   * reprovaria TODO webhook legítimo — id interno é diferente de nome.
+   */
+  instanceId: string | null;
 }
 
 export interface UazapiSendResult {
@@ -117,6 +128,7 @@ export const uazapiClient = {
       profileName: asString(instance?.profileName),
       profilePicUrl: asString(instance?.profilePicUrl),
       ownerJid: jid ? (asString(jid.user) ?? null) : null,
+      instanceId: asString(instance?.id),
     };
   },
 

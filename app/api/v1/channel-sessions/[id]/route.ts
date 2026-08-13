@@ -24,7 +24,9 @@ import { audit } from "@/lib/audit";
 import { ok, fail } from "@/lib/api/wrappers";
 import { loadAuthUser, resolveActiveOrg } from "@/lib/auth/server";
 import { requireRole } from "@/lib/auth/require-role";
+import { getAdapter, resolveSessionRef } from "@/lib/channels";
 import { CHANNEL_PROVIDER_WAHA } from "@/lib/channels/capabilities";
+import type { ChannelSessionRef } from "@/lib/channels/session-ref";
 import { isChannelStatus } from "@/lib/schemas/channels";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
@@ -134,7 +136,9 @@ export async function GET(
   const supabase = await createClient();
   const { data: session } = await supabase
     .from("channel_sessions")
-    .select("id, provider, waha_session_name, display_name, phone_number, status")
+    .select(
+      "id, provider, waha_session_name, meta_phone_number_id, zernio_account_id, uazapi_instance_id, display_name, phone_number, status",
+    )
     .eq("organization_id", activeOrg.orgId)
     .eq("id", id)
     .maybeSingle();
@@ -152,28 +156,62 @@ export async function GET(
   // é NULL nele por CHECK, e perguntar assim mesmo pediria `/api/sessions/null`.
   const nomeSessao =
     session.provider === CHANNEL_PROVIDER_WAHA ? session.waha_session_name : null;
-  if (!waha || !nomeSessao) {
-    // Nada a checar ao vivo (transporte fora do ar, ou canal que não vive nele):
-    // devolve o que está no DB, sinalizando que o estado não foi confirmado agora.
-    return ok(comImpacto({ ...session, waha_configured: false }), { requestId });
-  }
 
-  let liveStatus = session.status as string;
+  let liveStatus: string;
   let phoneNumber = session.phone_number as string | null;
-  try {
-    const remote = (await waha.getSessionQr(nomeSessao)) as {
-      status?: string;
-      me?: { id?: string; pushName?: string };
-    };
-    if (remote.status) liveStatus = remote.status;
-    // WAHA expõe o número (JID `<phone>@c.us`) quando a sessão está WORKING.
-    const jid = remote.me?.id;
-    if (jid && !phoneNumber) phoneNumber = jid.replace(/@.*/, "");
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : "unknown";
-    // 404 no WAHA = sessão não iniciada lá → considera STOPPED.
-    if (msg.includes("404")) liveStatus = "STOPPED";
-    // outros erros: mantém o status do DB (não sobrescreve com ruído transitório).
+
+  if (session.provider === CHANNEL_PROVIDER_WAHA) {
+    if (!waha || !nomeSessao) {
+      // Nada a checar ao vivo (transporte fora do ar, ou canal que não vive nele):
+      // devolve o que está no DB, sinalizando que o estado não foi confirmado agora.
+      return ok(comImpacto({ ...session, waha_configured: false }), { requestId });
+    }
+    liveStatus = session.status as string;
+    try {
+      const remote = (await waha.getSessionQr(nomeSessao)) as {
+        status?: string;
+        me?: { id?: string; pushName?: string };
+      };
+      if (remote.status) liveStatus = remote.status;
+      // WAHA expõe o número (JID `<phone>@c.us`) quando a sessão está WORKING.
+      const jid = remote.me?.id;
+      if (jid && !phoneNumber) phoneNumber = jid.replace(/@.*/, "");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "unknown";
+      // 404 no WAHA = sessão não iniciada lá → considera STOPPED.
+      if (msg.includes("404")) liveStatus = "STOPPED";
+      // outros erros: mantém o status do DB (não sobrescreve com ruído transitório).
+    }
+  } else {
+    // Qualquer OUTRO canal: pergunta ao ADAPTER, não a um transporte
+    // específico — o mesmo seam que `cron/channel-health` já usa para a
+    // varredura periódica. Antes deste bloco, esta rota só sabia perguntar ao
+    // WAHA, e todo outro provider (Meta Cloud, Zernio, UAZAPI) caía direto no
+    // "waha_configured: false" — devolvendo pra sempre o status congelado do
+    // banco, mesmo com a instância de fato conectada. É por isso que a aba
+    // "Números por QR" mostrava "Conectando…"/"Ainda não verificado" para uma
+    // instância UAZAPI já `connected` de verdade: a rota nunca perguntava.
+    const adapter = getAdapter(session.provider as never);
+    const sessionRef = adapter.checkHealth
+      ? resolveSessionRef(session as unknown as ChannelSessionRef)
+      : null;
+    if (!adapter.checkHealth || !sessionRef) {
+      return ok(comImpacto({ ...session, waha_configured: false }), { requestId });
+    }
+
+    liveStatus = session.status as string;
+    try {
+      // `checkHealth` já devolve vocabulário CANÔNICO (WORKING/SCAN_QR_CODE/
+      // STOPPED/FAILED) — cada adapter faz a própria tradução internamente
+      // (ver `mapUazapiHealthStatus` no caso do UAZAPI). Esta rota não
+      // traduz nada, só repassa.
+      const saude = await adapter.checkHealth({ sessionRef });
+      if (saude.reachable && saude.status) liveStatus = saude.status;
+      // Erro de rede / não alcançável: mantém o status do DB, mesmo cuidado
+      // do ramo WAHA — não sobrescreve com ruído transitório.
+    } catch {
+      // idem: mantém o que já está gravado.
+    }
   }
 
   // Sincroniza o DB: sempre carimba o health check; atualiza status/telefone só se válido.

@@ -11761,11 +11761,20 @@ create index if not exists meta_templates_sessao_idx
 --
 -- Alargamento puro: um CHECK que aceita MAIS valores não pode ser violado por
 -- linha que já passava pelo antigo, então não precisa de backfill antes.
+-- ---- e o quarto canal (migration 0157) ----
+-- Espelho idempotente da 0151: bloco único ampliado, não um segundo. Achado em
+-- homologação real: todo POST no webhook genérico do UAZAPI (real ou de teste)
+-- caía no catch de `abrirArquivoDoWebhook` com "violates check constraint
+-- webhook_events_log_provider_check" — silencioso (`logger.warn`, sem
+-- derrubar a ingestão), então a mensagem seguia processando normalmente, mas
+-- o arquivo do corpo cru — o único instrumento para investigar o que chegou —
+-- ficava vazio. Sem ele, esta própria investigação não teria como confirmar
+-- se o UAZAPI mandou algo.
 alter table public.webhook_events_log
   drop constraint if exists webhook_events_log_provider_check;
 alter table public.webhook_events_log
   add constraint webhook_events_log_provider_check check (provider in (
-    'waha', 'nuvemshop', 'generic', 'meta_cloud', 'zernio'
+    'waha', 'nuvemshop', 'generic', 'meta_cloud', 'zernio', 'uazapi'
   ));
 
 notify pgrst, 'reload schema';

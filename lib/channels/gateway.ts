@@ -38,13 +38,31 @@ export interface GatewayCredentialsInput {
 }
 
 export type GatewayValidation =
-  | { ok: true; profileName: string | null; ownerJid: string | null }
+  | {
+      ok: true;
+      profileName: string | null;
+      ownerJid: string | null;
+      /**
+       * O `instance.id` AUTORITATIVO devolvido pela própria API — não o que o
+       * operador digitou no formulário. É este valor, e só ele, que deve virar
+       * `uazapi_instance_id` gravado: é o mesmo valor que chega no campo
+       * `instance` do envelope de webhook, e é contra ELE que `../inbound.ts`
+       * cruza a sessão. `null` no caso (raro) de a resposta não trazer `id`.
+       */
+      instanceId: string | null;
+    }
   | { ok: false; reason: string };
 
 /**
  * A credencial presta? Chama `/instance/status` direto — é o único endpoint
  * que confirma token+id juntos SEM efeito colateral (não inicia conexão nova,
  * diferente de `/instance/connect`).
+ *
+ * `input.instanceId` aqui NUNCA é enviado à API (o `token` sozinho autentica
+ * e endereça a chamada — confirmado em `../uazapi/client.ts`): é só o valor
+ * que o operador digitou, usado para dar erro cedo se o campo vier vazio.
+ * Quem decide o `uazapi_instance_id` de verdade é a RESPOSTA, não o formulário
+ * — ver `instanceId` no retorno.
  */
 export async function validateGatewayCredentials(
   input: GatewayCredentialsInput,
@@ -67,7 +85,12 @@ export async function validateGatewayCredentials(
   }
   if (!status) return { ok: false, reason: "Token recusado pelo servidor." };
 
-  return { ok: true, profileName: status.profileName, ownerJid: status.ownerJid };
+  return {
+    ok: true,
+    profileName: status.profileName,
+    ownerJid: status.ownerJid,
+    instanceId: status.instanceId,
+  };
 }
 
 export interface GatewaySession {

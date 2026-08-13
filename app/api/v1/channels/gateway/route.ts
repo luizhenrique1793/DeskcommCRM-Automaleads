@@ -115,6 +115,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   });
   if (!v.ok) return fail("invalid_request", v.reason, 422, { requestId });
 
+  // O AUTORITATIVO é o que a própria API devolveu (`v.instanceId`), não o que
+  // o operador digitou — é este valor que chega de volta no campo `instance`
+  // do webhook, e o cruzamento de instância em `lib/channels/inbound.ts`
+  // compara contra ELE. Cair no que foi digitado é só rede de segurança para
+  // a resposta não trazer `id` (não deveria acontecer, mas não é motivo para
+  // recusar a conexão).
+  const instanceId = v.instanceId ?? parsed.data.instance_id;
+
   const admin = createAdminClient();
   const tokenCifrado = await encryptWebhookSecret(admin, parsed.data.token);
   const segredoWebhook = randomBytes(32).toString("hex");
@@ -134,7 +142,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const { error } = await saveGatewaySession(admin, {
     organizationId: g.orgId,
     existingId: existente?.id ?? null,
-    instanceId: parsed.data.instance_id,
+    instanceId,
     baseUrl: parsed.data.base_url.replace(/\/+$/, ""),
     tokenEncrypted: tokenCifrado,
     webhookPathToken: webhookToken,
@@ -150,8 +158,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // Resolve pelo instance_id GRAVADO (não pelo token ainda em memória): o
   // seam decide como buscar a credencial, a rota não monta o objeto sozinha.
   const webhookUrl = urlDoWebhook(req, webhookToken);
-  const webhookOk = await registerGatewayWebhook(admin, parsed.data.instance_id, webhookUrl);
-  await startGatewayConnection(admin, parsed.data.instance_id, parsed.data.phone ?? null);
+  const webhookOk = await registerGatewayWebhook(admin, instanceId, webhookUrl);
+  await startGatewayConnection(admin, instanceId, parsed.data.phone ?? null);
 
   return ok(
     {
