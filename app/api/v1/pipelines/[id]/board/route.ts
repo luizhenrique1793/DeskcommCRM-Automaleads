@@ -230,6 +230,62 @@ async function withScores(
   };
 }
 
+/**
+ * Anexa a conversa mais recente do contato — o atalho do quadro para o inbox.
+ *
+ * LEFT, como o score: lead sem contato (criado à mão, vindo de webhook) e
+ * contato sem conversa são estados normais, e sumir com esses cards do quadro
+ * seria esconder justamente os que ninguém atendeu ainda.
+ *
+ * A MAIS RECENTE por contato, não todas: o card mostra uma linha, e escolher na
+ * UI exigiria trazer o histórico inteiro de cada lead para descartar quase tudo.
+ *
+ * Ordena por `last_message_at` e fica com a primeira de cada contato — as
+ * conversas já vêm ordenadas, então o primeiro visto é o mais recente.
+ */
+async function withConversas(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  organizationId: string,
+  leads: Lead[],
+): Promise<{ leads: Lead[]; error: string | null }> {
+  const contactIds = [...new Set(leads.map((l) => l.contact_id).filter((c): c is string => !!c))];
+  if (contactIds.length === 0) return { leads, error: null };
+
+  const { data, error } = await supabase
+    .from("conversations")
+    .select("id, contact_id, last_message_preview, last_message_at, unread_count_for_assignee")
+    .eq("organization_id", organizationId)
+    .in("contact_id", contactIds)
+    .order("last_message_at", { ascending: false, nullsFirst: false });
+  if (error) return { leads, error: error.message };
+
+  const porContato = new Map<string, NonNullable<Lead["conversa"]>>();
+  for (const row of (data ?? []) as Array<{
+    id: string;
+    contact_id: string;
+    last_message_preview: string | null;
+    last_message_at: string | null;
+    unread_count_for_assignee: number | null;
+  }>) {
+    // Primeira vista vence: a consulta já veio ordenada por atividade.
+    if (porContato.has(row.contact_id)) continue;
+    porContato.set(row.contact_id, {
+      id: row.id,
+      preview: row.last_message_preview,
+      last_message_at: row.last_message_at,
+      unread: row.unread_count_for_assignee ?? 0,
+    });
+  }
+
+  return {
+    leads: leads.map((lead) => {
+      const conversa = lead.contact_id ? porContato.get(lead.contact_id) : undefined;
+      return conversa ? { ...lead, conversa } : lead;
+    }),
+    error: null,
+  };
+}
+
 async function withNextActions(
   supabase: Awaited<ReturnType<typeof createClient>>,
   organizationId: string,
@@ -360,10 +416,19 @@ export async function GET(_req: NextRequest, ctx: RouteCtx): Promise<Response> {
     return fail("internal_error", leadsComScore.error, 500, { requestId });
   }
 
+  const leadsComConversa = await withConversas(
+    supabase,
+    (pipeline as Pipeline).organization_id,
+    leadsComScore.leads,
+  );
+  if (leadsComConversa.error) {
+    return fail("internal_error", leadsComConversa.error, 500, { requestId });
+  }
+
   const board: BoardData = {
     pipeline: pipeline as Pipeline,
     stages: (stages ?? []) as Stage[],
-    leads: leadsComScore.leads,
+    leads: leadsComConversa.leads,
   };
 
   return ok(board, { requestId });

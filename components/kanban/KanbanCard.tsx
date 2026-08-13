@@ -7,6 +7,7 @@ import { resolveCardState, stageAgeLabel, type CardInput } from "@/lib/kanban/ca
 import { KanbanCardActions } from "./KanbanCardActions";
 import { NextActionSlot } from "./NextActionSlot";
 import { ReactivationSlot } from "./ReactivationSlot";
+import { ConversaSlot } from "./ConversaSlot";
 import { ScoreSlot } from "./ScoreSlot";
 import { OwnerBadge } from "./OwnerBadge";
 
@@ -213,6 +214,11 @@ export function KanbanCard({
               />
             )}
           </div>
+
+          {/* A última mensagem, com atalho para o inbox. Fica ANTES do rodapé
+              de dono/tempo porque é conteúdo do negócio, não metadado do card —
+              e some por inteiro quando não há conversa. */}
+          <ConversaSlot conversa={lead.conversa} />
 
           {/* ④ dono · ⑤ tempo no estágio */}
           <div className="mt-1 flex h-6 items-center justify-between gap-2">

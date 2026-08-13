@@ -7,9 +7,11 @@ import { randomUUID } from "node:crypto";
 import { type NextRequest } from "next/server";
 
 import { fail, ok } from "@/lib/api/wrappers";
+import { requireRole } from "@/lib/auth/require-role";
 import { loadAuthUser, resolveActiveOrg } from "@/lib/auth/server";
 import { extFromMime, MAX_MEDIA_BYTES } from "@/lib/messaging/media/types";
 import { validateOutboundMedia } from "@/lib/messaging/media/upload-validation";
+import { transcodificarNotaDeVoz } from "@/lib/messaging/media/voice-transcode";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
@@ -24,11 +26,14 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<Response> {
   const { id: conversationId } = await ctx.params;
   const supabase = await createClient();
 
-  const {
-    data: { user },
-    error: authErr,
-  } = await supabase.auth.getUser();
-  if (authErr || !user) return fail("unauthenticated", "Auth required.", 401, { requestId });
+  // spec 13 §4: escrita é agent+ (viewer é read-only). Esta rota era a ÚNICA de
+  // escrita em conversations/[id]/* sem o gate — e como a policy de SELECT deixa
+  // o viewer enxergar toda conversa da org, o papel mais fraco do tenant tinha
+  // escrita irrestrita no bucket (50 MB por arquivo, com service_role). A irmã
+  // claim/route.ts:35 é o modelo literal.
+  const authz = await requireRole("agent", { requestId, resource: "conversation_media" });
+  if (!authz.ok) return authz.response;
+  const user = authz.user;
   const authUser = await loadAuthUser();
   const activeOrg = authUser ? await resolveActiveOrg(authUser) : null;
   if (!activeOrg) return fail("no_active_org", "No active organization.", 403, { requestId });
@@ -64,12 +69,23 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<Response> {
     return fail(verdict.code, verdict.message, status, { requestId });
   }
 
-  const storagePath = `${activeOrg.orgId}/${conversationId}/out-${randomUUID()}.${extFromMime(mime)}`;
-  const buffer = Buffer.from(await file.arrayBuffer());
+  const bruto = Buffer.from(await file.arrayBuffer());
+
+  // Nota de voz gravada no browser sai em `webm` (o Chrome não grava ogg), e o
+  // canal oficial recusa depois de aceitar — `131053 Media upload error`, que
+  // culpa a URL quando o problema é o container. Converter AQUI faz todo canal
+  // receber um arquivo válido, e o mesmo áudio poder ser reenviado depois sem
+  // repetir o trabalho. Falha devolve o original: o canal que converte sozinho
+  // continua funcionando como sempre.
+  const audio = await transcodificarNotaDeVoz({ buffer: bruto, mime });
+  const mimeFinal = audio.mime;
+  const buffer = audio.buffer;
+
+  const storagePath = `${activeOrg.orgId}/${conversationId}/out-${randomUUID()}.${extFromMime(mimeFinal)}`;
   const admin = createAdminClient();
   const { error: upErr } = await admin.storage
     .from("whatsapp-media")
-    .upload(storagePath, buffer, { contentType: mime, upsert: false });
+    .upload(storagePath, buffer, { contentType: mimeFinal, upsert: false });
   if (upErr) {
     console.error("[conversations.media] upload failed", upErr.message);
     return fail("internal_error", "Erro ao subir o arquivo.", 500, { requestId });
@@ -78,8 +94,11 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<Response> {
   return ok(
     {
       storage_path: storagePath,
-      media_mime: mime,
-      media_size_bytes: file.size,
+      // O mime e o tamanho do arquivo QUE FOI GUARDADO, não os que chegaram.
+      // Devolver o original seria mandar o canal buscar um `webm` que já não
+      // existe — o mesmo defeito, um passo adiante.
+      media_mime: mimeFinal,
+      media_size_bytes: buffer.length,
       kind: verdict.kind,
     },
     { requestId },

@@ -106,14 +106,79 @@ describe("parse — o que ACEITA", () => {
   });
 });
 
+describe("mensagem de SAÍDA — enviada de fora do CRM", () => {
+  // A primeira versão descartava tudo que era `outgoing` para não duplicar os
+  // envios do próprio CRM. O efeito colateral: mensagem mandada do celular do
+  // operador, ou por outra plataforma na mesma conta, NUNCA aparecia — e o
+  // histórico do cliente ficava pela metade sem nada avisando. A duplicação já
+  // estava resolvida pelo unique de `external_id`.
+  const saida = (extra: Record<string, unknown> = {}) =>
+    payload(
+      {
+        event: "message.sent",
+        conversation: { id: "conv", participantId: "595985321822", participantName: "Cliente" },
+        ...extra,
+      },
+      {
+        direction: "outgoing",
+        // No payload REAL de saída o `sender` é a EMPRESA.
+        sender: { id: "1228579850334037", name: "MP wp", phoneNumber: "+1 939-230-1037" },
+      },
+    );
+
+  it("é aceita, com direção outbound", () => {
+    expect(parseZernioInbound(saida())?.direction).toBe("outbound");
+  });
+
+  it("o contato é o PARTICIPANTE, não o remetente — que na saída somos nós", () => {
+    // Usar o `sender` criaria um contato com o número da própria empresa, e
+    // toda conversa de saída viraria conversa com a gente mesmo.
+    const r = parseZernioInbound(saida());
+    expect(r?.identity.anchor).toEqual({ kind: "phone", value: "+595985321822" });
+    expect(r?.identity.phone).not.toBe("+1 939-230-1037");
+  });
+
+  it("normaliza o telefone do participante — senão o MESMO cliente vira dois contatos", () => {
+    // A entrada traz `+595991733685`; a conversa traz o MESMO número sem o `+`.
+    // Sem normalizar, uma âncora seria `phone:+595…` e a outra `phone:595…`.
+    const entrada = parseZernioInbound(
+      payload({}, { sender: { phoneNumber: "+595985321822", name: "Cliente" } }),
+    );
+    const saidaR = parseZernioInbound(saida());
+    expect(saidaR?.identity.anchor?.value).toBe(entrada?.identity.anchor?.value);
+    expect(saidaR?.identity.anchor?.value).toBe("+595985321822");
+  });
+});
+
+describe("eventos de DESFECHO", () => {
+  const status = (event: string, over: Record<string, unknown> = {}) =>
+    parseZernioInbound(payload({ event, ...over }, { direction: "outgoing" }));
+
+  it("delivered e read viram atualização, não mensagem nova", () => {
+    expect(status("message.delivered")).toMatchObject({ kind: "status", status: "delivered" });
+    expect(status("message.read")).toMatchObject({ kind: "status", status: "read" });
+  });
+
+  it("failed carrega a explicação da plataforma — é o que diz o que fazer", () => {
+    const r = status("message.failed", {
+      error: { code: 131047, title: "Re-engagement message", explanation: "A janela fechou." },
+    });
+    expect(r?.status).toBe("failed");
+    expect(r?.errorReason).toContain("131047");
+    expect(r?.errorReason).toContain("A janela fechou.");
+  });
+
+  it("message.sent é mensagem NOVA, não só desfecho — é o que faz o envio externo aparecer", () => {
+    expect(status("message.sent")?.kind).toBe("message");
+  });
+});
+
 describe("parse — o que RECUSA", () => {
   const recusa = (p: unknown) => expect(parseZernioInbound(p)).toBeNull();
 
-  it("outro evento", () => recusa(payload({ event: "post.published" })));
+  it("evento que não é de mensagem nem de desfecho", () => recusa(payload({ event: "post.published" })));
   it("outra plataforma — DM de outra rede não é conversa de WhatsApp", () =>
     recusa(payload({}, { platform: "instagram" })));
-  it("mensagem de SAÍDA — é o eco do nosso envio, e ingeri-lo duplicaria tudo", () =>
-    recusa(payload({}, { direction: "outgoing" })));
   it("sem conversationId — sem thread não há o que endereçar depois", () =>
     recusa(payload({}, { conversationId: null })));
   it("sem nenhum id de mensagem — não há chave de idempotência", () =>

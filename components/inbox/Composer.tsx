@@ -1,4 +1,5 @@
 "use client";
+import { useT } from "@/hooks/i18n/useT";
 import {
   forwardRef,
   useImperativeHandle,
@@ -32,14 +33,24 @@ interface Props {
   disabled?: boolean;
   /** Set true when contact is blocked / anonymized — explanation shown. */
   blockedReason?: string | null;
+  /**
+   * Janela de 24h fechada: barra a RESPOSTA, e só ela.
+   *
+   * Separado de `blockedReason` porque a nota interna nunca chega ao cliente —
+   * a regra da plataforma não a alcança, e barrá-la tira do atendente
+   * justamente o lugar onde ele registra por que a conversa esfriou. A primeira
+   * versão deste bloqueio usava `blockedReason` e levou a nota junto.
+   */
+  janelaFechada?: string | null;
   /** Nome do contato da conversa, para interpolar {{nome}}/{{primeiro_nome}} do template escolhido. */
   contactName?: string | null;
 }
 
 export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
-  { conversationId, disabled, blockedReason, contactName },
+  { conversationId, disabled, blockedReason, janelaFechada, contactName },
   ref,
 ) {
+  const t = useT();
   const [text, setText] = useState("");
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [menuDismissed, setMenuDismissed] = useState(false);
@@ -58,6 +69,10 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
 
   const isDisabled =
     disabled || !!blockedReason || send.isPending || upload.isPending || createNote.isPending;
+  // A janela só alcança o que SAI. Em modo nota o composer segue liberado: a
+  // nota interna nunca chega ao cliente, e é onde o atendente registra por que
+  // a conversa esfriou — barrá-la tira exatamente o que ainda dá para fazer.
+  const respostaBarrada = isDisabled || (mode === "reply" && !!janelaFechada);
 
   function autoresize() {
     const ta = taRef.current;
@@ -68,7 +83,7 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
 
   function handleSubmit() {
     const body = text.trim();
-    if (!body || isDisabled) return;
+    if (!body || (mode === "note" ? isDisabled : respostaBarrada)) return;
     if (mode === "note") {
       createNote.mutate(
         { conversation_id: conversationId, body },
@@ -128,7 +143,7 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
    * Ctrl+V precisa continuar sendo o Ctrl+V de sempre.
    */
   function onPaste(e: ClipboardEvent<HTMLTextAreaElement>) {
-    if (mode !== "reply" || isDisabled || pendingFile) return;
+    if (mode !== "reply" || respostaBarrada || pendingFile) return;
     const imagem = imagemDoClipboard(e.clipboardData, new Date());
     if (!imagem) return; // colagem de texto segue o caminho normal do browser
     e.preventDefault();
@@ -181,7 +196,7 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
                 : "text-muted-foreground hover:bg-muted",
             )}
           >
-            Responder
+            {t("Responder")}
           </button>
           <button
             type="button"
@@ -193,11 +208,11 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
                 : "text-muted-foreground hover:bg-muted",
             )}
           >
-            Nota interna
+            {t("Nota interna")}
           </button>
         </div>
         <div className="flex items-end gap-2">
-          {mode === "reply" && <AttachMenu disabled={isDisabled} onPick={setPendingFile} />}
+          {mode === "reply" && <AttachMenu disabled={respostaBarrada} onPick={setPendingFile} />}
           {mode === "reply" && (
             <DraftReplyButton conversationId={conversationId} disabled={isDisabled} onDraft={applyDraft} />
           )}
@@ -242,7 +257,7 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
             // uma nota interna precisa saber que ela não vai para o cliente, e
             // essa informação não pode depender de abrir um diálogo.
             placeholder={
-              mode === "note" ? "Escreva uma nota interna… (só o time vê)" : "Escreva uma mensagem…"
+              mode === "note" ? t("Escreva uma nota interna… (só o time vê)") : t("Escreva uma mensagem…")
             }
             title={
               mode === "note"
@@ -253,7 +268,7 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
               "min-h-9 max-h-40 flex-1 resize-none rounded-md border border-input bg-background px-3 py-2 text-sm",
               "placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring",
             )}
-            disabled={isDisabled}
+            disabled={mode === "note" ? isDisabled : respostaBarrada}
             aria-label="Mensagem"
           />
           {text.trim() || mode === "note" ? (
@@ -262,13 +277,13 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
               size="icon"
               className="h-9 w-9 shrink-0"
               onClick={handleSubmit}
-              disabled={isDisabled || !text.trim()}
+              disabled={(mode === "note" ? isDisabled : respostaBarrada) || !text.trim()}
               aria-label="Enviar"
             >
               <PaperPlaneTilt size={16} weight="fill" aria-hidden />
             </Button>
           ) : (
-            <AudioRecorder conversationId={conversationId} disabled={isDisabled} />
+            <AudioRecorder conversationId={conversationId} disabled={respostaBarrada} />
           )}
         </div>
       </div>

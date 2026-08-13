@@ -14,6 +14,9 @@ import {
   ImpersonateBanner,
   type ImpersonatingInfo,
 } from "@/components/app/ImpersonateBanner";
+import { ConexaoCaidaBanner } from "@/components/app/ConexaoCaidaBanner";
+import { IdiomaProvider } from "@/lib/i18n/IdiomaProvider";
+import { listarConexoesCaidas, type ConexaoCaida } from "@/lib/channels/health";
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const user = await loadAuthUser();
@@ -38,6 +41,15 @@ export default async function AppLayout({ children }: { children: React.ReactNod
       ?.visibility_mode;
     activeOrg = { ...activeOrg, visibility_mode: mode ?? DEFAULT_VISIBILITY_MODE };
   }
+
+  // A conexão caiu? A consulta mora no seam (`lib/channels/health`), não aqui:
+  // tela que monta o select de `channel_sessions` à mão foi o que deixou três
+  // seletores oferecendo canal arquivado, e o invariante `canais-selecionaveis`
+  // existe por causa disso. De quebra, o filtro de estados fica LITERALMENTE o
+  // mesmo que decide o aviso da Central — duas listas divergiriam com o tempo.
+  const conexoesCaidas: ConexaoCaida[] = activeOrg
+    ? await listarConexoesCaidas(createAdminClient(), activeOrg.orgId)
+    : [];
 
   // Read sidebar collapsed state SSR to avoid flash.
   const store = await cookies();
@@ -72,8 +84,13 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   const shell = <AppShell sidebarCollapsed={collapsed}>{children}</AppShell>;
 
   return (
+    // O idioma envolve a árvore inteira e recebe o código PRONTO — ele não
+    // pergunta quem está logado. Ver `lib/i18n/IdiomaProvider`: foi o
+    // acoplamento com a autenticação que derrubou 32 casos.
+    <IdiomaProvider locale={user.locale}>
     <AuthProvider user={user} activeOrg={activeOrg}>
       <ImpersonateBanner impersonating={impersonating} />
+      <ConexaoCaidaBanner caidas={conexoesCaidas} />
       {needsMfaGate ? (
         // Gate always mounted for MFA-required roles; it latches the blocking
         // decision client-side so the enroll Server Action's revalidation
@@ -83,5 +100,6 @@ export default async function AppLayout({ children }: { children: React.ReactNod
         shell
       )}
     </AuthProvider>
+    </IdiomaProvider>
   );
 }

@@ -92,13 +92,27 @@ describe("resolveRecipient", () => {
     ).toBeNull();
   });
 
-  it("contato sem telefone devolve null em vez de string vazia", () => {
+  it("sem telefone devolve o id OPACO — dizer null é afirmar que não dá para falar com quem acabou de escrever", () => {
+    // Medido em produção: contato do rollout novo (BSUID, sem telefone) fazia o
+    // envio parar em `missing_phone_number`. Para este canal o telefone não
+    // endereça nada — quem endereça é a thread.
     expect(
       zernioAdapter.resolveRecipient({
         isGroup: false,
         groupChatId: null,
         phoneNumber: null,
-        waIdentity: "lid:12345",
+        waIdentity: "lid:PY.853283837822954",
+      }),
+    ).toBe("PY.853283837822954");
+  });
+
+  it("sem telefone E sem identidade devolve null — aí sim não há destinatário", () => {
+    expect(
+      zernioAdapter.resolveRecipient({
+        isGroup: false,
+        groupChatId: null,
+        phoneNumber: null,
+        waIdentity: null,
       }),
     ).toBeNull();
   });
@@ -172,17 +186,28 @@ describe("send — endereça pela THREAD, não pelo telefone", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("sem credencial é noop, não erro — canal não conectado", async () => {
+  it("sem credencial LANÇA — um `sent` sem id diria enviado para o que nunca saiu", async () => {
     credsRef.current = null;
-    const r = await zernioAdapter.send({
-      sessionRef: "x",
-      to: "y",
-      providerConversationId: THREAD,
-      kind: "text",
-      body: "z",
-    });
-    expect(r.externalId).toBeNull();
+    await expect(
+      zernioAdapter.send({
+        sessionRef: "x",
+        to: "y",
+        providerConversationId: THREAD,
+        kind: "text",
+        body: "z",
+      }),
+    ).rejects.toThrow(/zernio_not_configured/);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("isConfigured é SEMPRE true — a credencial vive na sessão, e isto é síncrono", async () => {
+    // Medido em produção: olhar só o env respondia "não configurado" para toda
+    // instalação que conectou pela tela, e o handler gravava `queued` sem nunca
+    // chamar `send`. A mensagem ficava parada, sem erro, com o canal ligado.
+    credsRef.current = null;
+    expect(zernioAdapter.isConfigured()).toBe(true);
+    credsRef.current = CREDS;
+    expect(zernioAdapter.isConfigured()).toBe(true);
   });
 });
 
@@ -275,5 +300,68 @@ describe("códigos que o handler grava", () => {
       sendFailed: "zernio_error",
       unknownError: "zernio_unknown",
     });
+  });
+});
+
+/**
+ * A MÍDIA RECEBIDA NÃO PODE LEVAR A CREDENCIAL PARA ONDE O PAYLOAD MANDAR.
+ *
+ * `fetchInboundMedia` busca o anexo pela URL que veio no payload do webhook, e
+ * manda a API key do tenant no `Authorization`. Sem guarda, isso é pior que o
+ * SSRF comum: além de fazer o servidor bater num endereço interno
+ * (`169.254.169.254` é o metadado de nuvem), ele ENTREGA a credencial ao host
+ * que o payload escolheu.
+ *
+ * O irmão WAHA resolve por construção — `lib/messaging/media/waha-source.ts`
+ * descarta host e porta do payload e reconstrói sobre `WAHA_API_BASE_URL`.
+ * Aqui não dá para fixar a base (o provedor pode servir mídia de outro host),
+ * então vale o par que o repo já usa em `lib/automation/actions/call-webhook.ts`.
+ *
+ * O que estes casos guardam é COMPORTAMENTO, não a presença do import: o
+ * critério é `fetch` NÃO ter sido chamado. Um guard que lance depois do fetch
+ * deixaria a credencial sair na mesma e ainda assim "passaria" num teste que
+ * só checasse a exceção.
+ */
+describe("fetchInboundMedia não busca onde o payload mandar", () => {
+  const PROIBIDAS = [
+    ["metadado de nuvem", "http://169.254.169.254/latest/meta-data/"],
+    ["loopback", "http://127.0.0.1:9000/interno"],
+    ["localhost por nome", "http://localhost:3000/interno"],
+    ["rede privada", "http://10.0.0.5/interno"],
+    ["literal IPv6", "http://[::1]:9000/interno"],
+    ["esquema que não é http(s)", "file:///etc/passwd"],
+  ] as const;
+
+  for (const [rotulo, url] of PROIBIDAS) {
+    it(`recusa ${rotulo} — e sem chamar fetch`, async () => {
+      credsRef.current = CREDS;
+      fetchMock.mockClear();
+      await expect(
+        zernioAdapter.fetchInboundMedia!({ sessionRef: CREDS.accountId, url }),
+      ).rejects.toThrow();
+      expect(
+        fetchMock,
+        "a credencial não pode sair: o guard tem de barrar ANTES do fetch",
+      ).not.toHaveBeenCalled();
+    });
+  }
+
+  it("deixa passar uma URL pública do provedor (guarda de vacuidade)", async () => {
+    // Sem este caso, um guard que recusasse TUDO deixaria os de cima verdes e
+    // quebraria a feature em silêncio.
+    credsRef.current = CREDS;
+    fetchMock.mockClear();
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      arrayBuffer: async () => new ArrayBuffer(4),
+      headers: new Headers({ "content-type": "image/png" }),
+    });
+    const r = await zernioAdapter.fetchInboundMedia!({
+      sessionRef: CREDS.accountId,
+      url: "https://zernio.com/api/v1/media/abc123",
+    });
+    expect(r.mime).toBe("image/png");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

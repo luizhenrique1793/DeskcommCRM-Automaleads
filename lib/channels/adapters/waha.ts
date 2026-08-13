@@ -5,11 +5,13 @@
  *
  * Nenhuma regra de negócio mora neste arquivo (ver `ChannelAdapter` em ../types).
  */
+import { fetchWahaMedia } from "@/lib/messaging/media/waha-source";
 import { getWahaClient } from "@/lib/waha/client";
 import { wahaSendPlanFor } from "@/lib/waha/media-send";
 import { bareWaMessageId, parseWahaMessageId } from "@/lib/waha/message-id";
 import { resolveWahaChatId } from "@/lib/waha/send";
-import type { ChannelAdapter, OutboundEnvelope, RecipientInput } from "../types";
+import type { FetchedMedia } from "@/lib/messaging/media/types";
+import type { ChannelAdapter, ChannelHealth, OutboundEnvelope, RecipientInput } from "../types";
 
 export const wahaAdapter: ChannelAdapter = {
   provider: "waha",
@@ -60,6 +62,68 @@ export const wahaAdapter: ChannelAdapter = {
     const client = getWahaClient();
     if (!client) return null;
     return client.getProfilePictureUrl(input.sessionRef, input.recipient);
+  },
+
+  /**
+   * `lid:123…` → `+5959…`, quando a tabela de tradução do canal já souber.
+   *
+   * Só para identidade OPACA: `phone:` já traz o número, e perguntar seria
+   * gastar uma chamada para receber de volta o que já se tem.
+   */
+  async resolvePhoneForIdentity(input: {
+    sessionRef: string;
+    identity: string;
+  }): Promise<string | null> {
+    if (!input.identity.startsWith("lid:")) return null;
+    const client = getWahaClient();
+    if (!client) return null;
+    return client.resolvePhoneForLid(input.sessionRef, input.identity.slice("lid:".length));
+  },
+
+  /**
+   * Pergunta ao transporte se a conexão está de pé.
+   *
+   * Três desfechos, e a diferença entre eles é o que o operador vai FAZER:
+   *
+   *   - respondeu com estado → é a verdade do momento;
+   *   - 404 → a sessão não existe mais lá dentro. Não é erro de rede: é a
+   *     resposta, e ela quer dizer parada. Sem este ramo o caso mais comum de
+   *     desconexão (o transporte esqueceu a sessão) viraria "não deu para
+   *     perguntar" e não alertaria ninguém;
+   *   - qualquer outro erro → NÃO sabemos. Devolver um estado aqui seria
+   *     inventar: uma oscilação de rede viraria "canal caído" e o operador
+   *     aprenderia a ignorar o aviso.
+   */
+  async checkHealth(input: { sessionRef: string }): Promise<ChannelHealth> {
+    const client = getWahaClient();
+    if (!client) return { reachable: false, status: null, detail: "transporte_nao_configurado" };
+    try {
+      const r = await client.getSessionQr(input.sessionRef);
+      return { reachable: true, status: r.status ?? null, detail: null };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "erro_desconhecido";
+      if (msg.includes("404")) return { reachable: true, status: "STOPPED", detail: null };
+      return { reachable: false, status: null, detail: msg.slice(0, 200) };
+    }
+  },
+
+  /**
+   * Baixa o anexo que o cliente mandou.
+   *
+   * Delega em `fetchWahaMedia`, que o worker de persistência chamava FIXO — era
+   * essa linha que fazia a mídia de qualquer outro canal virar linha sem bytes.
+   * O comportamento aqui é idêntico ao de antes: mesma função, mesmos
+   * argumentos. O que mudou é quem a escolhe.
+   */
+  async fetchInboundMedia(input: {
+    sessionRef: string;
+    url: string;
+    hintMime?: string | null;
+  }): Promise<FetchedMedia> {
+    // Devolve o objeto INTEIRO, sem remontar campo a campo: `FetchedMedia` é o
+    // mesmo tipo dos dois lados, e reconstruí-lo faria a próxima adição de
+    // campo sumir em silêncio aqui no meio.
+    return fetchWahaMedia(input.url, input.hintMime ?? null);
   },
 
   async send(envelope: OutboundEnvelope): Promise<{ externalId: string | null }> {

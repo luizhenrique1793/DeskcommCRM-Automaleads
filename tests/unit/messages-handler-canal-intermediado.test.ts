@@ -170,6 +170,21 @@ function makeSupabase(linhaCompleta: Row) {
           update: () => ({ eq: async () => ({ error: null }) }),
         };
       }
+      if (tabela === "meta_templates") {
+        // O espelho da definição aprovada, consultado pelo pré-voo que roda
+        // ANTES de escolher transporte. `null` = não espelhada, e o pré-voo
+        // deixa passar de propósito: recusar o que não se sabe barraria todo
+        // envio de modelo numa instalação cujo sync ainda não rodou.
+        //
+        // Encadeável sem limite: um dublê que fixa a quantidade de filtros faz
+        // o teste quebrar quando a consulta ganha um `eq` novo, com um erro que
+        // não fala do comportamento sob teste.
+        const cadeia: Record<string, unknown> = {
+          eq: () => cadeia,
+          maybeSingle: async () => ({ data: null, error: null }),
+        };
+        return { select: () => cadeia };
+      }
       if (tabela === "messages") {
         return {
           insert: (row: Row) => {
@@ -390,6 +405,37 @@ describe("nenhum desfecho diz `sent` sem nada ter saído", () => {
     expect(msg.status).toBe("queued");
     expect((msg.metadata as Record<string, unknown>).queued_reason).toBe("meta_not_configured");
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("o MODELO sai pelo canal da conversa — não pelo número da Meta", async () => {
+    // Medido antes deste caso: `_handler.ts` desviava `type:'template'` para
+    // `sendTemplateForSession`, que lê `META_PHONE_NUMBER_ID` e
+    // `META_SYSTEM_USER_TOKEN` do ambiente e fala com a Graph API. Com os dois
+    // canais configurados, o modelo de uma conversa do canal intermediado saía
+    // pelo número da META, com o token da META.
+    //
+    // Isso não é "falha de envio": é a mensagem chegando ao cliente CERTO pelo
+    // número ERRADO. Ninguém percebe, porque ela sai.
+    //
+    // O caso afere o DOMÍNIO da chamada, que é a única evidência que separa os
+    // dois caminhos — nome de função em `grep` não separa.
+    vi.stubEnv("ZERNIO_API_KEY", "k");
+    vi.stubEnv("ZERNIO_ACCOUNT_ID", CONTA);
+    vi.stubEnv("META_PHONE_NUMBER_ID", "111");
+    vi.stubEnv("META_SYSTEM_USER_TOKEN", "tok-meta");
+    const fetchMock = respostaOk("wamid.TPL");
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { supabase } = makeSupabase(conversaCompleta({ providerConversationId: THREAD }));
+    await sendMessageHandler(
+      supabase,
+      ctx,
+      texto({ type: "template", body: undefined, template_name: "cuenta_activa", template_language: "es" }),
+    );
+
+    const urls = fetchMock.mock.calls.map((c) => String(c[0]));
+    expect(urls.join(" "), "o modelo saiu pela Graph API da Meta").not.toMatch(/graph\.facebook\.com/);
+    expect(urls.join(" ")).toMatch(/zernio/);
   });
 
   it("sem nenhuma credencial: `queued` com o motivo do canal, e nada pela rede", async () => {

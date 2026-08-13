@@ -50,7 +50,22 @@ export function verifyZernioSignature(
   return timingSafeEqual(a, b);
 }
 
+/** O que este evento pede que se faça com a mensagem. */
+export type ZernioEventKind =
+  /** Mensagem nova — do cliente ou nossa, vinda de fora do CRM. */
+  | "message"
+  /** Só mudou o desfecho de uma mensagem que já existe. */
+  | "status";
+
 export interface ZernioInboundMessage {
+  /** De quem partiu. `outbound` cobre envio feito FORA do CRM. */
+  direction: "inbound" | "outbound";
+  /** `message` grava; `status` só atualiza o desfecho do que já existe. */
+  kind: ZernioEventKind;
+  /** Desfecho declarado pelo evento de status (`sent`/`delivered`/`read`/`failed`). */
+  status?: "sent" | "delivered" | "read" | "failed";
+  /** Motivo, quando o evento é de falha — é o que explica ao operador. */
+  errorReason?: string | null;
   /** Id da THREAD no provider — o que endereça o envio livre depois. */
   conversationId: string;
   /** Id da mensagem na plataforma (wamid) — chave de idempotência. */
@@ -118,10 +133,62 @@ export function resolveZernioIdentity(sender: Bruto | null): ZernioIdentity {
  * provider parar de reenviar, e um evento que não nos interessa não é falha.
  * Lançar faria o provider retentar para sempre um payload que nunca vai servir.
  */
+/** Eventos que criam mensagem, e eventos que só mudam o desfecho dela. */
+const EVENTOS_DE_MENSAGEM = new Set(["message.received", "message.sent"]);
+const EVENTOS_DE_STATUS: Record<string, "delivered" | "read" | "failed"> = {
+  "message.delivered": "delivered",
+  "message.read": "read",
+  "message.failed": "failed",
+};
+
+/**
+ * O autor editou ou apagou a mensagem no aplicativo.
+ *
+ * Separado de `parseZernioInbound` porque o efeito é outro: aquele CRIA linha
+ * (e conversa, e contato); este só corrige uma que já existe. Misturá-los faria
+ * uma edição de mensagem que nunca chegou criar uma conversa do nada, com um
+ * texto sem contexto nenhum antes dele.
+ *
+ * `null` quando não é dos nossos — a rota responde 200 e o provider para de
+ * reenviar, que é o certo para um evento que nunca vai nos servir.
+ */
+export interface ZernioEdicao {
+  externalId: string;
+  /** `edited` traz corpo novo; `deleted` não tem corpo a trazer. */
+  tipo: "edited" | "deleted";
+  body: string | null;
+}
+
+export function parseZernioEdicao(payload: unknown): ZernioEdicao | null {
+  const p = obj(payload);
+  if (!p) return null;
+
+  const evento = str(p.event) ?? "";
+  if (evento !== "message.edited" && evento !== "message.deleted") return null;
+
+  const m = obj(p.message);
+  if (!m) return null;
+  // Mesma regra do parser de mensagem: a conta serve outras plataformas, e uma
+  // edição de DM de outra rede não tem linha nossa para corrigir.
+  if (str(m.platform) !== "whatsapp") return null;
+
+  const externalId = str(m.platformMessageId) ?? str(m.id);
+  if (!externalId) return null;
+
+  return {
+    externalId,
+    tipo: evento === "message.edited" ? "edited" : "deleted",
+    body: str(m.content) ?? str(m.text) ?? str(m.body),
+  };
+}
+
 export function parseZernioInbound(payload: unknown): ZernioInboundMessage | null {
   const p = obj(payload);
   if (!p) return null;
-  if (str(p.event) !== "message.received") return null;
+
+  const evento = str(p.event) ?? "";
+  const deStatus = EVENTOS_DE_STATUS[evento];
+  if (!EVENTOS_DE_MENSAGEM.has(evento) && !deStatus) return null;
 
   const m = obj(p.message);
   if (!m) return null;
@@ -129,10 +196,6 @@ export function parseZernioInbound(payload: unknown): ZernioInboundMessage | nul
   // Só WhatsApp: a mesma conta serve outras plataformas, e um DM de outra rede
   // entrando como conversa de WhatsApp é pior que ignorá-lo.
   if (str(m.platform) !== "whatsapp") return null;
-
-  // `outgoing` é o eco do nosso próprio envio. Ingerir isso duplicaria toda
-  // mensagem enviada — o mesmo defeito que o canal por QR já teve.
-  if (str(m.direction) === "outgoing") return null;
 
   const conversationId = str(m.conversationId);
   const externalId = str(m.platformMessageId) ?? str(m.id);
@@ -145,15 +208,60 @@ export function parseZernioInbound(payload: unknown): ZernioInboundMessage | nul
     .map((a) => ({ type: str(a.type) ?? "file", url: str(a.url) ?? "" }))
     .filter((a) => a.url.length > 0);
 
+  const saida = str(m.direction) === "outgoing";
+
   return {
+    direction: saida ? "outbound" : "inbound",
+    kind: deStatus ? "status" : "message",
+    ...(deStatus ? { status: deStatus } : evento === "message.sent" ? { status: "sent" as const } : {}),
+    errorReason: deStatus === "failed" ? explicacaoDoErro(obj(p.error)) : null,
     conversationId,
     externalId,
     accountId: str(obj(p.account)?.id) ?? str(obj(p.account)?.accountId) ?? str(p.accountId),
     text: str(m.text),
     attachments,
     sentAt: str(m.sentAt),
-    identity: resolveZernioIdentity(obj(m.sender)),
+    // ─── De quem é o CONTATO, e por que depende da direção ─────────────────
+    //
+    // Numa mensagem de SAÍDA o `sender` somos NÓS — medido no payload real, ele
+    // traz o número da empresa. Usá-lo criaria um contato com o próprio número
+    // do negócio, e toda conversa de saída viraria uma conversa com a gente
+    // mesmo. Quem está do outro lado está em `conversation.participantId`.
+    identity: saida
+      ? resolveZernioIdentity(participanteDaConversa(obj(p.conversation)))
+      : resolveZernioIdentity(obj(m.sender)),
   };
+}
+
+/** O outro lado da conversa, na forma que `resolveZernioIdentity` entende. */
+function participanteDaConversa(c: Bruto | null): Bruto | null {
+  if (!c) return null;
+  const id = str(c.participantId);
+  if (!id) return null;
+  // O provider entrega o telefone SEM `+` neste campo (medido: `595985321822`).
+  // Normalizar aqui mantém a âncora idêntica à do caminho de entrada — sem
+  // isso o MESMO cliente viraria dois contatos, um por direção.
+  const digitos = id.replace(/\D/g, "");
+  return {
+    phoneNumber: digitos.length >= 8 ? `+${digitos}` : null,
+    name: str(c.participantName),
+  };
+}
+
+/**
+ * A explicação da plataforma, que é o que diz ao operador o que fazer.
+ *
+ * O `code` chega como NÚMERO no payload real (`"code": 131047`), não string —
+ * medido nos logs de entrega. Tratá-lo só como texto o descartava em silêncio,
+ * e o operador via "Re-engagement message" sem o código que permite procurar o
+ * que fazer.
+ */
+function explicacaoDoErro(e: Bruto | null): string | null {
+  if (!e) return null;
+  const codigo =
+    typeof e.code === "number" ? String(e.code) : typeof e.code === "string" ? e.code : null;
+  const partes = [codigo, str(e.title), str(e.explanation)].filter(Boolean);
+  return partes.length > 0 ? partes.join(" — ") : null;
 }
 
 /**

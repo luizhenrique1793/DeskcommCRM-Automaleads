@@ -40,6 +40,12 @@
  * A fronteira é "não colado em alfanumérico" — deixa `_`, `/`, `.` e `-` serem
  * separadores de verdade (que `\b` não deixava) e continua ignorando `wahax` /
  * `xwaha`, onde `waha` é pedaço de outra palavra e não menção ao provider.
+ *
+ * O terceiro nome entrou JUNTO com o canal que ele nomeia. Um provider novo que
+ * a catraca não conhece é o mesmo furo da issue #118 numa grafia nova: o gate
+ * fica verde afirmando que a doutrina é respeitada enquanto o nome se espalha
+ * por rota, componente e cópia de tela. Provider novo = uma linha aqui, no
+ * mesmo commit.
  */
 const SEPARADO = /(?<![a-zA-Z0-9])(waha|meta_cloud|zernio|graph\.facebook\.com)(?![a-zA-Z0-9])/i;
 

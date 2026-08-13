@@ -12,11 +12,12 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 import { audit } from "@/lib/audit";
+import { sincronizarSaudeDaConexao } from "@/lib/channels/health";
+import { aplicarEfeitosPosEntrada } from "@/lib/channels/pos-entrada";
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { ackToStatus } from "@/lib/types/messaging";
 import { bareWaMessageId, chatIdFromWaMessageId } from "@/lib/waha/message-id";
 import { logger } from "@/lib/logger";
-import { garantirLeadDaConversa } from "@/lib/leads/nascimento-do-lead";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -156,7 +157,6 @@ async function avisarChatNaoReconhecido(
   }
 }
 
-const STOP_RX = /\b(STOP|PARAR|SAIR|UNSUBSCRIBE)\b/i;
 
 export function verifyHmacSha512(
   rawBody: string,
@@ -509,20 +509,6 @@ async function handleInbound(
 
   await markConversation(admin, session.organization_id, conversationId, "inbound", previewFromMessage(p), now);
 
-  if (p.body && STOP_RX.test(p.body)) {
-    await admin
-      .from("contacts")
-      .update({ is_blocked: true, blocked_reason: "stop_keyword", blocked_at: now })
-      .eq("id", contactId);
-    await audit({
-      action: "contact.blocked",
-      organizationId: session.organization_id,
-      resourceType: "contact",
-      requestId,
-      metadata: { reason: "stop_keyword", contact_id: contactId },
-    });
-  }
-
   await audit({
     action: "message.received",
     organizationId: session.organization_id,
@@ -531,84 +517,51 @@ async function handleInbound(
     metadata: { conversation_id: conversationId, type: p.type, external_id: p.id },
   });
 
-  // ── A CONVERSA VIRA LEAD (spec 17) ──────────────────────────────────────────
+  // ── OS EFEITOS DE NEGÓCIO, agora ATRÁS DO SEAM ──────────────────────────────
   //
-  // DEPOIS do STOP acima, de propósito: quem acabou de pedir para sair não vira
-  // oportunidade nova — a ordem aqui é o que garante isso, porque o bloqueio é
-  // gravado logo acima e a função relê o contato.
+  // Opt-out, nascimento do lead e despacho do agente moravam AQUI DENTRO, em
+  // linha. Enquanto este era o único canal isso não incomodava; quando entrou o
+  // número oficial, ele passou a gravar a mensagem e não fazer nenhum dos três —
+  // sem erro e sem log. Medido: 806 despachos deste lado, 0 do outro.
   //
-  // ANTES do dispatcher abaixo, também de propósito: o turno do agente resolve o
-  // lead ativo do contato, e criar depois faria o primeiro turno rodar sem lead —
-  // exatamente o buraco que esta peça existe para fechar.
-  //
-  // Fire-and-forget: o CRM não pode derrubar a ingestão de uma mensagem de
-  // cliente. Falha vira log, e a mensagem entra do mesmo jeito.
-  try {
-    const nascimento = await garantirLeadDaConversa(admin, {
-      organizationId: session.organization_id,
-      contactId,
-      conversationId,
-      nomeDoContato: notifyNameOf(p),
-    });
-    // Os dois desfechos são registrados. Sem a linha do "não criou", o silêncio
-    // de "já existia" e o de "a organização não tem funil configurado" têm a
-    // mesma cara — e o segundo é falha de configuração que alguém precisa ver.
-    logger.info(
-      nascimento.criado ? "waha.ingest: lead criado da conversa" : "waha.ingest: lead nao criado",
-      {
-        organization_id: session.organization_id,
-        conversation_id: conversationId,
-        ...(nascimento.criado ? { lead_id: nascimento.leadId } : { motivo: nascimento.motivo }),
-      },
-    );
-  } catch (err) {
-    logger.error("waha.ingest: nascimento do lead falhou (a mensagem entra assim mesmo)", {
-      organization_id: session.organization_id,
-      conversation_id: conversationId,
-      error: err instanceof Error ? err.message.slice(0, 120) : "unknown",
-    });
-  }
+  // A ordem dos três é regra de negócio e está documentada em
+  // `lib/channels/pos-entrada.ts`, junto com o motivo de cada posição. O
+  // comportamento aqui é o MESMO de antes, campo a campo — o que mudou é quem o
+  // executa.
+  await aplicarEfeitosPosEntrada(admin, {
+    organizationId: session.organization_id,
+    contactId,
+    conversationId,
+    messageId: insertedMessage?.id ?? null,
+    channelSessionId: session.id,
+    texto: p.body ?? null,
+    nomeDoContato: notifyNameOf(p),
+    requestId,
+    origem: "waha_webhook",
+  });
 
-  // Dispara o agent-dispatcher worker (fire-and-forget; falha não quebra o 200).
+  // ── POR QUE NÃO SE EMITE `message.received` AQUI ────────────────────────────
+  //
+  // Porque o BANCO já emite. O gatilho `trg_messages_emit_event` roda AFTER
+  // INSERT em `messages`, sem filtrar canal, e chama `fn_emit_message_event`.
+  // Esta função emitia a SEGUNDA cópia — só neste canal.
+  //
+  // Medido em produção antes de sair: 805 mensagens com DOIS eventos deste lado
+  // e 30 com UM do outro. Os quatro consumidores registrados rodavam nas duas
+  // linhas, então cada mensagem daqui era classificada duas vezes pelo modelo de
+  // sentimento (duas chamadas pagas), a automação do usuário disparava duas
+  // vezes, e a chave de idempotência do follow-up não protegia porque inclui o
+  // id da LINHA de evento — que é diferente nas duas.
+  //
+  // O critério de aceite escrito em `docs/stories/epics/EPIC-03-inbox-messaging.md`
+  // já dizia "2 events 'message.received'? NÃO — só 1". O duplicado gêmeo, o de
+  // leads, foi aposentado na migration 0043; este passou despercebido porque a
+  // guarda de `entity_kind` não separa os dois emissores (ambos usam "message").
+  //
+  // Quem precisar do preview do corpo: ele está na própria linha de `messages`,
+  // alcançável pelo `message_id` que o gatilho manda.
   if (insertedMessage?.id) {
     const inboundMessageId = insertedMessage.id;
-    admin
-      .rpc("emit_event" as never, {
-        p_event_type: "ai_agent.dispatch_requested",
-        p_entity_kind: "message",
-        p_entity_id: inboundMessageId,
-        p_payload: {
-          organization_id: session.organization_id,
-          conversation_id: conversationId,
-          contact_id: contactId,
-          channel_session_id: session.id,
-          inbound_message_id: inboundMessageId,
-        },
-        p_metadata: { source: "waha_webhook", request_id: requestId },
-        p_organization_id: session.organization_id,
-      } as never)
-      .then(({ error }) => {
-        if (error) console.error("[waha.ingest] emit dispatch_requested failed", error.message);
-      });
-
-    admin
-      .rpc("emit_event" as never, {
-        p_event_type: "message.received",
-        p_entity_kind: "message",
-        p_entity_id: inboundMessageId,
-        p_payload: {
-          conversation_id: conversationId,
-          contact_id: contactId,
-          channel_session_id: session.id,
-          body_preview: (p.body ?? "").slice(0, 280),
-        },
-        p_metadata: { source: "waha_webhook", request_id: requestId },
-        p_organization_id: session.organization_id,
-      } as never)
-      .then(({ error }) => {
-        if (error) console.error("[waha.ingest] emit message.received failed", error.message);
-      });
-
     if (mediaUrlOf(p)) {
       admin
         .rpc("emit_event" as never, {
@@ -826,6 +779,85 @@ async function handleSessionStatus(
     update.warmup_completed_at = now;
   }
   await admin.from("channel_sessions").update(update).eq("id", session.id);
+
+  // ─── E agora alguém precisa SABER ────────────────────────────────────────
+  //
+  // Até aqui esta função gravava o estado numa coluna e não contava a ninguém.
+  // Foi assim que uma desconexão real passou horas despercebida: o evento
+  // chegou, a coluna atualizou, e o dono só descobriu ao estranhar que ninguém
+  // escrevia. O estado certo no lugar que ninguém olha não vale nada.
+  //
+  // O apelido é buscado aqui, e não recebido: com dois números ligados, um aviso
+  // que não diz QUAL conexão caiu obriga o operador a adivinhar. É uma consulta
+  // a mais num evento raro — status muda algumas vezes por dia, não por minuto.
+  const { data: apelidoRow } = await admin
+    .from("channel_sessions")
+    .select("display_name, phone_number")
+    .eq("id", session.id)
+    .maybeSingle();
+
+  await sincronizarSaudeDaConexao(
+    admin,
+    { id: session.id, organization_id: session.organization_id, status },
+    // Veio do próprio transporte: se ele conseguiu nos contar, está alcançável.
+    { reachable: true, status, detail: null },
+    (apelidoRow?.display_name as string | null) ??
+      (apelidoRow?.phone_number as string | null) ??
+      "sem nome",
+  );
+}
+
+/**
+ * O autor editou a mensagem no aplicativo.
+ *
+ * O corpo é SOBRESCRITO, e não versionado: o que o CRM mostra tem que ser o que
+ * o cliente vê agora. Guardar as versões anteriores é outra feature (histórico
+ * de edição), com tela e retenção próprias — fazê-la pela metade acumularia
+ * dado pessoal num campo que ninguém mostra e que a anonimização não conhece.
+ *
+ * `editedMessageId` é o id da mensagem ORIGINAL; o `id` do payload é o do
+ * evento de edição. Casar pelo `id` não acharia nada — e o silêncio pareceria
+ * "funcionou", que é exatamente o modo de falha que este arquivo já pagou caro
+ * em outros lugares.
+ */
+async function handleMessageEdited(
+  admin: Admin,
+  session: Session,
+  p: WahaPayload & { editedMessageId?: string },
+): Promise<void> {
+  const alvo = bareWaMessageId(p.editedMessageId ?? "");
+  const corpo = typeof p.body === "string" ? p.body : null;
+  if (!alvo || corpo === null) return;
+
+  await admin
+    .from("messages")
+    .update({ body: corpo, edited_at: new Date().toISOString() })
+    .eq("organization_id", session.organization_id)
+    .eq("external_id", alvo);
+}
+
+/**
+ * O autor apagou a mensagem ("apagar para todos").
+ *
+ * A linha NÃO é removida: sumir com ela apagaria o contexto das vizinhas — uma
+ * resposta passaria a responder ao nada — e o histórico de quem atendeu. O
+ * corpo também não é limpo aqui: quem decide o que mostrar é a tela, e apagar o
+ * texto no banco impediria o próprio atendente de entender, depois, o que tinha
+ * sido combinado antes do arrependimento.
+ */
+async function handleMessageRevoked(
+  admin: Admin,
+  session: Session,
+  p: WahaPayload & { revokedMessageId?: string },
+): Promise<void> {
+  const alvo = bareWaMessageId(p.revokedMessageId ?? "");
+  if (!alvo) return;
+
+  await admin
+    .from("messages")
+    .update({ revoked_at: new Date().toISOString() })
+    .eq("organization_id", session.organization_id)
+    .eq("external_id", alvo);
 }
 
 /**
@@ -849,6 +881,10 @@ export async function dispatchWahaEvent(
     }
   } else if (eventType === "message.ack") {
     await handleAck(admin, session, payload);
+  } else if (eventType === "message.edited") {
+    await handleMessageEdited(admin, session, payload);
+  } else if (eventType === "message.revoked") {
+    await handleMessageRevoked(admin, session, payload);
   } else if (eventType === "session.status" || eventType === "state.change") {
     await handleSessionStatus(admin, session, payload);
   }

@@ -12,6 +12,18 @@ x-logging: &default-logging
 
 services:
   app:
+    # Teto de memória — 335 MiB de pico MEDIDO nesta VPS.
+    #
+    # Sem ele o contêiner é ilimitado, e numa VPS de 3,8 GB isso não é teoria:
+    # um contêiner ALHEIO (agente da hospedagem, fora deste compose) registrou
+    # pico de 3.068 MiB no mesmo host. Quando a RAM acaba, o OOM killer escolhe
+    # a vítima por PONTUAÇÃO — quem cresceu mais rápido —, não por importância:
+    # o que morre pode ser o CRM.
+    #
+    # O teto não impede o pico legítimo; impede que UM serviço leve a máquina
+    # inteira. Estourá-lo mata só quem estourou, e o `restart: unless-stopped`
+    # o traz de volta — falha isolada em vez de queda geral.
+    mem_limit: 768m
     # Imagem GENÉRICA pré-buildada: o leigo só puxa (sobe em ~2min, roda em 2GB).
     # Os NEXT_PUBLIC_* reais vêm em RUNTIME (env_file abaixo) — o browser lê via
     # <PublicEnvScript/> e o servidor via lib/env.ts. Não precisa buildar no VPS.
@@ -44,6 +56,18 @@ services:
 
   # Worker 24/7 do agent-engine (fusão Vendaval) — cérebro do agente SDR.
   worker:
+    # Teto de memória — 230 MiB de pico MEDIDO nesta VPS.
+    #
+    # Sem ele o contêiner é ilimitado, e numa VPS de 3,8 GB isso não é teoria:
+    # um contêiner ALHEIO (agente da hospedagem, fora deste compose) registrou
+    # pico de 3.068 MiB no mesmo host. Quando a RAM acaba, o OOM killer escolhe
+    # a vítima por PONTUAÇÃO — quem cresceu mais rápido —, não por importância:
+    # o que morre pode ser o CRM.
+    #
+    # O teto não impede o pico legítimo; impede que UM serviço leve a máquina
+    # inteira. Estourá-lo mata só quem estourou, e o `restart: unless-stopped`
+    # o traz de volta — falha isolada em vez de queda geral.
+    mem_limit: 512m
     build:
       context: .
       dockerfile: Dockerfile.worker
@@ -61,6 +85,18 @@ services:
       retries: 3
       start_period: 20s
   waha:
+    # Teto de memória — 893 MiB de pico MEDIDO nesta VPS.
+    #
+    # Sem ele o contêiner é ilimitado, e numa VPS de 3,8 GB isso não é teoria:
+    # um contêiner ALHEIO (agente da hospedagem, fora deste compose) registrou
+    # pico de 3.068 MiB no mesmo host. Quando a RAM acaba, o OOM killer escolhe
+    # a vítima por PONTUAÇÃO — quem cresceu mais rápido —, não por importância:
+    # o que morre pode ser o CRM.
+    #
+    # O teto não impede o pico legítimo; impede que UM serviço leve a máquina
+    # inteira. Estourá-lo mata só quem estourou, e o `restart: unless-stopped`
+    # o traz de volta — falha isolada em vez de queda geral.
+    mem_limit: 1280m
     # Core grátis por padrão; troque para devlikeapro/waha-plus via WAHA_IMAGE se
     # precisar de multi-número/retry/S3 (licença paga).
     image: ${WAHA_IMAGE:-devlikeapro/waha}
@@ -70,7 +106,7 @@ services:
       # hash. Sem o prefixo ele compara literal → o app (que manda o plaintext) toma 401.
       WAHA_API_KEY: "sha512:${WAHA_API_KEY_SHA512}"
       WHATSAPP_HOOK_URL: ${WAHA_WEBHOOK_BASE_URL}/api/v1/webhooks/waha
-      WHATSAPP_HOOK_EVENTS: "message,message.any,message.ack,session.status,state.change"
+      WHATSAPP_HOOK_EVENTS: "message,message.any,message.ack,message.edited,message.revoked,session.status,state.change"
       WHATSAPP_HOOK_HMAC: ${WAHA_HMAC_SECRET}
       # WAHA lê WHATSAPP_DEFAULT_ENGINE (NÃO WAHA_DEFAULT_ENGINE — o nome errado
       # fazia cair no default WEBJS, engine com browser que trava/corrompe a sessão
@@ -135,10 +171,12 @@ services:
         */5 * * * * curl -fsS -m25 -H "Authorization: Bearer $$INTERNAL_SECRET" "http://app:3000/api/v1/cron/storage-redaction?limit=50" >/dev/null 2>&1
         */5 * * * * curl -fsS -m25 -H "Authorization: Bearer $$INTERNAL_SECRET" http://app:3000/api/v1/cron/snooze-watcher >/dev/null 2>&1
         */5 * * * * curl -fsS -m25 -H "Authorization: Bearer $$INTERNAL_SECRET" http://app:3000/api/v1/cron/attendant-heartbeat >/dev/null 2>&1
+        */5 * * * * curl -fsS -m45 -H "Authorization: Bearer $$INTERNAL_SECRET" http://app:3000/api/v1/cron/channel-health >/dev/null 2>&1
         */15 * * * * curl -fsS -m60 -H "Authorization: Bearer $$INTERNAL_SECRET" http://app:3000/api/v1/cron/risk-watcher >/dev/null 2>&1
         0 12 * * * curl -fsS -m60 -H "Authorization: Bearer $$INTERNAL_SECRET" http://app:3000/api/v1/cron/lgpd-sla-watcher >/dev/null 2>&1
         30 3 * * * curl -fsS -m120 -H "Authorization: Bearer $$INTERNAL_SECRET" http://app:3000/api/v1/cron/kb-conversations-batch >/dev/null 2>&1
         */10 * * * * curl -fsS -m60 -H "Authorization: Bearer $$INTERNAL_SECRET" http://app:3000/api/v1/cron/contact-avatars >/dev/null 2>&1
+        */30 * * * * curl -fsS -m60 -H "Authorization: Bearer $$INTERNAL_SECRET" http://app:3000/api/v1/cron/contact-phones >/dev/null 2>&1
         15 4 * * * curl -fsS -m60 -H "Authorization: Bearer $$INTERNAL_SECRET" http://app:3000/api/v1/cron/sync-model-catalog >/dev/null 2>&1
         17 * * * * curl -fsS -m60 -H "Authorization: Bearer $$INTERNAL_SECRET" http://app:3000/api/v1/cron/contact-proposals-watcher >/dev/null 2>&1
         * * * * * curl -fsS -m25 -H "Authorization: Bearer $$INTERNAL_SECRET" http://app:3000/api/v1/cron/pix-watcher >/dev/null 2>&1

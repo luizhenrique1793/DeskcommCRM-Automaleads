@@ -2,6 +2,8 @@
 import { useEffect, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useChannelSessions } from "@/hooks/channels/useChannelSessions";
+
 import { ConversationListItem } from "./ConversationListItem";
 import { EmptyInbox } from "@/components/empty";
 import {
@@ -29,6 +31,15 @@ export function ConversationList({
   clientFilter,
   onVisibleChange,
 }: Props) {
+  // Só mostra POR ONDE a conversa entrou quando há mais de um número. Com um
+  // só, o rótulo seria a mesma palavra em toda linha — ruído que ensina o olho
+  // a ignorar a área onde vivem os avisos que importam.
+  //
+  // `?? []` e não `undefined`: enquanto a lista de canais carrega, o certo é
+  // NÃO mostrar. Mostrar e sumir depois é pior que aparecer um instante tarde.
+  const canais = useChannelSessions().data ?? [];
+  const maisDeUmCanal = canais.length > 1;
+
   const q = useConversationsRealtime(filters, orgId);
 
   // Fila (G5-03): a lista já vem ordenada por tempo de espera (server), então a
@@ -93,6 +104,7 @@ export function ConversationList({
             isSelected={c.id === selectedId}
             onSelect={onSelect}
             queuePosition={isQueue ? i + 1 : undefined}
+            mostrarCanal={maisDeUmCanal}
           />
         ))}
         {q.hasNextPage && (

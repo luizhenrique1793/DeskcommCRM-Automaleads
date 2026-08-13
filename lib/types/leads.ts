@@ -64,6 +64,22 @@ export interface Lead {
    * e não INNER: um INNER apagaria do board justamente os leads sem sinal, que
    * são os que mais precisam de atenção humana.
    */
+  /**
+   * Derivado (não é coluna): a conversa mais recente do CONTATO deste negócio,
+   * com a última mensagem — o atalho do quadro para o inbox.
+   *
+   * Ausente é estado LEGÍTIMO e comum: lead criado à mão ou por webhook não tem
+   * contato, e contato sem conversa existe. O card precisa saber a diferença
+   * entre "não há conversa" e "ainda não carregou" — por isso `undefined` e não
+   * um objeto vazio.
+   */
+  conversa?: {
+    id: string;
+    /** O que a lista do inbox mostra: última mensagem, já truncada na origem. */
+    preview: string | null;
+    last_message_at: string | null;
+    unread: number;
+  } | null;
   score?: {
     probability: number;
     reason: string;

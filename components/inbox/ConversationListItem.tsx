@@ -1,7 +1,7 @@
 "use client";
 import { format, formatDistanceToNowStrict } from "date-fns";
 import { ptBR } from "date-fns/locale";
-import { Robot } from "@/lib/ui/icons";
+import { Phone, Robot } from "@/lib/ui/icons";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
@@ -14,6 +14,14 @@ interface Props {
   onSelect: (id: string) => void;
   /** Posição 1-based na fila (G5-03). Presente só na visão Fila. */
   queuePosition?: number;
+  /**
+   * Mostrar POR ONDE a conversa entrou.
+   *
+   * Só com mais de um número conectado. Com um só, o rótulo seria a mesma
+   * palavra em toda linha da lista — ruído que ensina o olho a ignorar a área
+   * onde vivem os avisos que importam (bloqueado, tags).
+   */
+  mostrarCanal?: boolean;
 }
 
 const STATUS_DOT: Record<string, string> = {
@@ -58,6 +66,7 @@ export function ConversationListItem({
   isSelected,
   onSelect,
   queuePosition,
+  mostrarCanal,
 }: Props) {
   const c = conversation.contacts ?? null;
   const displayName = rotuloDoContato(c);
@@ -71,6 +80,12 @@ export function ConversationListItem({
   const unread = conversation.unread_count_for_assignee ?? 0;
   const dot = STATUS_DOT[conversation.status] ?? STATUS_DOT.open;
   const isAi = conversation.status === "ai_handling";
+
+  // O número DA EMPRESA por onde esta conversa chegou — não o do cliente. Com
+  // dois canais é o que decide o tom da resposta e qual número a pessoa vê
+  // respondendo. Cai no nome do canal quando não há número (canal recém-criado).
+  const canal = conversation.channel_sessions ?? null;
+  const rotuloCanal = canal?.phone_number ?? canal?.display_name ?? null;
 
   return (
     <button
@@ -149,6 +164,16 @@ export function ConversationListItem({
           ))}
           {overflow > 0 && (
             <span className="text-[10px] text-muted-foreground">+{overflow}</span>
+          )}
+          {mostrarCanal && rotuloCanal && (
+            <Badge
+              variant="outline"
+              className="h-4 gap-1 px-1.5 text-[10px] font-normal text-muted-foreground"
+              title={`Entrou por ${rotuloCanal}`}
+            >
+              <Phone size={9} weight="regular" aria-hidden />
+              {rotuloCanal}
+            </Badge>
           )}
           {c?.is_blocked && (
             <Badge variant="destructive" className="h-4 px-1.5 text-[10px]">

@@ -4,6 +4,7 @@
 // do provider. Quando a Fase 3 absorver `lib/waha/`, este é o único ponteiro a
 // mudar de casa.
 import type { SendMessageInput } from "@/lib/schemas";
+import type { FetchedMedia } from "@/lib/messaging/media/types";
 import type { OutboundMedia } from "@/lib/waha/media-send";
 
 export type { OutboundMedia };
@@ -151,6 +152,19 @@ export interface ChannelAdapter {
   echoExternalIds?(input: { externalId: string; recipient: string }): string[];
 
   /**
+   * O telefone por trás de um identificador opaco, quando o canal souber.
+   *
+   * OPCIONAL: nem todo canal tem identidade opaca, e nem todo que tem sabe
+   * traduzir. `null` significa "ainda não sei" — não "não existe" —, então quem
+   * chama pode tentar de novo depois sem tratar como erro.
+   *
+   * Existe porque um contato identificado só por id opaco fica sem número na
+   * tela, e o atendente não sabe para quem está falando. Quem pergunta não
+   * precisa saber QUAL canal traduz: testa a presença do método.
+   */
+  resolvePhoneForIdentity?(input: { sessionRef: string; identity: string }): Promise<string | null>;
+
+  /**
    * Gestão das definições aprovadas — criar, editar, apagar.
    *
    * OPCIONAL pelo mesmo motivo dos dois métodos acima: nem todo canal expõe
@@ -164,6 +178,90 @@ export interface ChannelAdapter {
    * conhece `contract_hash` — isso é de quem sincroniza.
    */
   templates?: ChannelTemplateOps;
+
+  /**
+   * A conexão está de pé AGORA? Pergunta feita ao transporte, não ao banco.
+   *
+   * Existe porque o banco guarda o último estado que alguém CONTOU, e a falha
+   * que mais dói é justamente a que ninguém conta: o transporte cai, para de
+   * mandar evento, e a coluna segue dizendo `WORKING` para sempre. Silêncio e
+   * saúde ficam idênticos — foi assim que uma desconexão real passou horas
+   * despercebida, descoberta só quando o dono foi olhar por conta própria.
+   *
+   * `reachable: false` NÃO é o mesmo que o canal estar desconectado: significa
+   * que não deu para perguntar (transporte fora do ar, rede caída). A diferença
+   * importa porque a ação é outra — reiniciar o serviço, não escanear um QR — e
+   * porque sobrescrever o status com um erro de rede transitório trocaria uma
+   * informação boa por ruído.
+   *
+   * OPCIONAL como os demais: canal sem sessão para consultar não implementa, e
+   * quem chama testa a presença em vez de perguntar QUAL provider é.
+   */
+  checkHealth?(input: { sessionRef: string }): Promise<ChannelHealth>;
+
+  /**
+   * Envia uma DEFINIÇÃO APROVADA — o único caminho de volta quando a janela de
+   * 24h fechou.
+   *
+   * Existe porque o envio de template não passava pelo seam: `_handler.ts`
+   * desviava `type:'template'` para uma função que lê `META_PHONE_NUMBER_ID` e
+   * `META_SYSTEM_USER_TOKEN` do ambiente e fala com a Graph API. Medido: com os
+   * três canais configurados, template de QUALQUER um saía pelo número da Meta,
+   * com o token da Meta. Para o canal intermediado isso não é "falha de envio":
+   * é a mensagem saindo pelo número ERRADO, para o cliente certo.
+   *
+   * `providerConversationId` vem junto porque alguns canais abrem a conversa e
+   * mandam o template no MESMO pedido quando ainda não há thread — e reaproveitam
+   * a thread quando já há.
+   *
+   * OPCIONAL como os demais: quem não implementa continua pelo caminho antigo,
+   * e quem chama testa a presença em vez de perguntar QUAL provider é.
+   */
+  /**
+   * Baixa a mídia que o cliente MANDOU, para persistir os bytes.
+   *
+   * Existe porque `workers/media-persist-worker.ts` chamava `fetchWahaMedia`
+   * fixo: a mídia recebida por qualquer outro canal era gravada como linha SEM
+   * bytes, e o atendente via "imagem" sem imagem. Medido em produção: 423
+   * persistências no canal por QR, ZERO no intermediado.
+   *
+   * O worker não pode perguntar QUAL canal é — o invariante 1 proíbe, e o
+   * `lint:channels` reprova. Ele pede o adapter e chama isto.
+   *
+   * A URL é ponteiro para algo que EXPIRA e quase nunca é pública: um canal
+   * assina com Bearer, outro resolve host próprio. O que cada um faz é
+   * conhecimento do canal, não de quem persiste.
+   *
+   * OPCIONAL: canal sem mídia de entrada não implementa, e quem chama testa a
+   * presença em vez de perguntar quem é.
+   */
+  fetchInboundMedia?(input: {
+    sessionRef: string;
+    /** A URL como o provider a anunciou. Cada canal sabe o que fazer com ela. */
+    url: string;
+    /** Mime declarado no webhook, quando houve. Dica, não verdade. */
+    hintMime?: string | null;
+  }): Promise<FetchedMedia>;
+
+  sendTemplate?(input: {
+    sessionRef: string;
+    to: string;
+    providerConversationId?: string | null;
+    name: string;
+    language: string;
+    /** Valores dos `{{n}}`, na ordem em que a definição os declara. */
+    values: Record<string, string>;
+  }): Promise<{ externalId: string | null }>;
+}
+
+/** O que o transporte respondeu quando perguntamos se está de pé. */
+export interface ChannelHealth {
+  /** Deu para perguntar? `false` = transporte inalcançável, não canal caído. */
+  reachable: boolean;
+  /** Estado relatado pelo transporte; `null` quando não deu para perguntar. */
+  status: string | null;
+  /** Detalhe do erro, para o corpo do aviso. Nunca credencial. */
+  detail: string | null;
 }
 
 /** Definição aprovada, na forma NEUTRA — sem o vocabulário de nenhum provider. */

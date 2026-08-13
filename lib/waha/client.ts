@@ -154,6 +154,40 @@ export class WahaClient {
     }
   }
 
+  /**
+   * O telefone por trás de um id opaco (`<lid>@lid`), quando o canal souber.
+   *
+   * ─── Por que isto não é sempre possível ─────────────────────────────────
+   *
+   * O WhatsApp passou a identificar quem escreve por um id opaco em vez do
+   * número. O canal mantém uma tabela de tradução, mas ela só existe com o
+   * STORE habilitado na sessão (`noweb.store.enabled`) — sem isso, todo pedido
+   * volta 400 dizendo exatamente isso, medido numa instalação real.
+   *
+   * E mesmo com o store ligado a tabela é POVOADA POR ATIVIDADE: ela nasce
+   * vazia e enche conforme as conversas acontecem. `null` aqui significa "ainda
+   * não sei", não "não existe" — quem chama precisa poder tentar de novo depois
+   * sem tratar isto como erro.
+   */
+  async resolvePhoneForLid(session: string, lid: string): Promise<string | null> {
+    try {
+      const res = await fetch(
+        `${this.baseUrl}/api/${encodeURIComponent(session)}/lids/${encodeURIComponent(lid)}`,
+        { headers: { "X-Api-Key": this.apiKey } },
+      );
+      if (!res.ok) return null;
+      const body = (await res.json()) as { pn?: string | null };
+      // `595981402525@c.us` → `+595981402525`. O sufixo é endereçamento do
+      // canal, não parte do número, e guardá-lo faria a tela mostrar lixo.
+      const pn = body.pn;
+      if (!pn) return null;
+      const digitos = String(pn).split("@")[0]?.replace(/\D/g, "") ?? "";
+      return digitos.length >= 8 ? `+${digitos}` : null;
+    } catch {
+      return null;
+    }
+  }
+
   async sendMessage(session: string, chatId: string, text: string): Promise<unknown> {
     const res = await fetch(`${this.baseUrl}/api/sendText`, {
       method: "POST",
