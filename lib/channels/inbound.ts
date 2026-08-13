@@ -18,8 +18,18 @@
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { CHANNEL_PROVIDER_ZERNIO } from "./capabilities";
+import { logger } from "@/lib/logger";
+
+import { CHANNEL_PROVIDER_UAZAPI, CHANNEL_PROVIDER_ZERNIO } from "./capabilities";
 import { sincronizarSaudeDaConexao } from "./health";
+import { uazapiInstanceIdOfSession } from "./uazapi/credentials";
+import { ingestUazapiInbound } from "./uazapi/ingest";
+import {
+  parseUazapiConnection,
+  parseUazapiEnvelope,
+  parseUazapiMessage,
+  parseUazapiStatus,
+} from "./uazapi/webhook";
 import {
   atualizarEspelhoDoTemplate,
   avisoDoEvento,
@@ -59,7 +69,7 @@ export type InboundWebhookOutcome =
  * trabalho — e respondido sem nomear provider do lado de fora.
  */
 export function acceptsInboundWebhook(provider: string): boolean {
-  return provider === CHANNEL_PROVIDER_ZERNIO;
+  return provider === CHANNEL_PROVIDER_ZERNIO || provider === CHANNEL_PROVIDER_UAZAPI;
 }
 
 export async function handleInboundWebhook(
@@ -71,6 +81,8 @@ export async function handleInboundWebhook(
   switch (provider) {
     case CHANNEL_PROVIDER_ZERNIO:
       return zernioInbound(admin, input);
+    case CHANNEL_PROVIDER_UAZAPI:
+      return uazapiInbound(admin, input);
     default:
       // Token de um canal que não entra por aqui. É configuração trocada, não
       // ataque — mas processar seria ler o payload com o parser errado.
@@ -164,6 +176,83 @@ async function zernioInbound(
     organizationId: input.session.organization_id,
     channelSessionId: input.session.id,
     payload,
+  });
+  return { ok: true, body: { ...r } };
+}
+
+/**
+ * Sem verificação de assinatura: o UAZAPI não assina o corpo do webhook (ver
+ * cabeçalho de `./uazapi/webhook.ts`) — a segurança deste canal é só o
+ * `webhook_path_token` que já resolveu esta sessão exata antes de chegar
+ * aqui. `input.secret` fica sem uso de propósito, não por esquecimento.
+ *
+ * ─── O cruzamento de instância ───────────────────────────────────────────────
+ *
+ * O token já resolve a sessão CERTA — mas o campo `instance` do envelope
+ * (`WebhookEvent.instance` no OpenAPI 2.1.1) é uma segunda afirmação de QUEM
+ * mandou o evento, e comparar as duas é defesa em profundidade: um token
+ * vazado ou um servidor UAZAPI mal configurado servindo duas instâncias no
+ * mesmo endereço não teria mais nenhuma barreira sem isto.
+ *
+ * Regra de fallback, documentada aqui por ser a ÚNICA vez que esta decisão é
+ * tomada: a comparação só REJEITA quando os DOIS lados têm valor e DIVERGEM.
+ * Se o payload não trouxer `instance` (o schema o marca `required`, mas nada
+ * garante que toda instalação de UAZAPI honre isso) OU se a sessão não tiver
+ * `uazapi_instance_id` gravado (não deveria acontecer — a constraint do banco
+ * exige — mas um clone com dado velho é sempre possível), a checagem não roda
+ * e o evento segue pelo caminho normal. Recusar por um dado AUSENTE derrubaria
+ * mensagem legítima por um instrumento a menos, não por sinal de ataque.
+ */
+async function uazapiInbound(
+  admin: SupabaseClient,
+  input: InboundWebhookInput,
+): Promise<InboundWebhookOutcome> {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(input.rawBody);
+  } catch {
+    return { ok: false, code: "invalid_json", message: "invalid_json" };
+  }
+
+  const env = parseUazapiEnvelope(payload);
+  if (!env) return { ok: true, body: { status: "ignored", reason: "evento_sem_interesse" } };
+
+  if (env.instance) {
+    const instanciaDaSessao = await uazapiInstanceIdOfSession(admin, input.session.id);
+    if (instanciaDaSessao && env.instance !== instanciaDaSessao) {
+      // Diagnóstico SEM segredo: os dois lados são o `instance_id`, que é o
+      // ponteiro não-secreto (o token nunca chega até aqui). Não ingere, não
+      // cria contato, não mexe em `channel_session_health` — a resposta ao
+      // chamador não repete os ids, só o motivo genérico.
+      logger.warn("[uazapi] instance do envelope não bate com a sessão resolvida pelo token", {
+        channel_session_id: input.session.id,
+        instance_esperada: instanciaDaSessao,
+        instance_recebida: env.instance,
+      });
+      return { ok: false, code: "unauthorized", message: "instance_mismatch" };
+    }
+  }
+
+  const conexao = parseUazapiConnection(env);
+  if (conexao) {
+    const desfecho = await sincronizarSaudeDaConexao(
+      admin,
+      { id: input.session.id, organization_id: input.session.organization_id, status: conexao.status },
+      { reachable: true, status: conexao.status, detail: null },
+      input.session.display_name ?? input.session.phone_number ?? "sem nome",
+      "empurrao",
+    );
+    return { ok: true, body: { status: "conexao", desfecho } };
+  }
+
+  const status = parseUazapiStatus(env);
+  const msg = status ?? parseUazapiMessage(env);
+  if (!msg) return { ok: true, body: { status: "ignored", reason: "evento_sem_interesse" } };
+
+  const r = await ingestUazapiInbound(admin, {
+    organizationId: input.session.organization_id,
+    channelSessionId: input.session.id,
+    msg,
   });
   return { ok: true, body: { ...r } };
 }

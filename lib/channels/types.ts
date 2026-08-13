@@ -9,7 +9,7 @@ import type { OutboundMedia } from "@/lib/waha/media-send";
 
 export type { OutboundMedia };
 
-export type ChannelProvider = "waha" | "meta_cloud" | "zernio";
+export type ChannelProvider = "waha" | "meta_cloud" | "zernio" | "uazapi";
 
 export interface ChannelCapabilities {
   /** Pode enviar texto livre a qualquer momento? false = exige template fora da janela. */
@@ -37,6 +37,17 @@ export interface ChannelCapabilities {
   groups: "full" | "limited" | "none";
   /** Mensagem entregue gera custo → decisões de envio precisam considerar orçamento. */
   costPerMessage: boolean;
+  /**
+   * O canal expõe uma API para salvar o lead na AGENDA do WhatsApp (não no
+   * CRM — o contato já existe aqui; isto é o passo extra de "adicionar este
+   * número aos meus contatos do WhatsApp", que alguns provedores exigem para
+   * o freeform funcionar sem restrição).
+   *
+   * A feature pergunta esta capability (ou testa `!!adapter.saveContact`),
+   * nunca `provider === 'uazapi'` — é o mesmo padrão dos outros métodos
+   * opcionais de `ChannelAdapter`.
+   */
+  canSaveContact: boolean;
 }
 
 /**
@@ -242,6 +253,19 @@ export interface ChannelAdapter {
     /** Mime declarado no webhook, quando houve. Dica, não verdade. */
     hintMime?: string | null;
   }): Promise<FetchedMedia>;
+
+  /**
+   * Salva o contato na AGENDA do transporte (não no CRM — isto é feature de
+   * canal, não de contato). Ver `ChannelCapabilities.canSaveContact`.
+   *
+   * OPCIONAL como os demais métodos de canal: nem todo provider expõe isso, e
+   * quem chama testa a presença em vez de perguntar QUAL provider é.
+   */
+  saveContact?(input: {
+    sessionRef: string;
+    phoneNumber: string;
+    name: string;
+  }): Promise<{ ok: true } | { ok: false; reason: string }>;
 
   sendTemplate?(input: {
     sessionRef: string;
