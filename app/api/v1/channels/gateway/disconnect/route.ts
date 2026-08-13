@@ -29,14 +29,12 @@ export async function POST(): Promise<NextResponse> {
     return fail("not_found", "nenhuma conexão para desconectar", 404, { requestId });
   }
 
-  const desconectou = await disconnectGateway(admin, sessao.instanceId);
+  // `disconnectGateway` grava o status CANÔNICO por dentro do seam — a rota
+  // não escolhe a palavra (ver o comentário da função em `lib/channels/gateway.ts`).
+  const desconectou = await disconnectGateway(admin, sessao.instanceId, sessao.id);
   if (!desconectou) {
     return fail("invalid_request", "sem credencial gravada para esta conexão", 422, { requestId });
   }
-  await admin
-    .from("channel_sessions")
-    .update({ status: "disconnected" })
-    .eq("id", sessao.id);
 
   return ok({ disconnected: true }, { requestId });
 }

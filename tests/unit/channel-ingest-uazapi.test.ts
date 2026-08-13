@@ -24,6 +24,14 @@ let rpcResposta: Record<string, unknown> = {
 let insertErro: { code?: string; message: string } | null = null;
 /** O `uazapi_instance_id` que a sessão "tem gravado" — para os testes de cruzamento do webhook. */
 let sessionInstanceId: string | null = "r183e2ef9597845";
+/**
+ * `channel_session_health.escalated_status` já gravado — controla se
+ * `sincronizarSaudeDaConexao` toma o ramo "resolve" (estado saudável, já
+ * escalado antes) ou o ramo "avisa" (estado ruim, episódio novo). "FAILED"
+ * por padrão: não bate com o episódio "STOPPED" nem é vazio, então os dois
+ * ramos que os testes de status canônico precisam exercitar ficam abertos.
+ */
+let healthEscalatedStatus: string | null = "FAILED";
 
 function chain(tabela: string, op: string, payload?: unknown): Record<string, unknown> {
   const proxy: Record<string, unknown> = new Proxy(
@@ -33,6 +41,9 @@ function chain(tabela: string, op: string, payload?: unknown): Record<string, un
         if (prop === "maybeSingle" || prop === "single") {
           if (tabela === "channel_sessions" && op === "select") {
             return async () => ({ data: { uazapi_instance_id: sessionInstanceId }, error: null });
+          }
+          if (tabela === "channel_session_health" && op === "select") {
+            return async () => ({ data: { escalated_status: healthEscalatedStatus }, error: null });
           }
           return async () =>
             insertErro ? { data: null, error: insertErro } : { data: { id: "msg-1" }, error: null };
@@ -63,6 +74,10 @@ function fakeAdmin() {
     from: (tabela: string) => ({
       select: () => chain(tabela, "select"),
       insert: (payload: unknown) => chain(tabela, "insert", payload),
+      // `gravarEpisodio` (health.ts) upserta `channel_session_health` — sem
+      // isto o teste de evento `connection` derrubaria com "upsert is not a
+      // function" em vez de provar o que se quer provar.
+      upsert: (payload: unknown) => chain(tabela, "upsert", payload),
       update: (payload: unknown) => chain(tabela, "update", payload),
     }),
   } as never;
@@ -100,6 +115,7 @@ beforeEach(() => {
   ops.length = 0;
   insertErro = null;
   sessionInstanceId = "r183e2ef9597845";
+  healthEscalatedStatus = "FAILED";
   rpcResposta = { fn_upsert_wa_contact: "contact-1", fn_upsert_wa_conversation: "conv-1" };
 });
 
@@ -327,5 +343,48 @@ describe("cruzamento de instância no webhook", () => {
       secret: null,
     });
     expect(r.ok).toBe(true);
+  });
+});
+
+/**
+ * Homologação real, 2026-08-13: criar a conexão com o telefone de pareamento
+ * vazio (pede QR) derrubava o INSERT —
+ * `new row for relation "channel_sessions" violates check constraint
+ * "channel_sessions_status_check"` — porque a rota gravava `"connecting"`
+ * (vocabulário cru do UAZAPI) direto na coluna, que só aceita
+ * `STARTING|SCAN_QR_CODE|WORKING|STOPPED|FAILED`. O mesmo defeito existia,
+ * silencioso (sem CHECK para pegar), no evento `connection` do webhook, que
+ * passava o status cru para `channel_session_health`.
+ */
+describe("status canônico — nunca vocabulário cru do UAZAPI em channel_sessions.status", () => {
+  const SESSAO = { id: "sess-1", organization_id: "org-1", provider: "uazapi" };
+
+  it("evento connection com status 'connected' grava WORKING (canônico), não 'connected' (cru)", async () => {
+    const r = await handleInboundWebhook(fakeAdmin(), {
+      session: SESSAO,
+      rawBody: JSON.stringify({ event: "connection", instance: "r183e2ef9597845", data: { status: "connected" } }),
+      headers: new Headers(),
+      secret: null,
+    });
+    expect(r.ok).toBe(true);
+    const escrita = ops.find((o) => o.tabela === "channel_session_health" && o.op === "upsert");
+    expect(escrita, "não gravou channel_session_health").toBeTruthy();
+    expect((escrita?.payload as Record<string, unknown>).status).toBe("WORKING");
+  });
+
+  it("evento connection com status 'disconnected' grava STOPPED (canônico), não 'disconnected' (cru)", async () => {
+    const r = await handleInboundWebhook(fakeAdmin(), {
+      session: SESSAO,
+      rawBody: JSON.stringify({
+        event: "connection",
+        instance: "r183e2ef9597845",
+        data: { status: "disconnected" },
+      }),
+      headers: new Headers(),
+      secret: null,
+    });
+    expect(r.ok).toBe(true);
+    const escrita = ops.find((o) => o.tabela === "channel_session_health" && o.op === "upsert");
+    expect((escrita?.payload as Record<string, unknown>).status).toBe("STOPPED");
   });
 });

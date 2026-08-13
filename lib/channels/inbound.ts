@@ -25,6 +25,7 @@ import { sincronizarSaudeDaConexao } from "./health";
 import { uazapiInstanceIdOfSession } from "./uazapi/credentials";
 import { ingestUazapiInbound } from "./uazapi/ingest";
 import {
+  mapUazapiHealthStatus,
   parseUazapiConnection,
   parseUazapiEnvelope,
   parseUazapiMessage,
@@ -235,10 +236,17 @@ async function uazapiInbound(
 
   const conexao = parseUazapiConnection(env);
   if (conexao) {
+    // Traduzido pelo MESMO mapper do adapter antes de sair daqui — nunca o
+    // vocabulário cru do UAZAPI (`connected`/`disconnected`/...). Sem isto,
+    // `avisoDaConexao` (que compara contra `STATUS_SAUDAVEL`/
+    // `STATUS_QUE_AVISAM`, ambos no vocabulário canônico) não reconhecia
+    // "CONNECTED"/"DISCONNECTED" em maiúsculas e ficava mudo — nem alertava
+    // nem confirmava saúde, silenciosamente, para todo empurrão real.
+    const statusCanonico = mapUazapiHealthStatus(conexao.status);
     const desfecho = await sincronizarSaudeDaConexao(
       admin,
-      { id: input.session.id, organization_id: input.session.organization_id, status: conexao.status },
-      { reachable: true, status: conexao.status, detail: null },
+      { id: input.session.id, organization_id: input.session.organization_id, status: statusCanonico },
+      { reachable: true, status: statusCanonico, detail: null },
       input.session.display_name ?? input.session.phone_number ?? "sem nome",
       "empurrao",
     );

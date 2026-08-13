@@ -141,7 +141,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     webhookSecretEncrypted: segredoCifrado,
     phoneNumber: null,
     displayName: v.profileName ?? GATEWAY_CHANNEL_LABEL,
-    status: "connecting",
   });
   if (error) return fail("internal_error", error, 500, { requestId });
 

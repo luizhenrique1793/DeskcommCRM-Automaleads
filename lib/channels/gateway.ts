@@ -25,6 +25,7 @@ import { ARCHIVED_AT, queryTolerantToMissingArchived } from "./archived";
 import { CHANNEL_PROVIDER_UAZAPI } from "./capabilities";
 import { resolveUazapiCreds } from "./uazapi/credentials";
 import { uazapiClient } from "./uazapi/client";
+import { mapUazapiHealthStatus, type CanonicalChannelStatus } from "./uazapi/webhook";
 import type { ChannelProvider } from "./types";
 
 export const GATEWAY_CHANNEL_PROVIDER: ChannelProvider = CHANNEL_PROVIDER_UAZAPI;
@@ -122,6 +123,15 @@ export async function findGatewaySession(
  * Grava (ou ressuscita) a sessão. `archived_at: null` sempre, mesma razão do
  * canal intermediado: reconectar por cima de um canal excluído precisa trazê-
  * lo de volta visível para webhook, envio e seletores.
+ *
+ * `status` NÃO é parâmetro — de propósito. A primeira versão aceitava um
+ * `status: string` do chamador, e a rota gravava `"connecting"` (vocabulário
+ * do UAZAPI, minúsculo) direto na coluna: `channel_sessions_status_check` só
+ * aceita `STARTING | SCAN_QR_CODE | WORKING | STOPPED | FAILED`, e o INSERT
+ * derrubava com violação de CHECK — medido em homologação. Toda sessão nasce
+ * (ou renasce, numa reconexão) em `STARTING`: acabou de ser criada, ainda não
+ * perguntamos nada ao transporte. Quem quiser um status mais preciso pede
+ * `getGatewayLiveStatus` depois — nunca escreve um palpite aqui.
  */
 export async function saveGatewaySession(
   admin: SupabaseClient,
@@ -135,7 +145,6 @@ export async function saveGatewaySession(
     webhookSecretEncrypted: string;
     phoneNumber: string | null;
     displayName: string;
-    status: string;
   },
 ): Promise<{ error: string | null }> {
   const linha = {
@@ -151,7 +160,7 @@ export async function saveGatewaySession(
     webhook_secret_encrypted: input.webhookSecretEncrypted,
     phone_number: input.phoneNumber,
     display_name: input.displayName,
-    status: input.status,
+    status: "STARTING" satisfies CanonicalChannelStatus,
     archived_at: null,
   };
 
@@ -236,13 +245,22 @@ export async function startGatewayConnection(
 /**
  * Encerra a sessão do WhatsApp SEM apagar a conexão (linha e token
  * continuam). `false` quando não há credencial para desconectar.
+ *
+ * Grava o status CANÔNICO aqui dentro — mesma razão de `saveGatewaySession`
+ * não aceitar `status` de fora: o chamador não escolhe a palavra, o mapper
+ * escolhe. `/instance/disconnect` sempre resulta em `disconnected` do lado do
+ * UAZAPI (não precisa perguntar de novo); `mapUazapiHealthStatus` traduz isso
+ * para `STOPPED`.
  */
 export async function disconnectGateway(
   admin: SupabaseClient,
   instanceId: string,
+  channelSessionId: string,
 ): Promise<boolean> {
   const creds = await resolveUazapiCreds(admin, instanceId);
   if (!creds) return false;
   await uazapiClient.disconnect(creds);
+  const status: CanonicalChannelStatus = mapUazapiHealthStatus("disconnected");
+  await admin.from("channel_sessions").update({ status }).eq("id", channelSessionId);
   return true;
 }

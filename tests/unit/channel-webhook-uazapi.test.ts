@@ -210,4 +210,21 @@ describe("parseUazapiConnection + mapUazapiHealthStatus", () => {
     expect(mapUazapiHealthStatus("disconnected")).toBe("STOPPED");
     expect(mapUazapiHealthStatus("hibernated")).toBe("STOPPED");
   });
+
+  it("status DESCONHECIDO degrada para STOPPED — NUNCA para WORKING", () => {
+    // O enum oficial (OpenAPI 2.1.1) só tem os quatro valores acima. Um valor
+    // fora dele (API mudou, resposta corrompida) não pode virar "conectado":
+    // mascarar como WORKING seria a inversão exata do que o vigia de saúde
+    // existe para evitar. STOPPED é o lado seguro — nenhuma mensagem
+    // entra/sai, e o operador é avisado.
+    expect(mapUazapiHealthStatus("um_status_que_nao_existe")).toBe("STOPPED");
+    expect(mapUazapiHealthStatus("")).toBe("STOPPED");
+  });
+
+  it("só devolve um dos cinco valores que o CHECK do banco aceita", () => {
+    const CANONICOS = new Set(["STARTING", "SCAN_QR_CODE", "WORKING", "STOPPED", "FAILED"]);
+    for (const bruto of ["connected", "connecting", "disconnected", "hibernated", "lixo"]) {
+      expect(CANONICOS.has(mapUazapiHealthStatus(bruto))).toBe(true);
+    }
+  });
 });

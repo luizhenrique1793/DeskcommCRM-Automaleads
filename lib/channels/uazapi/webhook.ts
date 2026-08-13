@@ -222,14 +222,39 @@ export function parseUazapiConnection(env: UazapiEnvelope): UazapiConnectionEven
 
 /**
  * `/instance/status` (`disconnected|connecting|connected|hibernated`) → o
- * vocabulário de saúde do CRM (`WORKING`/`SCAN_QR_CODE`/`STOPPED`).
+ * vocabulário de saúde do CRM. `channel_sessions.status` tem CHECK no banco
+ * (`channel_sessions_status_check`) que só aceita EXATAMENTE estes cinco:
+ * `STARTING | SCAN_QR_CODE | WORKING | STOPPED | FAILED`.
  *
- * Único lugar que faz esta tradução: o adapter (`checkHealth`, varredura
- * periódica) e este módulo (evento `connection`, empurrão do provedor) usam a
- * MESMA função — duas cópias divergiriam com o tempo, e o webhook diria uma
- * coisa enquanto a varredura diz outra para o mesmo estado real.
+ * ÚNICO lugar que faz esta tradução — nenhum ponto de escrita em
+ * `channel_sessions.status` grava vocabulário cru do UAZAPI (nem literal tipo
+ * `"connecting"`/`"disconnected"`, que já derrubou um INSERT contra o CHECK em
+ * homologação: `new row for relation "channel_sessions" violates check
+ * constraint "channel_sessions_status_check"`). O adapter (`checkHealth`,
+ * varredura periódica) e `../inbound.ts` (evento `connection`, empurrão do
+ * provedor) chamam esta MESMA função — duas cópias divergiriam com o tempo, e
+ * o webhook diria uma coisa enquanto a varredura diz outra para o mesmo
+ * estado real.
+ *
+ * O tipo de retorno é a UNIÃO LITERAL dos cinco valores — não `string` — para
+ * que `tsc` reprove em compilação qualquer chamador que tente gravar algo
+ * fora dela, sem depender de um `Set` checado em runtime (que só protege se
+ * alguém lembrar de chamá-lo).
+ *
+ * ─── Estado desconhecido: degrada para STOPPED, NUNCA para WORKING ─────────
+ *
+ * O enum oficial de `Instance.status` (OpenAPI 2.1.1) só tem os quatro
+ * valores abaixo — não existe "erro" nele. `FAILED` é decidido em CAMADA
+ * DIFERENTE (o adapter trata 401/403 do token como FAILED, ANTES de chamar
+ * esta função — ver `../adapters/uazapi.ts`). Se mesmo assim chegar aqui um
+ * valor fora do enum (API mudou, resposta corrompida), o `default` devolve
+ * `STOPPED`: nenhuma mensagem entra/sai, e o operador é avisado — dizer
+ * `WORKING` para um estado que não se reconhece seria a inversão exata do que
+ * o vigia de saúde existe para evitar.
  */
-export function mapUazapiHealthStatus(status: string): string {
+export type CanonicalChannelStatus = "STARTING" | "SCAN_QR_CODE" | "WORKING" | "STOPPED" | "FAILED";
+
+export function mapUazapiHealthStatus(status: string): CanonicalChannelStatus {
   switch (status) {
     case "connected":
       return "WORKING";
