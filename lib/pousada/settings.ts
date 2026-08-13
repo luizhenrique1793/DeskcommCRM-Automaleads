@@ -1,10 +1,14 @@
 /**
- * Parâmetros ajustáveis da integração da pousada, por organização —
+ * Parâmetros legados da integração da pousada, por organização —
  * `organizations.settings.pousada` (mesmo padrão de `settings.llm`).
  *
- * Existe para não obrigar uma alteração de código toda vez que o endereço do
- * PMS mudar ou o percentual de entrada do PIX for revisto — o dono da conta
- * ajusta pela tela (`/app/settings/tenant/pousada`), o handler decide.
+ * Desde a migration 0149, a fonte primária de Base URL/headers/timeout/auth/
+ * corpo é `mcp_http_capability_calls` (ver lib/pousada/capability-config.ts
+ * e lib/pousada/executor.ts), editável pela aba "Capacidades" do agente.
+ * Este módulo continua existindo só como ÚLTIMO FALLBACK — nada mais escreve
+ * aqui, mas uma organização sem nenhuma linha na tabela nova (ou sem
+ * `base_url` preenchido nela) continua funcionando com o que já tinha
+ * configurado antes, sem precisar remigrar nada.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 
@@ -38,7 +42,8 @@ export async function loadPousadaSettings(
     .maybeSingle();
   if (error) throw new Error(`carregar_config_pousada_falhou: ${error.message}`);
 
-  const raw = ((data?.settings as { pousada?: RawPousadaSettings } | null)?.pousada ?? {}) as RawPousadaSettings;
+  const raw = ((data?.settings as { pousada?: RawPousadaSettings } | null)?.pousada ??
+    {}) as RawPousadaSettings;
 
   const pmsBaseUrl =
     typeof raw.pms_base_url === "string" && raw.pms_base_url.trim() !== ""
@@ -46,7 +51,9 @@ export async function loadPousadaSettings(
       : env.POUSADA_PMS_BASE_URL;
 
   const pixDepositPercent =
-    typeof raw.pix_deposit_percent === "number" && raw.pix_deposit_percent > 0 && raw.pix_deposit_percent <= 100
+    typeof raw.pix_deposit_percent === "number" &&
+    raw.pix_deposit_percent > 0 &&
+    raw.pix_deposit_percent <= 100
       ? raw.pix_deposit_percent
       : POUSADA_SETTINGS_DEFAULTS.pixDepositPercent;
 

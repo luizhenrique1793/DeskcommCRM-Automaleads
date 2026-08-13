@@ -82,6 +82,19 @@ export const ALVO_DE_FUNIL: Record<string, AlvoDeFunil> = {
   crm_create_webhook_source: "sem_funil",
   crm_set_webhook_source_active: "sem_funil",
   crm_set_automation_rule_active: "sem_funil",
+
+  // ---- pousada: nenhuma se encaixa nas 3 variantes com funil ----
+  // Nunca toca crm_leads — só fala com o PMS externo.
+  pousada_verificar_ou_cadastrar_hospede: "sem_funil",
+  // Cria lead novo, mas sempre no MESMO pipeline fixo ("Reservas", achado por
+  // slug interno em localizarEtapaReservas) — não é o agente escolhendo o
+  // funil, então "pipeline_no_argumento" não se aplica; o mecanismo de escopo
+  // por funil foi desenhado para orgs com vários funis/agentes, não para este caso.
+  pousada_criar_reserva: "sem_funil",
+  // Atualiza um lead existente, mas acha ele por reserva_id dentro de
+  // custom_fields — não por lead_id no argumento — então "funil_vem_do_lead"
+  // não teria como resolver sem estender o mecanismo.
+  pousada_gerar_cobranca_pix: "sem_funil",
 };
 
 export type VereditoDoEscopo =

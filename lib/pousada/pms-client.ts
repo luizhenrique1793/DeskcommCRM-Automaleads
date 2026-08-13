@@ -20,29 +20,53 @@ const PMS_HEADERS_BASE = {
   origin: "https://45.234.143.22:5005/",
 };
 
+export interface PmsRequestOptions {
+  /** Default 15000 — igual ao comportamento hardcoded original. */
+  timeoutMs?: number;
+  /** Default false (o PMS usa certificado autoassinado) — igual ao comportamento hardcoded original. */
+  verifyTls?: boolean;
+  /** Mesclados por cima de PMS_HEADERS_BASE; usados pela config editável (lib/pousada/executor.ts). */
+  extraHeaders?: Record<string, string>;
+}
+
 /**
  * `baseUrl` vem sempre de `loadPousadaSettings()` (organizations.settings.pousada,
  * com fallback pro env POUSADA_PMS_BASE_URL) — nunca hardcoded aqui, para a
  * tela de configurações da pousada valer sem precisar de deploy novo.
+ *
+ * `options` existe para a capacidade HTTP configurável (lib/pousada/executor.ts)
+ * poder ajustar timeout/TLS/headers extra por chamada — omitido, o
+ * comportamento é IDÊNTICO ao hardcoded original (compatibilidade).
  */
-export function pmsRequest(method: "GET" | "POST", path: string, baseUrl: string, body?: unknown): Promise<unknown> {
+export function pmsRequest(
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
+  path: string,
+  baseUrl: string,
+  body?: unknown,
+  options?: PmsRequestOptions,
+): Promise<unknown> {
   if (!baseUrl) {
     return Promise.reject(
-      new Error("pms_nao_configurado: defina o endereço do sistema da pousada em Configurações → Pousada"),
+      new Error(
+        "pms_nao_configurado: defina o endereço do sistema da pousada em Configurações → Pousada",
+      ),
     );
   }
   const url = new URL(path, baseUrl);
   const payload = body !== undefined ? JSON.stringify(body) : undefined;
+  const timeoutMs = options?.timeoutMs ?? 15_000;
+  const rejectUnauthorized = options?.verifyTls ?? false;
 
   return new Promise((resolve, reject) => {
     const req = https.request(
       url,
       {
         method,
-        rejectUnauthorized: false,
-        timeout: 15_000,
+        rejectUnauthorized,
+        timeout: timeoutMs,
         headers: {
           ...PMS_HEADERS_BASE,
+          ...options?.extraHeaders,
           ...(payload
             ? {
                 "content-type": "application/json;charset=UTF-8",
@@ -74,7 +98,9 @@ export function pmsRequest(method: "GET" | "POST", path: string, baseUrl: string
         });
       },
     );
-    req.on("timeout", () => req.destroy(new Error("pms_timeout: o sistema da pousada não respondeu a tempo")));
+    req.on("timeout", () =>
+      req.destroy(new Error("pms_timeout: o sistema da pousada não respondeu a tempo")),
+    );
     req.on("error", reject);
     if (payload) req.write(payload);
     req.end();

@@ -17,6 +17,61 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { apiClient } from "@/lib/api/client";
 import type { CapacidadeComUso, SinalDeUso } from "@/lib/ai/agents/uso-de-capacidades";
+import { toolsComChamadaHttp } from "@/lib/pousada/http-capability-calls";
+import { EditorDeCapacidadeHttp } from "./EditorDeCapacidadeHttp";
+
+/** Ferramentas com chamada HTTP editável (ver migration 0149) — as demais capacidades da lista são internas (banco/CRM), não têm o que configurar aqui. */
+const CAPACIDADES_HTTP_CONFIGURAVEIS = new Set(toolsComChamadaHttp());
+
+const EXEMPLO_TESTE_POR_TOOL: Record<string, string> = {
+  pousada_consultar_disponibilidade: JSON.stringify(
+    {
+      checkin: "2026-12-20",
+      checkout: "2026-12-22",
+      quantidade_adultos: 2,
+      quantidade_criancas: 0,
+      quantidade_11_12: 0,
+    },
+    null,
+    2,
+  ),
+  pousada_verificar_ou_cadastrar_hospede: JSON.stringify(
+    {
+      cpf: "00000000000",
+      nome: "TESTE INTEGRACAO",
+      data_nascimento: "1990-01-01",
+      telefone: "5511999998888",
+    },
+    null,
+    2,
+  ),
+  pousada_criar_reserva: JSON.stringify(
+    {
+      checkin: "2026-12-20",
+      checkout: "2026-12-22",
+      quantidade_adultos: 2,
+      quantidade_criancas: 0,
+      quantidade_11_12: 0,
+      id_titular: "COLE_O_ID_TITULAR_AQUI",
+      titular_nome: "TESTE INTEGRACAO",
+      cpf_titular: "00000000000",
+      total_cotado: 2460,
+      pacote_cotado: "Pacote de teste",
+    },
+    null,
+    2,
+  ),
+  pousada_gerar_cobranca_pix: JSON.stringify(
+    { reserva_id: "COLE_O_NUMERO_DA_RESERVA", nome_cliente: "TESTE", cpf_cliente: "00000000000" },
+    null,
+    2,
+  ),
+  pousada_consultar_status_reserva: JSON.stringify(
+    { reserva_id: "COLE_O_NUMERO_DA_RESERVA" },
+    null,
+    2,
+  ),
+};
 
 interface Props {
   agentId: string;
@@ -81,12 +136,12 @@ function formatarData(iso: string | null): string {
 }
 
 export function UsoDasCapacidades({ agentId, active }: Props) {
+  const [editando, setEditando] = React.useState<{ toolName: string; rotulo: string } | null>(null);
+
   const query = useQuery({
     queryKey: ["ai", "agents", agentId, "tool-usage"],
     queryFn: async () => {
-      const res = await apiClient.get<Resposta>(
-        `/api/v1/ai/agents/${agentId}/tool-usage`,
-      );
+      const res = await apiClient.get<Resposta>(`/api/v1/ai/agents/${agentId}/tool-usage`);
       return res.data;
     },
     enabled: active,
@@ -98,7 +153,7 @@ export function UsoDasCapacidades({ agentId, active }: Props) {
   }
   if (query.isError || !query.data) {
     return (
-      <p className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
+      <p className="border-destructive/40 bg-destructive/10 rounded-md border p-3 text-sm text-destructive">
         Não foi possível carregar o uso das capacidades.
       </p>
     );
@@ -151,10 +206,10 @@ export function UsoDasCapacidades({ agentId, active }: Props) {
       {capacidades.length === 0 ? (
         <p
           data-testid="uso-vazio"
-          className="rounded-md border border-border/60 p-4 text-sm text-muted-foreground"
+          className="border-border/60 rounded-md border p-4 text-sm text-muted-foreground"
         >
-          Este agente ainda não tem nenhuma capacidade ligada, e nenhuma foi usada. Ligue
-          o que ele pode fazer na aba Configuração.
+          Este agente ainda não tem nenhuma capacidade ligada, e nenhuma foi usada. Ligue o que ele
+          pode fazer na aba Configuração.
         </p>
       ) : (
         <ul className="grid gap-2">
@@ -163,7 +218,7 @@ export function UsoDasCapacidades({ agentId, active }: Props) {
               key={c.name}
               data-testid={`uso-${c.name}`}
               data-sinal={c.sinal}
-              className="rounded-md border border-border/60 p-3"
+              className="border-border/60 rounded-md border p-3"
             >
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-sm font-medium">{c.rotulo}</span>
@@ -176,6 +231,18 @@ export function UsoDasCapacidades({ agentId, active }: Props) {
                   </Badge>
                 ) : null}
                 <span className="text-xs text-muted-foreground">· {c.o_que_toca}</span>
+                {CAPACIDADES_HTTP_CONFIGURAVEIS.has(c.name) ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="ml-auto h-6 text-[11px]"
+                    data-testid={`configurar-http-${c.name}`}
+                    onClick={() => setEditando({ toolName: c.name, rotulo: c.rotulo })}
+                  >
+                    Configurar chamada HTTP
+                  </Button>
+                ) : null}
               </div>
 
               <p className="pt-1 text-xs text-muted-foreground">{c.recomendacao}</p>
@@ -199,6 +266,18 @@ export function UsoDasCapacidades({ agentId, active }: Props) {
           ))}
         </ul>
       )}
+
+      {editando ? (
+        <EditorDeCapacidadeHttp
+          open
+          onOpenChange={(v) => {
+            if (!v) setEditando(null);
+          }}
+          toolName={editando.toolName}
+          toolLabel={editando.rotulo}
+          exemploTestArgs={EXEMPLO_TESTE_POR_TOOL[editando.toolName] ?? "{}"}
+        />
+      ) : null}
     </div>
   );
 }

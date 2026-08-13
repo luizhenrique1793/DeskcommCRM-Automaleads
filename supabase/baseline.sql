@@ -11151,6 +11151,104 @@ notify pgrst, 'reload schema';
 
 
 
+-- ---- capacidades HTTP editáveis pelo painel (migration 0149) ----
+--
+-- Config técnica (método/base URL/endpoint/headers/query&path params/corpo/
+-- timeout/TLS/auth) de cada chamada HTTP física que uma capacidade da
+-- pousada faz ao PMS externo — editável pela aba "Capacidades" do agente,
+-- por organização. Sem backfill aqui: um install fresco não tem
+-- organizations.settings.pousada pré-existente pra migrar (isso só roda como
+-- DO block na migration incremental, não faz sentido num banco vazio).
+
+create table if not exists public.mcp_http_capability_calls (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid not null references public.organizations(id) on delete cascade,
+
+  tool_name text not null,
+  call_key text not null default 'default',
+  call_label text not null,
+  call_order smallint not null default 0,
+
+  enabled boolean not null default false,
+
+  method text check (method in ('GET', 'POST', 'PUT', 'PATCH', 'DELETE')),
+  base_url text,
+  endpoint_path text,
+
+  headers jsonb not null default '[]'::jsonb,
+  query_params jsonb not null default '[]'::jsonb,
+  path_params jsonb not null default '[]'::jsonb,
+
+  body_type text not null default 'json' check (body_type in ('json', 'form', 'none')),
+  legacy_body_overrides jsonb not null default '{}'::jsonb,
+  body_field_map jsonb not null default '[]'::jsonb,
+
+  response_field_map jsonb not null default '[]'::jsonb,
+
+  timeout_ms integer check (timeout_ms between 1000 and 120000),
+  verify_tls boolean,
+
+  auth_type text not null default 'none'
+    check (auth_type in ('none', 'bearer', 'api_key_header', 'api_key_query', 'basic')),
+  auth_key_name text,
+  auth_secret_enc bytea,
+  auth_secret_last4 text,
+
+  specific_config jsonb not null default '{}'::jsonb,
+
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  created_by uuid references auth.users(id),
+
+  constraint mcp_http_capability_calls_unique unique (organization_id, tool_name, call_key)
+);
+
+create index if not exists mcp_http_capability_calls_org_tool_idx
+  on public.mcp_http_capability_calls (organization_id, tool_name);
+
+alter table public.mcp_http_capability_calls enable row level security;
+
+drop policy if exists tenant_isolation_mcp_http_capability_calls_select on public.mcp_http_capability_calls;
+create policy tenant_isolation_mcp_http_capability_calls_select on public.mcp_http_capability_calls
+  for select
+  using (organization_id in (select * from public.fn_user_org_ids()));
+
+drop policy if exists tenant_isolation_mcp_http_capability_calls_modify on public.mcp_http_capability_calls;
+create policy tenant_isolation_mcp_http_capability_calls_modify on public.mcp_http_capability_calls
+  for all
+  using (organization_id in (select * from public.fn_user_org_ids()))
+  with check (organization_id in (select * from public.fn_user_org_ids()));
+
+revoke all on public.mcp_http_capability_calls from anon;
+
+drop view if exists public.mcp_http_capability_calls_safe;
+create view public.mcp_http_capability_calls_safe
+  with (security_invoker = true)
+  as
+  select id, organization_id, tool_name, call_key, call_label, call_order, enabled,
+         method, base_url, endpoint_path, headers, query_params, path_params,
+         body_type, legacy_body_overrides, body_field_map, response_field_map,
+         timeout_ms, verify_tls, auth_type, auth_key_name, auth_secret_last4,
+         specific_config, created_at, updated_at, created_by
+  from public.mcp_http_capability_calls;
+
+revoke all on public.mcp_http_capability_calls_safe from anon;
+grant select on public.mcp_http_capability_calls_safe to authenticated;
+
+drop trigger if exists trg_mcp_http_capability_calls_audit on public.mcp_http_capability_calls;
+create trigger trg_mcp_http_capability_calls_audit
+  after insert or update or delete on public.mcp_http_capability_calls
+  for each row execute function public.fn_audit_log_row();
+
+drop trigger if exists trg_mcp_http_capability_calls_updated_at on public.mcp_http_capability_calls;
+create trigger trg_mcp_http_capability_calls_updated_at
+  before update on public.mcp_http_capability_calls
+  for each row execute function public.fn_set_updated_at();
+
+notify pgrst, 'reload schema';
+
+
+
 -- ---- VARREDURA anon: função nova nasce exposta em quem ATUALIZA (migration 0116) ----
 --
 -- ⚠️ ESTE BLOCO É, DE PROPÓSITO, O ÚLTIMO DO ARQUIVO. Apêndice novo entra ANTES

@@ -35,7 +35,11 @@ services:
       retries: 5
       start_period: 40s
     logging: *default-logging
-    networks: [internal]
+    # supabase_default: rede do stack do Supabase onde vive o nginx-proxy que
+    # serve crm.automaleads.com (proxy_pass http://app:3000). Sem isso, todo
+    # `docker compose up` que recriar este container perde a rota e o site
+    # cai com 502 até alguém reconectar na mão (`docker network connect`).
+    networks: [internal, supabase_default]
 
 
   # Worker 24/7 do agent-engine (fusão Vendaval) — cérebro do agente SDR.
@@ -171,3 +175,7 @@ volumes:
 networks:
   internal:
     driver: bridge
+  # Rede do stack do Supabase (docker-compose do /opt/supabase-project) — já
+  # existe, criada por aquele projeto. external:true = só referencia, não recria.
+  supabase_default:
+    external: true

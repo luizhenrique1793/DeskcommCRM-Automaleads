@@ -83,6 +83,7 @@ Detalham schema SQL e payloads exatos. **Consulte antes de modelar qualquer cois
 | [`doctrine/sistema-vivo/`](doctrine/sistema-vivo/README.md) | **Manual do Sistema Vivo** — 8 capítulos plugáveis (princípio universal + aplicação de referência). O *porquê* de cada invariante, e como adotar a doutrina em outro sistema |
 | [`doctrine/restricao-de-canal.md`](doctrine/restricao-de-canal.md) | Auto-restrição × hetero-restrição de canais externos; contrato de parâmetros derivado |
 | [`doctrine/separacao-fala-e-operacao.md`](doctrine/separacao-fala-e-operacao.md) | Vocabulário interno nunca vaza para o cliente |
+| [`doctrine/antes-de-codar.md`](doctrine/antes-de-codar.md) | **Checklist de triagem** — antes de implementar pedido novo, checar se agentes+roteador, capacidades HTTP, follow-up, guardrails, skills ou webhooks já resolvem sem código |
 | [`architecture/agent-turn.html`](architecture/agent-turn.html) | Diagrama do turno do agente (inbound → guardrails → outbound) |
 | [`research/architecture-diagrams.md`](research/architecture-diagrams.md) | Diagramas de arquitetura |
 | [`research/reference-synthesis.md`](research/reference-synthesis.md) | Arquitetura herdada da referência WAHA |

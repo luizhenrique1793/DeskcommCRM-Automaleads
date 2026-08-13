@@ -113,6 +113,7 @@ export type AuditAction =
   | "platform_admin.user_viewed"
   | "platform_admin.platform_admins_listed"
   | "mcp.tool_called"
+  | "mcp.http_capability_updated"
   | "ai.credential_created"
   | "ai.credential_deleted"
   | "ai.credential_revalidated"
