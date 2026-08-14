@@ -207,6 +207,9 @@ export async function GET(
       // traduz nada, só repassa.
       const saude = await adapter.checkHealth({ sessionRef });
       if (saude.reachable && saude.status) liveStatus = saude.status;
+      // Mesmo cuidado do ramo WAHA (linha ~178): só preenche o que falta,
+      // nunca sobrescreve um número já gravado (ex.: corrigido à mão).
+      if (saude.reachable && saude.phoneNumber && !phoneNumber) phoneNumber = saude.phoneNumber;
       // Erro de rede / não alcançável: mantém o status do DB, mesmo cuidado
       // do ramo WAHA — não sobrescreve com ruído transitório.
     } catch {

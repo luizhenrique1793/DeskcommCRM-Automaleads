@@ -286,6 +286,13 @@ export interface ChannelHealth {
   status: string | null;
   /** Detalhe do erro, para o corpo do aviso. Nunca credencial. */
   detail: string | null;
+  /**
+   * Número da própria instância conectada, só dígitos (sem `+`) — mesmo
+   * formato que o ramo WAHA já grava (a parte antes do "@" do JID). OPCIONAL:
+   * `undefined`/`null` quando o adapter não tem como perguntar isso ao
+   * transporte, ou quando a instância ainda não tem número (não logada).
+   */
+  phoneNumber?: string | null;
 }
 
 /** Definição aprovada, na forma NEUTRA — sem o vocabulário de nenhum provider. */

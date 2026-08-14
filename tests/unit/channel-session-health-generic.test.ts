@@ -129,6 +129,34 @@ describe("canal UAZAPI (não-WAHA) — pergunta ao adapter genérico", () => {
     expect(updates.some((u) => "last_health_check_at" in u)).toBe(true);
   });
 
+  it("connected traz o número da instância (ownerJid) — grava quando o DB ainda não tinha", async () => {
+    checkHealthMock.mockResolvedValue({
+      reachable: true,
+      status: "WORKING",
+      detail: null,
+      phoneNumber: "5511888888888",
+    });
+    const res = await GET(req(), { params: Promise.resolve({ id: SESSAO_ID }) });
+    const body = (await res.json()) as { data: { phone_number: string | null } };
+    expect(body.data.phone_number).toBe("5511888888888");
+    const upd = updates.find((u) => "phone_number" in u);
+    expect(upd).toMatchObject({ phone_number: "5511888888888" });
+  });
+
+  it("já tinha telefone gravado — não sobrescreve com o que o adapter devolveu", async () => {
+    sessionRow.phone_number = "5511777777777";
+    checkHealthMock.mockResolvedValue({
+      reachable: true,
+      status: "WORKING",
+      detail: null,
+      phoneNumber: "5511888888888",
+    });
+    const res = await GET(req(), { params: Promise.resolve({ id: SESSAO_ID }) });
+    const body = (await res.json()) as { data: { phone_number: string | null } };
+    expect(body.data.phone_number).toBe("5511777777777");
+    expect(updates.some((u) => "phone_number" in u)).toBe(false);
+  });
+
   it("adapter sem checkHealth — devolve o DB sem tentar, waha_configured:false", async () => {
     checkHealthMock.mockResolvedValue(undefined);
     // Simula um provider hipotético sem o método reatribuindo o mock do adapter.

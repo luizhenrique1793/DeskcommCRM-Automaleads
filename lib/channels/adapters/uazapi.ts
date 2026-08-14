@@ -123,7 +123,15 @@ export const uazapiAdapter: ChannelAdapter = {
       // credencial existe e não vale mais — é FAILED, não "não deu para
       // perguntar". Ver o mesmo raciocínio em `../adapters/zernio.ts`.
       if (!status) return { reachable: true, status: "FAILED", detail: null };
-      return { reachable: true, status: mapUazapiHealthStatus(status.status), detail: null };
+      // `ownerJid` já vem só-dígitos (`.user` de um JID `<digitos>@s.whatsapp.net`
+      // — ver `../uazapi/client.ts`), mesmo formato que `channel_sessions.phone_number`
+      // usa no ramo WAHA. `null` enquanto a instância não tiver feito login ainda.
+      return {
+        reachable: true,
+        status: mapUazapiHealthStatus(status.status),
+        detail: null,
+        phoneNumber: status.ownerJid,
+      };
     } catch (err) {
       const detail = err instanceof Error ? err.message : "erro_desconhecido";
       return { reachable: false, status: null, detail: detail.slice(0, 200) };

@@ -241,7 +241,7 @@ describe("resolvePhoneForIdentity", () => {
 
 // 9/10/11 — health conectado / desconectado / API inalcançável
 describe("checkHealth", () => {
-  it("connected → reachable:true, status:WORKING", async () => {
+  it("connected → reachable:true, status:WORKING, phoneNumber = ownerJid só-dígitos", async () => {
     fetchMock.mockResolvedValueOnce({
       status: 200,
       json: async () => ({
@@ -250,16 +250,21 @@ describe("checkHealth", () => {
       }),
     });
     const h = await uazapiAdapter.checkHealth!({ sessionRef: CREDS.instanceId });
-    expect(h).toEqual({ reachable: true, status: "WORKING", detail: null });
+    expect(h).toEqual({
+      reachable: true,
+      status: "WORKING",
+      detail: null,
+      phoneNumber: "5511999999999",
+    });
   });
 
-  it("disconnected → reachable:true, status:STOPPED", async () => {
+  it("disconnected → reachable:true, status:STOPPED, sem jid → phoneNumber:null", async () => {
     fetchMock.mockResolvedValueOnce({
       status: 200,
       json: async () => ({ instance: { status: "disconnected" }, status: { connected: false } }),
     });
     const h = await uazapiAdapter.checkHealth!({ sessionRef: CREDS.instanceId });
-    expect(h).toEqual({ reachable: true, status: "STOPPED", detail: null });
+    expect(h).toEqual({ reachable: true, status: "STOPPED", detail: null, phoneNumber: null });
   });
 
   it("connecting → SCAN_QR_CODE (aguardando QR/pairing)", async () => {
