@@ -67,7 +67,7 @@ type SB = SupabaseClient;
  * único lugar onde ela seria de fato a nossa mensagem, e impede de apagar linha
  * do próprio CRM.
  */
-async function removerEcoDoProprioEnvio(
+export async function removerEcoDoProprioEnvio(
   supabase: SB,
   organizationId: string,
   conversationId: string,
@@ -104,7 +104,7 @@ async function removerEcoDoProprioEnvio(
   }
 }
 
-const MSG_COLS =
+export const MSG_COLS =
   "id, organization_id, conversation_id, channel_session_id, contact_id, external_id, type, direction, status, ack, error_code, error_message, body, media_url, media_mime, media_size_bytes, media_storage_path, sent_via, sent_by_user_id, sent_at, delivered_at, read_at, metadata, edited_at, revoked_at, created_at";
 
 function actorAuditPayload(actor: Actor): {
@@ -219,7 +219,7 @@ export async function listMessagesHandler(
 // send
 // ---------------------------------------------------------------------------
 
-function previewFrom(input: {
+export function previewFrom(input: {
   body?: string;
   media_url?: string;
   media_storage_path?: string;
@@ -245,7 +245,7 @@ const HUMAN_REPLY_SILENCE_MS = 5 * 60 * 1000;
  * como o literal texto "infinity", que `new Date(...)` não parseia. Nunca encurtar isso
  * para uma janela de 5min: se já está travado pra sempre, este helper não mexe.
  */
-function extendBotSilence(current: string | null, now: string): string | undefined {
+export function extendBotSilence(current: string | null, now: string): string | undefined {
   if (current === "infinity") return undefined;
   const candidate = new Date(new Date(now).getTime() + HUMAN_REPLY_SILENCE_MS);
   if (current && new Date(current) >= candidate) return undefined;
