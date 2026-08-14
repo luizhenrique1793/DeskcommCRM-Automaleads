@@ -143,7 +143,7 @@ describe("os elos que somem sem barulho", () => {
     // A coluna fora do `select` não chega, e o cast do embed faz isso NÃO ser
     // erro de tipo: ficaria `undefined` e todo canal viraria "sem restrição".
     const fonte = readFileSync("app/api/v1/conversations/_handler.ts", "utf8");
-    expect(fonte).toMatch(/channel_sessions:channel_session_id \(phone_number, display_name, provider\)/);
+    expect(fonte).toMatch(/channel_sessions:channel_session_id \(phone_number, display_name, provider, status\)/);
   });
 
   it("o composer é BLOQUEADO quando a janela fechou", () => {
@@ -184,8 +184,10 @@ describe("os elos que somem sem barulho", () => {
     // aprovado sai daqui" e não tem como mandar um.
     const fonte = readFileSync("components/inbox/InboxLayout.tsx", "utf8");
     // A GUARDA junto com a tag: `{false && (` deixava a tag na linha seguinte e
-    // o caso passava verde com a saída removida da tela.
-    expect(fonte).toMatch(/\{motivoDaJanela && \(\s*\n\s*<JanelaFechadaAviso/);
+    // o caso passava verde com a saída removida da tela. Desde o aviso de
+    // canal caído (`CanalDesconectadoAviso`), o guard mora dentro do ramo
+    // `else` de um ternário por `canalCaido` — mesma exigência, novo lugar.
+    expect(fonte).toMatch(/motivoDaJanela && \(\s*\n\s*<JanelaFechadaAviso/);
     const aviso = readFileSync("components/inbox/JanelaFechadaAviso.tsx", "utf8");
     expect(aviso).toMatch(/type: "template"/);
     expect(aviso).toMatch(/template_name/);

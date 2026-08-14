@@ -42,12 +42,19 @@ interface Props {
    * versão deste bloqueio usava `blockedReason` e levou a nota junto.
    */
   janelaFechada?: string | null;
+  /**
+   * Conexão do canal caída (`STATUS_QUE_AVISAM` — `lib/channels/health.ts`):
+   * barra a RESPOSTA, e só ela. Mesma razão de `janelaFechada` — a nota
+   * interna não sai por este canal, e é onde o atendente registra "cliente
+   * escreveu, canal caiu" enquanto ninguém reconecta.
+   */
+  channelDownReason?: string | null;
   /** Nome do contato da conversa, para interpolar {{nome}}/{{primeiro_nome}} do template escolhido. */
   contactName?: string | null;
 }
 
 export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
-  { conversationId, disabled, blockedReason, janelaFechada, contactName },
+  { conversationId, disabled, blockedReason, janelaFechada, channelDownReason, contactName },
   ref,
 ) {
   const t = useT();
@@ -69,10 +76,12 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
 
   const isDisabled =
     disabled || !!blockedReason || send.isPending || upload.isPending || createNote.isPending;
-  // A janela só alcança o que SAI. Em modo nota o composer segue liberado: a
-  // nota interna nunca chega ao cliente, e é onde o atendente registra por que
-  // a conversa esfriou — barrá-la tira exatamente o que ainda dá para fazer.
-  const respostaBarrada = isDisabled || (mode === "reply" && !!janelaFechada);
+  // A janela e o canal caído só alcançam o que SAI. Em modo nota o composer
+  // segue liberado: a nota interna nunca chega ao cliente, e é onde o
+  // atendente registra por que a conversa esfriou — barrá-la tira exatamente
+  // o que ainda dá para fazer.
+  const respostaBarrada =
+    isDisabled || (mode === "reply" && !!janelaFechada) || (mode === "reply" && !!channelDownReason);
 
   function autoresize() {
     const ta = taRef.current;

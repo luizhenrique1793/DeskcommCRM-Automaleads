@@ -45,6 +45,13 @@ export interface ChannelSummary {
    * que a doutrina proíbe, e ele mora atrás do seam.
    */
   provider: string | null;
+  /**
+   * Vocabulário canônico (`STARTING|SCAN_QR_CODE|WORKING|STOPPED|FAILED`,
+   * `channel_sessions_status_check`). A tela não decide sozinha o que é
+   * "caído" — usa `STATUS_QUE_AVISAM` de `lib/channels/health.ts`, a MESMA
+   * lista que já decide o aviso da Central, para não divergir com o tempo.
+   */
+  status: string | null;
 }
 
 export type ConversationWithContact = Conversation & {

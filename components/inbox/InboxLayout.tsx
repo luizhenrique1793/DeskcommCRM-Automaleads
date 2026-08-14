@@ -3,7 +3,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/hooks/auth/AuthProvider";
 import { estadoDaJanela, formatarDecorrido } from "@/lib/channels/janela";
+import { STATUS_QUE_AVISAM } from "@/lib/channels/health";
 import { JanelaFechadaAviso } from "@/components/inbox/JanelaFechadaAviso";
+import { CanalDesconectadoAviso } from "@/components/inbox/CanalDesconectadoAviso";
 import { useClaimConversation } from "@/hooks/inbox/useClaimConversation";
 import { useCloseConversation } from "@/hooks/inbox/useCloseConversation";
 import {
@@ -182,6 +184,18 @@ export function InboxLayout({ initialSelectedId = null }: InboxLayoutProps = {})
       ? "Contato anonimizado — não é possível enviar mensagens."
       : null;
 
+  // A conexão desta conversa está fora do ar? MESMA lista canônica que já
+  // decide o aviso na Central (`lib/channels/health.ts`) — nunca uma segunda
+  // regra que diverge com o tempo sobre o que é "caído".
+  const canalCaido = !!(
+    selectedConversation?.channel_sessions?.status &&
+    (STATUS_QUE_AVISAM as readonly string[]).includes(selectedConversation.channel_sessions.status)
+  );
+  const apelidoDoCanal =
+    selectedConversation?.channel_sessions?.display_name ??
+    selectedConversation?.channel_sessions?.phone_number ??
+    null;
+
   // Altura da grade: a conta desconta TUDO que fica acima e abaixo dela.
   //   3.5rem            TopBar (`h-14`, em components/shell/TopBar.tsx)
   //   2 * --space-6     padding do <main> do AppShell (`p-6`, em cima e embaixo)
@@ -243,18 +257,26 @@ export function InboxLayout({ initialSelectedId = null }: InboxLayoutProps = {})
               <ChatThread conversationId={selectedConversation.id} />
             </div>
             <RetentionNotice conversationId={selectedConversation.id} />
-            {motivoDaJanela && (
-              <JanelaFechadaAviso
-                conversationId={selectedConversation.id}
-                provider={selectedConversation.channel_sessions?.provider ?? null}
-                motivo={motivoDaJanela}
-              />
+            {canalCaido ? (
+              // Canal caído não tem saída por modelo — o transporte não
+              // responde para NADA, então o seletor de `JanelaFechadaAviso`
+              // seria uma opção que falha no clique.
+              <CanalDesconectadoAviso apelido={apelidoDoCanal} />
+            ) : (
+              motivoDaJanela && (
+                <JanelaFechadaAviso
+                  conversationId={selectedConversation.id}
+                  provider={selectedConversation.channel_sessions?.provider ?? null}
+                  motivo={motivoDaJanela}
+                />
+              )
             )}
             <Composer
               ref={composerRef}
               conversationId={selectedConversation.id}
               blockedReason={blockedReason}
               janelaFechada={motivoDaJanela}
+              channelDownReason={canalCaido ? `A conexão está desconectada.` : null}
               disabled={selectedConversation.status === "closed"}
               contactName={selectedConversation.contacts?.name ?? null}
             />
