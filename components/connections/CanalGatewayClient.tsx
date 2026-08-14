@@ -32,6 +32,9 @@ interface Estado {
   qrcode: string | null;
   paircode: string | null;
   webhook_url?: string | null;
+  /** Não são segredo — só o token é, e esse nunca volta do servidor. */
+  base_url?: string | null;
+  instance_id?: string | null;
 }
 
 const POLL_MS = 4000;
@@ -45,6 +48,10 @@ export function CanalGatewayClient() {
   const [salvando, setSalvando] = useState(false);
   const [desconectando, setDesconectando] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Só preenche UMA vez: depois disso o operador pode estar editando (trocar
+  // de instância, por exemplo), e sobrescrever a cada poll apagaria o que ele
+  // acabou de digitar.
+  const preenchidoRef = useRef(false);
 
   const carregar = async () => {
     try {
@@ -58,6 +65,18 @@ export function CanalGatewayClient() {
   useEffect(() => {
     void carregar();
   }, []);
+
+  // Reconectar (instância caiu/token expirou do lado do provedor — medido em
+  // homologação real) não deveria pedir para redigitar URL e id de novo: os
+  // dois já estão gravados e não são segredo. Só o token fica sempre vazio —
+  // ele é o único campo que o servidor nunca devolve, de propósito.
+  useEffect(() => {
+    if (estado?.connected && !preenchidoRef.current) {
+      if (estado.base_url) setBaseUrl(estado.base_url);
+      if (estado.instance_id) setInstanceId(estado.instance_id);
+      preenchidoRef.current = true;
+    }
+  }, [estado]);
 
   // Enquanto está "connecting" (QR/pairing pendente), o servidor pode ter um
   // código NOVO a cada poucos segundos — parar de perguntar deixaria a tela
@@ -196,7 +215,8 @@ export function CanalGatewayClient() {
             />
             <p className="text-xs text-muted-foreground">
               Guardado cifrado. Depois de gravar ele não é mostrado de novo — para trocar, cole o
-              novo.
+              novo. Se a instância cair do lado do servidor (comum em planos de teste), gere um
+              token novo lá e cole aqui para reconectar; URL e id já ficam preenchidos.
             </p>
           </div>
           <div className="flex flex-col gap-1.5">

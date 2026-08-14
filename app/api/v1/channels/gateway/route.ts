@@ -91,6 +91,13 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       qrcode: live?.qrcode ?? null,
       paircode: live?.paircode ?? null,
       webhook_url: sessao.webhookPathToken ? urlDoWebhook(req, sessao.webhookPathToken) : null,
+      // NÃO são segredo — só o token é (esse fica cifrado e nunca é
+      // devolvido). Sem isto o formulário de reconexão nascia vazio: quem
+      // precisasse reconectar (token expirado/rotacionado do lado do
+      // provedor, visto em homologação) tinha de redigitar URL e id da
+      // instância do zero, não só colar o token novo.
+      base_url: sessao.baseUrl,
+      instance_id: sessao.instanceId,
     },
     { requestId },
   );
