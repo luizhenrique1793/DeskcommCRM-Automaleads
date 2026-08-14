@@ -222,6 +222,29 @@ describe("fetchProfilePictureUrl", () => {
     expect(url).toBeNull();
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it("recipient no formato universal do seam (`<dígitos>@c.us`) é despido antes de ir pro /chat/details", async () => {
+    // `chatIdFromIdentity` (app/api/v1/cron/contact-avatars/route.ts) produz
+    // este formato para TODO provider — o OpenAPI do UAZAPI confirma que
+    // `number` espera dígitos NUS ("5511999999999"), sem sufixo. Sem o strip,
+    // toda busca de avatar UAZAPI mandaria "5511999999999@c.us" e o endpoint
+    // não reconheceria o contato.
+    fetchMock.mockResolvedValueOnce({ status: 200, json: async () => ({ image: "https://cdn/x.jpg" }) });
+    await uazapiAdapter.fetchProfilePictureUrl!({
+      sessionRef: CREDS.instanceId,
+      recipient: "5511999999999@c.us",
+    });
+    expect(corpo().number).toBe("5511999999999");
+  });
+
+  it("recipient LID (`<dígitos>@lid`) mantém o sufixo — mesma convenção de resolveRecipient", async () => {
+    fetchMock.mockResolvedValueOnce({ status: 200, json: async () => ({ image: null }) });
+    await uazapiAdapter.fetchProfilePictureUrl!({
+      sessionRef: CREDS.instanceId,
+      recipient: "123456789@lid",
+    });
+    expect(corpo().number).toBe("123456789@lid");
+  });
 });
 
 // 7 — LID → telefone (resolvePhoneForIdentity)

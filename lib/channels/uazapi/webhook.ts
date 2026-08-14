@@ -160,6 +160,21 @@ export interface UazapiInboundMessage {
   text: string | null;
   mediaType: string | null;
   fileUrl: string | null;
+  /**
+   * Mimetype REAL do proto original (`m.content.mimetype`), medido em
+   * homologação (2026-08-14) — mais confiável que o palpite fixo de
+   * `mimeHintDeMidia` (`../ingest.ts`), sobretudo para "document", cujo
+   * mime varia demais para adivinhar. `null` quando o payload não trouxe
+   * (mensagem de texto, ou mídia sem o campo).
+   */
+  mediaMime: string | null;
+  /**
+   * Nome do arquivo (`m.content.fileName`) — NÃO confirmado em payload real
+   * (só imagem foi capturada até aqui, que não tem nome). Best-effort: nome
+   * de campo padrão do proto `DocumentMessage` do WhatsApp. Fica `null` sem
+   * quebrar nada se o campo vier diferente ou ausente.
+   */
+  fileName: string | null;
   sentAt: string | null;
   identity: UazapiIdentity;
 }
@@ -201,15 +216,26 @@ export function parseUazapiMessage(env: UazapiEnvelope): UazapiInboundMessage | 
   const identity = fromMe ? identityFromChatId(chatId, str(m.senderName)) : resolveUazapiIdentity(m);
   if (!identity.anchor) return null; // sem quem, não há a quem atribuir
 
-  // `type` é o rótulo SIMPLES ("text","image","ptt",...) — o MESMO vocabulário
-  // de `/send/media`. `messageType` é o nome do protobuf interno do WhatsApp
-  // ("Conversation","ImageMessage",...) — medido em produção: uma mensagem de
-  // TEXTO PURO chega com `type:"text"` e `messageType:"Conversation"` ao
-  // mesmo tempo. Usar `messageType` como discriminante de mídia classificaria
-  // TODO texto como mídia; `type` é quem bate com o vocabulário que
-  // `../ingest.ts` já sabe traduzir (`tipoDeMidia`/`mimeHintDeMidia`).
+  // `type` só distingue "text" de "media" no payload real — NUNCA a espécie
+  // (medido em homologação, 2026-08-14: uma imagem chega com `type:"media"`,
+  // não `type:"image"`). Serve para SABER que é mídia, não QUAL mídia é.
   const tipo = str(m.type);
   const isMedia = !!tipo && tipo !== "text";
+  // A espécie mora em `m.mediaType` — campo PRÓPRIO, separado de `m.type` e de
+  // `messageType` (o nome do protobuf, "ImageMessage" etc). Mesmo vocabulário
+  // documentado em `/send/media` (image/video/videoplay/document/audio/
+  // myaudio/ptt/ptv/sticker), que `../ingest.ts` (`tipoDeMidia`/
+  // `mimeHintDeMidia`) já sabe traduzir. Sem isto, TODA mídia real caía no
+  // `default` de `tipoDeMidia` ("document" genérico) — a instância nunca
+  // recebia "image"/"ptt"/etc, só "media". Fallback pra `tipo` só por
+  // segurança, caso uma instância futura não traga `mediaType`.
+  const especieMidia = isMedia ? (str(m.mediaType) ?? tipo) : null;
+  // `content`: onde o proto original da mídia mora (URL temporária, mimetype,
+  // tamanho, nome — mesmos nomes de campo do protobuf do WhatsApp). Só existe
+  // em mensagem de mídia.
+  const conteudo = obj(m.content);
+  const mediaMime = conteudo ? str(conteudo.mimetype) : null;
+  const fileName = conteudo ? str(conteudo.fileName) : null;
   const ts = typeof m.messageTimestamp === "number" && m.messageTimestamp > 0 ? m.messageTimestamp : null;
 
   return {
@@ -218,8 +244,10 @@ export function parseUazapiMessage(env: UazapiEnvelope): UazapiInboundMessage | 
     chatId,
     externalId,
     text: str(m.text),
-    mediaType: isMedia ? tipo : null,
+    mediaType: especieMidia,
     fileUrl: isMedia ? str(m.fileURL) : null,
+    mediaMime,
+    fileName,
     sentAt: ts ? new Date(ts).toISOString() : null,
     identity,
   };
@@ -256,6 +284,8 @@ export function parseUazapiStatus(env: UazapiEnvelope): UazapiInboundMessage | n
     text: null,
     mediaType: null,
     fileUrl: null,
+    mediaMime: null,
+    fileName: null,
     sentAt: null,
     identity: { phone: null, lid: null, displayName: null, anchor: null },
   };

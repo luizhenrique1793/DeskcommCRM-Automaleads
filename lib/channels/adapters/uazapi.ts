@@ -20,6 +20,20 @@ import type {
   RecipientInput,
 } from "../types";
 
+/**
+ * `recipient` chega no formato universal do seam (`<dígitos>@c.us` ou
+ * `<dígitos>@s.whatsapp.net`, mesmo que `chatIdFromIdentity` em
+ * `app/api/v1/cron/contact-avatars/route.ts` produz para todo provider) —
+ * `/chat/details` do UAZAPI espera `number` como dígitos NUS (confirmado no
+ * OpenAPI: exemplo `"5511999999999"`, sem sufixo). LID mantém o `@lid`, mesma
+ * convenção de `resolveRecipient` abaixo (o único formato de identidade opaca
+ * que `/chat/details` teria como aceitar).
+ */
+function numeroParaChatDetails(recipient: string): string {
+  if (recipient.endsWith("@lid")) return recipient;
+  return recipient.replace(/@.*/, "");
+}
+
 /** `kind` do envelope → `type` que `/send/media` espera. */
 function mediaTypeFor(kind: OutboundKind): "image" | "video" | "document" | "audio" | "ptt" {
   switch (kind) {
@@ -93,7 +107,7 @@ export const uazapiAdapter: ChannelAdapter = {
     const admin = createAdminClient();
     const creds = await resolveUazapiCreds(admin, input.sessionRef);
     if (!creds) return null;
-    const details = await uazapiClient.chatDetails(creds, input.recipient);
+    const details = await uazapiClient.chatDetails(creds, numeroParaChatDetails(input.recipient));
     return details?.image ?? null;
   },
 

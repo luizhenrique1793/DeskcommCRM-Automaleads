@@ -29,6 +29,12 @@ vi.mock("@/lib/env", () => ({
 
 vi.mock("@/lib/channels", () => ({
   DEFAULT_CHANNEL_PROVIDER: "waha",
+  CHANNEL_SESSION_REF_COLUMNS:
+    "provider, waha_session_name, meta_phone_number_id, zernio_account_id, uazapi_instance_id",
+  // Mesma tradução real de `lib/channels/session-ref.ts`, reduzida aos dois
+  // providers que os testes deste arquivo exercitam.
+  resolveSessionRef: (s: { provider: string; waha_session_name?: string | null; uazapi_instance_id?: string | null }) =>
+    s.provider === "uazapi" ? s.uazapi_instance_id : s.waha_session_name,
   getAdapter: () => ({
     fetchProfilePictureUrl: async () => "https://cdn.exemplo.invalid/foto.jpg",
   }),

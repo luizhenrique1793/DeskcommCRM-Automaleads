@@ -174,8 +174,24 @@ async function insertMessage(
       // (base64 no mesmo pedido, ver `../adapters/uazapi.ts`), nunca por URL.
       // `fileURL`, quando o payload o trouxe, fica só em `metadata` — é
       // referência para depurar, não o que o worker usa para baixar.
-      ...(msg.mediaType ? { media_url: msg.externalId, media_mime: mimeHintDeMidia(msg.mediaType) } : {}),
-      ...(msg.fileUrl ? { metadata: { uazapi_file_url: msg.fileUrl } } : {}),
+      //
+      // `media_mime`: prefere o mimetype REAL do proto (`msg.mediaMime`,
+      // medido em `content.mimetype`) sobre o palpite fixo — só cai no
+      // palpite quando o payload não trouxe (ex.: backend antigo do UAZAPI).
+      // O worker de persistência (`media-persist-worker`) sobrescreve os dois
+      // com o mime verdadeiro assim que baixa os bytes; isto aqui é só o que
+      // a tela mostra ANTES disso acontecer.
+      ...(msg.mediaType
+        ? { media_url: msg.externalId, media_mime: msg.mediaMime ?? mimeHintDeMidia(msg.mediaType) }
+        : {}),
+      ...(msg.fileUrl || msg.fileName
+        ? {
+            metadata: {
+              ...(msg.fileUrl ? { uazapi_file_url: msg.fileUrl } : {}),
+              ...(msg.fileName ? { uazapi_file_name: msg.fileName } : {}),
+            },
+          }
+        : {}),
       ...(msg.sentAt ? { sent_at: msg.sentAt } : {}),
     })
     .select("id")

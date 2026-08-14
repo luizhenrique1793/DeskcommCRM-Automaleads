@@ -27,10 +27,11 @@ const BASE_MSG = {
   senderName: "Maria",
   isGroup: false,
   fromMe: false,
-  // `type` é o discriminante REAL de mídia (medido em produção: texto puro
-  // chega com `type:"text"` e `messageType:"Conversation"` ao mesmo tempo —
-  // ver o cabeçalho de `../uazapi/webhook.ts`). `messageType` fica aqui só
-  // como fixture realista, não como o que o parser lê para decidir mídia.
+  // `type` só distingue "text" de "media" (medido: texto puro chega com
+  // `type:"text"` e `messageType:"Conversation"` ao mesmo tempo — ver o
+  // cabeçalho de `../uazapi/webhook.ts`). A ESPÉCIE de mídia mora em
+  // `mediaType` (campo próprio, testado abaixo) — `messageType` fica aqui só
+  // como fixture realista, não como o que o parser lê.
   type: "text",
   messageType: "Conversation",
   messageTimestamp: 1755000000000,
@@ -77,7 +78,7 @@ describe("parseUazapiMessage — texto", () => {
 
 // 13 — webhook de imagem
 describe("parseUazapiMessage — mídia (imagem)", () => {
-  it("type 'image' com fileURL vira mediaType+fileUrl", () => {
+  it("fallback: SEM mediaType próprio, usa 'type' — mantém instalações antigas funcionando", () => {
     const msg = parseUazapiMessage(
       envelope("message", {
         ...BASE_MSG,
@@ -89,11 +90,71 @@ describe("parseUazapiMessage — mídia (imagem)", () => {
     );
     expect(msg).toMatchObject({ mediaType: "image", fileUrl: "https://cdn/img.jpg", text: "legenda" });
   });
+
+  it("REAL: type:'media' + mediaType:'image' próprio + content.mimetype — espécie e mime vêm do campo certo", () => {
+    // Medido em homologação (2026-08-14): uma imagem de verdade chega com
+    // `type:"media"` (NUNCA "image") — a espécie mora em `mediaType`, campo
+    // separado. `content` carrega o proto original (mimetype, tamanho, URL
+    // temporária). Este é o formato que quebrava antes desta correção: toda
+    // imagem real virava `mediaType:"media"` e caía em "document" genérico.
+    const msg = parseUazapiMessage(
+      envelope("message", {
+        ...BASE_MSG,
+        type: "media",
+        mediaType: "image",
+        messageType: "ImageMessage",
+        text: "",
+        content: {
+          URL: "https://mmg.whatsapp.net/o1/v/t24/...",
+          mimetype: "image/jpeg",
+          fileLength: 54091,
+          width: 554,
+          height: 556,
+        },
+      }),
+    );
+    // `text:""` no payload real vira `null` — `str()` trata string vazia como
+    // ausente, mesma convenção do resto deste arquivo (não é regressão).
+    expect(msg).toMatchObject({ mediaType: "image", mediaMime: "image/jpeg", text: null });
+  });
+
+  it("REAL: caption não-vazia de mídia continua em 'text' (mesmo campo do texto puro)", () => {
+    const msg = parseUazapiMessage(
+      envelope("message", {
+        ...BASE_MSG,
+        type: "media",
+        mediaType: "image",
+        text: "olha essa foto",
+        content: { mimetype: "image/jpeg" },
+      }),
+    );
+    expect(msg?.text).toBe("olha essa foto");
+  });
+
+  it("content.fileName ausente (não confirmado em payload real de imagem) → fileName:null, sem quebrar", () => {
+    const msg = parseUazapiMessage(
+      envelope("message", { ...BASE_MSG, type: "media", mediaType: "image", content: { mimetype: "image/jpeg" } }),
+    );
+    expect(msg?.fileName).toBeNull();
+  });
+
+  it("content.fileName presente (best-effort, nome padrão do proto DocumentMessage) → preservado", () => {
+    const msg = parseUazapiMessage(
+      envelope("message", {
+        ...BASE_MSG,
+        type: "media",
+        mediaType: "document",
+        content: { mimetype: "application/pdf", fileName: "relatorio.pdf" },
+      }),
+    );
+    expect(msg?.fileName).toBe("relatorio.pdf");
+    expect(msg?.mediaMime).toBe("application/pdf");
+  });
 });
 
 // 14 — webhook de áudio
 describe("parseUazapiMessage — mídia (áudio/PTT)", () => {
-  it("type 'ptt' vira mediaType 'ptt'", () => {
+  it("fallback: SEM mediaType próprio, usa 'type'", () => {
     const msg = parseUazapiMessage(
       envelope("message", {
         ...BASE_MSG,
@@ -105,6 +166,48 @@ describe("parseUazapiMessage — mídia (áudio/PTT)", () => {
     );
     expect(msg?.mediaType).toBe("ptt");
     expect(msg?.fileUrl).toBe("https://cdn/a.ogg");
+  });
+
+  it("REAL: type:'media' + mediaType:'ptt' — voz não vira documento genérico", () => {
+    const msg = parseUazapiMessage(
+      envelope("message", {
+        ...BASE_MSG,
+        type: "media",
+        mediaType: "ptt",
+        messageType: "AudioMessage",
+        content: { mimetype: "audio/ogg; codecs=opus", seconds: 4 },
+      }),
+    );
+    expect(msg?.mediaType).toBe("ptt");
+    expect(msg?.mediaMime).toBe("audio/ogg; codecs=opus");
+  });
+
+  it("sticker: mediaType:'sticker' preserva o mime real (webp), não cai em document", () => {
+    const msg = parseUazapiMessage(
+      envelope("message", {
+        ...BASE_MSG,
+        type: "media",
+        mediaType: "sticker",
+        messageType: "StickerMessage",
+        content: { mimetype: "image/webp" },
+      }),
+    );
+    expect(msg?.mediaType).toBe("sticker");
+    expect(msg?.mediaMime).toBe("image/webp");
+  });
+
+  it("vídeo (inclui GIF, que chega como vídeo com gifPlayback): mediaType:'video'", () => {
+    const msg = parseUazapiMessage(
+      envelope("message", {
+        ...BASE_MSG,
+        type: "media",
+        mediaType: "video",
+        messageType: "VideoMessage",
+        content: { mimetype: "video/mp4", gifPlayback: true },
+      }),
+    );
+    expect(msg?.mediaType).toBe("video");
+    expect(msg?.mediaMime).toBe("video/mp4");
   });
 });
 
@@ -317,6 +420,40 @@ describe("formato REAL do payload (não o do OpenAPI)", () => {
     const env = parseUazapiEnvelope(conexaoReal("connecting", { qrcode: "data:image/png;base64,AAAA" }))!;
     const conexao = parseUazapiConnection(env);
     expect(conexao).toEqual({ status: "connecting" });
+  });
+
+  it("mensagem de imagem real (envelope completo, EventType+message) vira UazapiInboundMessage com espécie e mime corretos", () => {
+    // Estrutura fiel a um evento REAL capturado (2026-08-14, valores
+    // anonimizados) — a mesma classe de divergência do EventType/instanceName
+    // documentada acima, mas para MÍDIA: `message.type` é "media" (não
+    // "image"), e a espécie/mime vêm de `message.mediaType`/`message.content`.
+    const imagemReal = {
+      ...mensagemReal,
+      message: {
+        ...mensagemReal.message,
+        id: "3EB0REAL0IMG",
+        messageid: "3EB0REAL0IMG",
+        text: "",
+        type: "media",
+        mediaType: "image",
+        messageType: "ImageMessage",
+        content: {
+          URL: "https://mmg.whatsapp.net/o1/v/fake",
+          mimetype: "image/jpeg",
+          fileLength: 54091,
+          width: 554,
+          height: 556,
+        },
+      },
+    };
+    const env = parseUazapiEnvelope(imagemReal)!;
+    const msg = parseUazapiMessage(env);
+    expect(msg).toMatchObject({
+      externalId: "3EB0REAL0IMG",
+      mediaType: "image",
+      mediaMime: "image/jpeg",
+      text: null, // `text:""` no payload real vira null — mesma convenção do str()
+    });
   });
 
   it("retrocompatível: o formato documentado no OpenAPI (event/instance string/data) continua funcionando", () => {

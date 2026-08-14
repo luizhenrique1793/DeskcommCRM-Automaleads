@@ -175,6 +175,59 @@ describe("ingestUazapiInbound — o que grava", () => {
     expect(ins.metadata).toEqual({ uazapi_file_url: "https://cdn/img.jpg" });
   });
 
+  it("mídia usa o mimetype REAL do payload (content.mimetype), não o palpite fixo", async () => {
+    const admin = fakeAdmin();
+    await ingestUazapiInbound(admin, {
+      organizationId: "org-1",
+      channelSessionId: "sess-1",
+      msg: parsed({ type: "media", mediaType: "document", content: { mimetype: "application/pdf" } }),
+    });
+    const ins = ops.find((o) => o.tabela === "messages" && o.op === "insert")?.payload as Record<
+      string,
+      unknown
+    >;
+    // Palpite fixo (mimeHintDeMidia) devolveria null para "document" — o
+    // mimetype real do proto é o que a tela usa até o worker baixar os bytes.
+    expect(ins.media_mime).toBe("application/pdf");
+    expect(ins.type).toBe("document");
+  });
+
+  it("sem mimetype real no payload, cai no palpite fixo por espécie (compat com backend antigo)", async () => {
+    const admin = fakeAdmin();
+    await ingestUazapiInbound(admin, {
+      organizationId: "org-1",
+      channelSessionId: "sess-1",
+      msg: parsed({ type: "image" }), // sem `content` — formato antigo/fallback
+    });
+    const ins = ops.find((o) => o.tabela === "messages" && o.op === "insert")?.payload as Record<
+      string,
+      unknown
+    >;
+    expect(ins.media_mime).toBe("image/jpeg");
+  });
+
+  it("fileName (best-effort) entra em metadata junto com fileUrl, sem um sobrescrever o outro", async () => {
+    const admin = fakeAdmin();
+    await ingestUazapiInbound(admin, {
+      organizationId: "org-1",
+      channelSessionId: "sess-1",
+      msg: parsed({
+        type: "media",
+        mediaType: "document",
+        fileURL: "https://cdn/doc.pdf",
+        content: { mimetype: "application/pdf", fileName: "relatorio.pdf" },
+      }),
+    });
+    const ins = ops.find((o) => o.tabela === "messages" && o.op === "insert")?.payload as Record<
+      string,
+      unknown
+    >;
+    expect(ins.metadata).toEqual({
+      uazapi_file_url: "https://cdn/doc.pdf",
+      uazapi_file_name: "relatorio.pdf",
+    });
+  });
+
   it("pede persistência de mídia (emit_event) quando há mediaType, mesmo sem fileURL", async () => {
     const admin = fakeAdmin();
     await ingestUazapiInbound(admin, {
