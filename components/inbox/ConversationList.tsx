@@ -95,7 +95,7 @@ export function ConversationList({
   }
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full flex-col" data-realtime-status={q.realtimeStatus.toLowerCase()}>
       <div className="flex-1 overflow-y-auto">
         {items.map((c, i) => (
           <ConversationListItem

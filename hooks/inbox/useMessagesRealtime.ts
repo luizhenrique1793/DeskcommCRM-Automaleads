@@ -1,7 +1,8 @@
 "use client";
-import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useQueryClient, type InfiniteData } from "@tanstack/react-query";
 import { useCallback } from "react";
 import { useRealtimeChannel } from "@/hooks/realtime/useRealtimeChannel";
+import { useRefetchDeSeguranca } from "@/hooks/realtime/useRefetchDeSeguranca";
 import { apiClient } from "@/lib/api/client";
 import { showApiError } from "@/components/feedback/ApiErrorToast";
 import type { Message } from "@/lib/types/messaging";
@@ -58,7 +59,9 @@ export function useMessagesRealtime(conversationId: string | null) {
     qc.invalidateQueries({ queryKey: ["conversations"] });
   }, [qc, conversationId]);
 
-  useRealtimeChannel({
+  // Mesmo cuidado do board/lista de conversas: o status não pode ser
+  // descartado, senão "canal morreu" e "nada aconteceu" são indistinguíveis.
+  const { status: realtimeStatus, ultimaEntrega } = useRealtimeChannel({
     name: conversationId ? `messages-${conversationId}` : "messages-disabled",
     postgresChanges: conversationId
       ? {
@@ -72,5 +75,31 @@ export function useMessagesRealtime(conversationId: string | null) {
     enabled: !!conversationId,
   });
 
-  return query;
+  // A REDE DE SEGURANÇA — mesmo mecanismo do board/dossiê, reutilizado, nunca
+  // reinventado. Cura a mesma classe de morte silenciosa que
+  // `tests/prova-raio-do-silencio.ts` mediu na conversa aberta: canal
+  // `SUBSCRIBED`, entrega morta, tela parada até um F5.
+  //
+  // Assinatura: contagem de mensagens + id da mais recente por `created_at` —
+  // sensível a mensagem nova entrando (o que o canal deveria trazer),
+  // insensível a reordenação de páginas já carregadas.
+  const seguranca = useRefetchDeSeguranca<InfiniteData<MessagesResponse>>({
+    queryKey,
+    assinatura: (d) => {
+      const msgs = d?.pages.flatMap((p) => p.data) ?? [];
+      let maior = "";
+      let maiorId = "";
+      for (const m of msgs) {
+        if (m.created_at > maior) {
+          maior = m.created_at;
+          maiorId = m.id;
+        }
+      }
+      return `${msgs.length}:${maiorId}`;
+    },
+    ultimaEntrega,
+    enabled: !!conversationId,
+  });
+
+  return { ...query, realtimeStatus, seguranca };
 }

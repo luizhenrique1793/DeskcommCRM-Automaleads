@@ -1,7 +1,8 @@
 "use client";
-import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useQueryClient, type InfiniteData } from "@tanstack/react-query";
 import { useCallback } from "react";
 import { useRealtimeChannel } from "@/hooks/realtime/useRealtimeChannel";
+import { useRefetchDeSeguranca } from "@/hooks/realtime/useRefetchDeSeguranca";
 import { apiClient } from "@/lib/api/client";
 import { showApiError } from "@/components/feedback/ApiErrorToast";
 import type { Conversation } from "@/lib/types/messaging";
@@ -115,7 +116,11 @@ export function useConversationsRealtime(
   // com o filtro amplo `organization_id=eq.<org>` abaixo. Prova do filtro em
   // tests/invariants/gov-5-visibility-scope.test.ts (SELECT sob role agent = 0 rows
   // para conversa de outro atendente — o mesmo SELECT que o Realtime executa).
-  useRealtimeChannel({
+  // O STATUS DO CANAL NÃO PODE SER DESCARTADO — mesmo cuidado do board
+  // (`hooks/kanban/useBoard.ts`): sem atribuir o retorno, "assinatura morreu" e
+  // "nada aconteceu" ficam indistinguíveis, porque as duas têm a mesma
+  // aparência na tela (silêncio).
+  const { status: realtimeStatus, ultimaEntrega } = useRealtimeChannel({
     name: orgId ? `inbox-${orgId}` : "inbox-disabled",
     postgresChanges: orgId
       ? {
@@ -129,5 +134,35 @@ export function useConversationsRealtime(
     enabled: !!orgId,
   });
 
-  return query;
+  // A REDE DE SEGURANÇA — o MESMO mecanismo que já cura board e dossiê
+  // (`useRefetchDeSeguranca`), nunca reinventado aqui. Sem ela, um canal que
+  // para de entregar em silêncio (`SUBSCRIBED` mas morto — medido em
+  // `tests/prova-raio-do-silencio.ts`) deixa a lista congelada até um F5
+  // manual, porque `refetchOnWindowFocus` só ajuda quem troca de aba — não
+  // quem fica olhando a tela o tempo todo, que foi o caso relatado.
+  //
+  // Assinatura: contagem de conversas + o par (maior `last_message_at`, id do
+  // dono dele) — sensível a exatamente o que o canal deveria ter trazido
+  // (mensagem nova reordena/atualiza a prévia de UMA conversa) e insensível a
+  // metadata que não afeta a lista.
+  const seguranca = useRefetchDeSeguranca<InfiniteData<ListResponse>>({
+    queryKey,
+    assinatura: (d) => {
+      const conversas = d?.pages.flatMap((p) => p.data) ?? [];
+      let maior = "";
+      let maiorId = "";
+      for (const c of conversas) {
+        const carimbo = c.last_message_at ?? c.updated_at ?? "";
+        if (carimbo > maior) {
+          maior = carimbo;
+          maiorId = c.id;
+        }
+      }
+      return `${conversas.length}:${maior}:${maiorId}`;
+    },
+    ultimaEntrega,
+    enabled: !!orgId,
+  });
+
+  return { ...query, realtimeStatus, seguranca };
 }
