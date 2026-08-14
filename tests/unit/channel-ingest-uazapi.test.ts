@@ -249,6 +249,39 @@ describe("ingestUazapiInbound — o que grava", () => {
       p_at: new Date(1755000000000).toISOString(),
     });
   });
+
+  it("prévia da conversa: mídia SEM legenda vira '[tipo]' (como o WAHA), não string vazia", async () => {
+    // Bug real (2026-08-14): p_preview:"" de um áudio sem legenda apagava a
+    // prévia da conversa inteira — a tela caía em "Sem mensagens" mesmo com
+    // mensagens de verdade. `text` chega `null` do parser quando o payload
+    // real trouxe `text:""` (mídia sem legenda é o caso comum).
+    const admin = fakeAdmin();
+    await ingestUazapiInbound(admin, {
+      organizationId: "org-1",
+      channelSessionId: "sess-1",
+      msg: parsed({ type: "media", mediaType: "ptt", text: "", content: { mimetype: "audio/ogg" } }),
+    });
+    const carimbo = ops.find((o) => o.op === "fn_mark_conversation_message");
+    expect(carimbo?.payload).toMatchObject({ p_preview: "[audio]" });
+  });
+
+  it("prévia da conversa: mídia COM legenda usa a legenda, não o tipo", async () => {
+    const admin = fakeAdmin();
+    await ingestUazapiInbound(admin, {
+      organizationId: "org-1",
+      channelSessionId: "sess-1",
+      msg: parsed({ type: "media", mediaType: "image", text: "olha isso", content: { mimetype: "image/jpeg" } }),
+    });
+    const carimbo = ops.find((o) => o.op === "fn_mark_conversation_message");
+    expect(carimbo?.payload).toMatchObject({ p_preview: "olha isso" });
+  });
+
+  it("prévia da conversa: texto puro continua usando o próprio texto", async () => {
+    const admin = fakeAdmin();
+    await ingestUazapiInbound(admin, { organizationId: "org-1", channelSessionId: "sess-1", msg: parsed() });
+    const carimbo = ops.find((o) => o.op === "fn_mark_conversation_message");
+    expect(carimbo?.payload).toMatchObject({ p_preview: "oi" });
+  });
 });
 
 describe("ingestUazapiInbound — status", () => {

@@ -244,6 +244,23 @@ function mimeHintDeMidia(messageType: string): string | null {
   }
 }
 
+/**
+ * Prévia pro Inbox/Kanban: mesmo padrão do WAHA (`previewFromMessage` em
+ * `lib/waha/ingest.ts`) — `[audio]`/`[image]`/etc quando não há legenda.
+ *
+ * Sem isto, mídia sem caption gravava `p_preview: ""` — pior que não
+ * atualizar, porque a chamada SEGUINTE (imagem/áudio chegando logo após um
+ * texto) apagava a prévia da conversa inteira, e a tela caía no fallback
+ * genérico "Sem mensagens" mesmo com mensagens de verdade ali. Medido em
+ * homologação (2026-08-14): áudio de teste sem legenda zerou a prévia de uma
+ * conversa que JÁ tinha texto.
+ */
+function previewDeMensagem(msg: UazapiInboundMessage): string {
+  if (msg.text) return msg.text.slice(0, 200);
+  if (msg.mediaType) return `[${tipoDeMidia(msg.mediaType)}]`;
+  return "";
+}
+
 async function marcarConversa(
   admin: SupabaseClient,
   conversationId: string,
@@ -252,7 +269,7 @@ async function marcarConversa(
   const { error } = await admin.rpc("fn_mark_conversation_message" as never, {
     p_conv: conversationId,
     p_direction: msg.direction,
-    p_preview: (msg.text ?? "").slice(0, 200),
+    p_preview: previewDeMensagem(msg),
     p_at: msg.sentAt ?? new Date().toISOString(),
   } as never);
   if (error) {
