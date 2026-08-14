@@ -113,6 +113,22 @@ function asRecord(v: unknown): Record<string, unknown> | null {
   return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
 }
 
+/**
+ * `instance.owner` já vem só-dígitos ("554488347632"). `status.jid` é
+ * fallback para quando `owner` ainda não foi preenchido — medido em produção
+ * (2026-08-14): é uma STRING ("554488347632:8@s.whatsapp.net"), não o objeto
+ * `{user: "..."}` que o OpenAPI documenta; o sufixo ":8" é o device id do
+ * multi-device e não faz parte do número.
+ */
+function ownerDigitsFrom(instance: Record<string, unknown> | null, statusObj: Record<string, unknown> | null): string | null {
+  const owner = asString(instance?.owner);
+  if (owner) return owner.replace(/\D/g, "") || null;
+  const jid = asString(statusObj?.jid);
+  if (!jid) return null;
+  const digitos = jid.split(/[:@]/)[0]?.replace(/\D/g, "") ?? "";
+  return digitos || null;
+}
+
 export const uazapiClient = {
   /** `GET /instance/status` — o estado agora, incluindo QR/pairing atualizados. */
   async getStatus(creds: UazapiCredentials): Promise<UazapiInstanceStatus | null> {
@@ -120,7 +136,6 @@ export const uazapiClient = {
     if (status === 401 || status === 403) return null;
     const instance = asRecord(json?.instance);
     const statusObj = asRecord(json?.status);
-    const jid = asRecord(statusObj?.jid);
     return {
       status: asString(instance?.status) ?? "disconnected",
       connected: statusObj?.connected === true,
@@ -129,7 +144,7 @@ export const uazapiClient = {
       paircode: asString(instance?.paircode),
       profileName: asString(instance?.profileName),
       profilePicUrl: asString(instance?.profilePicUrl),
-      ownerJid: jid ? (asString(jid.user) ?? null) : null,
+      ownerJid: ownerDigitsFrom(instance, statusObj),
       // `instance.name`, NÃO `instance.id` — medido em homologação real
       // (2026-08-13): o webhook desta instalação devolve `instanceName` (o
       // MESMO valor de `instance.name` aqui), nunca `instance.id`. Guardar o

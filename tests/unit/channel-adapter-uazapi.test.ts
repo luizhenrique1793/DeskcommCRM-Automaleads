@@ -241,12 +241,15 @@ describe("resolvePhoneForIdentity", () => {
 
 // 9/10/11 — health conectado / desconectado / API inalcançável
 describe("checkHealth", () => {
-  it("connected → reachable:true, status:WORKING, phoneNumber = ownerJid só-dígitos", async () => {
+  it("connected → reachable:true, status:WORKING, phoneNumber = instance.owner só-dígitos", async () => {
+    // Formato REAL medido em produção (2026-08-14): `instance.owner` já vem
+    // só-dígitos; `status.jid` é STRING ("<numero>:<device>@s.whatsapp.net"),
+    // não o objeto `{user}` que o OpenAPI documenta.
     fetchMock.mockResolvedValueOnce({
       status: 200,
       json: async () => ({
-        instance: { status: "connected" },
-        status: { connected: true, loggedIn: true, jid: { user: "5511999999999" } },
+        instance: { status: "connected", owner: "554488347632" },
+        status: { connected: true, loggedIn: true, jid: "554488347632:8@s.whatsapp.net" },
       }),
     });
     const h = await uazapiAdapter.checkHealth!({ sessionRef: CREDS.instanceId });
@@ -254,11 +257,23 @@ describe("checkHealth", () => {
       reachable: true,
       status: "WORKING",
       detail: null,
-      phoneNumber: "5511999999999",
+      phoneNumber: "554488347632",
     });
   });
 
-  it("disconnected → reachable:true, status:STOPPED, sem jid → phoneNumber:null", async () => {
+  it("connected sem instance.owner → cai para status.jid (string), descarta o sufixo de device", async () => {
+    fetchMock.mockResolvedValueOnce({
+      status: 200,
+      json: async () => ({
+        instance: { status: "connected" },
+        status: { connected: true, loggedIn: true, jid: "554488347632:8@s.whatsapp.net" },
+      }),
+    });
+    const h = await uazapiAdapter.checkHealth!({ sessionRef: CREDS.instanceId });
+    expect(h.phoneNumber).toBe("554488347632");
+  });
+
+  it("disconnected → reachable:true, status:STOPPED, sem owner/jid → phoneNumber:null", async () => {
     fetchMock.mockResolvedValueOnce({
       status: 200,
       json: async () => ({ instance: { status: "disconnected" }, status: { connected: false } }),
