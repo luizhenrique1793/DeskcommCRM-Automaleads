@@ -58,6 +58,23 @@ describe("registro no seam", () => {
   });
 });
 
+describe("isConfigured — sempre true, nunca olha env", () => {
+  // Bug real (2026-08-14): checar só `process.env.UAZAPI_BASE_URL` fazia TODA
+  // instância "Gateway próprio" (credencial na sessão, o caminho normal —
+  // env é só fallback de instalação única) responder "não configurado", e
+  // `_handler.ts` nunca chamava `send()` — mensagem presa em `queued` para
+  // sempre, mesmo com o canal WORKING e enviando de verdade por outro teste.
+  it("true mesmo sem NENHUMA env do UAZAPI setada — quem decide é send(), que pode ir ao banco", () => {
+    const antes = process.env.UAZAPI_BASE_URL;
+    delete process.env.UAZAPI_BASE_URL;
+    try {
+      expect(uazapiAdapter.isConfigured()).toBe(true);
+    } finally {
+      if (antes !== undefined) process.env.UAZAPI_BASE_URL = antes;
+    }
+  });
+});
+
 // 5/6 — recipient por telefone e por JID/LID
 describe("resolveRecipient", () => {
   it("telefone vira dígitos puros — /send/text aceita número simples", () => {
@@ -136,15 +153,15 @@ describe("send — texto", () => {
     expect(r.externalId).toBe("3EB0ABC123");
   });
 
-  it("sem credencial devolve externalId null, sem chamar fetch — canal não configurado é noop", async () => {
+  it("sem credencial LANÇA uazapi_not_configured, sem chamar fetch — _handler.ts traduz isso em queued", async () => {
+    // Bug real (2026-08-14): devolver `{externalId:null}` em silêncio fazia
+    // `_handler.ts` gravar `status:'sent'` sem id — "enviado" para algo que
+    // nunca saiu. Precisa LANÇAR: é o único jeito de `_handler.ts` (que casa
+    // pelo prefixo `adapter.codes.notConfigured`) saber que não saiu.
     credsRef.current = null;
-    const r = await uazapiAdapter.send({
-      sessionRef: "x",
-      to: "5511999999999",
-      kind: "text",
-      body: "olá",
-    });
-    expect(r.externalId).toBeNull();
+    await expect(
+      uazapiAdapter.send({ sessionRef: "x", to: "5511999999999", kind: "text", body: "olá" }),
+    ).rejects.toThrow(/^uazapi_not_configured/);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });

@@ -66,11 +66,29 @@ export const uazapiAdapter: ChannelAdapter = {
     return null;
   },
 
-  // Síncrono, então não pode consultar a sessão gravada — só diz se HÁ
-  // caminho de credencial (env). A pergunta "esta ORG específica está
-  // configurada?" só `send`/`checkHealth` respondem, que podem ir ao banco.
+  /**
+   * Sempre `true` — e NÃO `!!process.env.UAZAPI_BASE_URL`, que é o que este
+   * método fazia antes.
+   *
+   * Medido em homologação (2026-08-14): TODA mensagem mandada pelo composer
+   * numa instância "Gateway próprio" (credencial gravada na SESSÃO, o caminho
+   * normal — env é só fallback de instalação única) ficava presa em `queued`
+   * com `queued_reason: uazapi_not_configured` para sempre, mesmo com o canal
+   * `WORKING` e a mensagem chegando no celular via outro teste. Causa: este
+   * método é SÍNCRONO (não pode consultar o banco) e checava só o env, que
+   * numa instalação "Gateway próprio" nunca é setado — não é esquecimento, é o
+   * desenho: a credencial mora em `channel_sessions`, não em `.env`.
+   *
+   * Mesma classe de defeito que `../adapters/zernio.ts` já teve e já resolveu
+   * (ver o comentário lá) — `send()`, que é async e pode ir ao banco
+   * (`resolveUazapiCreds`, sessão primeiro, env como fallback), é quem
+   * realmente sabe responder "esta ORG está configurada?". Ele agora LANÇA
+   * `uazapi_not_configured` quando não acha credencial nenhuma, e
+   * `app/api/v1/messages/_handler.ts` já sabe traduzir isso em `queued` — o
+   * mesmo desfecho de hoje, só que depois de perguntar de verdade, não antes.
+   */
   isConfigured(): boolean {
-    return !!process.env.UAZAPI_BASE_URL;
+    return true;
   },
 
   codes: {
@@ -82,7 +100,15 @@ export const uazapiAdapter: ChannelAdapter = {
   async send(envelope: OutboundEnvelope): Promise<{ externalId: string | null }> {
     const admin = createAdminClient();
     const creds = await resolveUazapiCreds(admin, envelope.sessionRef);
-    if (!creds) return { externalId: null };
+    // LANÇA, não devolve `{externalId: null}` — com `isConfigured` sempre
+    // `true`, quem desiste é este ponto. Devolver null silenciosamente faria
+    // `_handler.ts` gravar `status:'sent'` sem id, dizendo "enviado" para uma
+    // mensagem que nunca saiu (mesmo raciocínio de `../adapters/zernio.ts`).
+    if (!creds) {
+      throw new Error(
+        "uazapi_not_configured: nenhuma credencial para esta sessão (nem gravada, nem no ambiente).",
+      );
+    }
 
     const result = envelope.media
       ? await uazapiClient.sendMedia(creds, envelope.to, {
