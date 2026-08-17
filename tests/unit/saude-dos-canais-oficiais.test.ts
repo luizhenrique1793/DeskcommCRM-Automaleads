@@ -245,7 +245,7 @@ describe("a varredura não fecha o que o provedor abriu", () => {
   });
 });
 
-describe("o cron enxerga os três canais", () => {
+describe("o cron enxerga todos os canais", () => {
   it("todo adapter registrado sabe responder pela própria saúde", async () => {
     // O cron pula quem não implementa, SEM log e sem contador — então um canal
     // sem este método é invisível para a Central, e a ausência não aparece em

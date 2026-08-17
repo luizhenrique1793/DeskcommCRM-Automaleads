@@ -11,10 +11,17 @@ import { useClaimConversation } from "@/hooks/inbox/useClaimConversation";
 import { useReleaseConversation } from "@/hooks/inbox/useReleaseConversation";
 import { useCloseConversation } from "@/hooks/inbox/useCloseConversation";
 import { useResumeAiAttendance } from "@/hooks/inbox/useResumeAiAttendance";
+import { useSaveContactToWhatsapp } from "@/hooks/inbox/useSaveContactToWhatsapp";
 import { ReassignDialog } from "@/components/inbox/ReassignDialog";
 import { SnoozeButton } from "@/components/inbox/SnoozeButton";
 import type { ConversationWithContact } from "@/hooks/inbox/useConversationsRealtime";
 import { rotuloDoContato } from "@/lib/contacts/rotulo-do-contato";
+// Import DIRETO do módulo puro, não do barrel `@/lib/channels`: o barrel
+// reexporta os adapters, e um deles importa `createAdminClient` (service
+// role) — puxar isso para um componente client vazaria código server-only
+// para o bundle do browser. `capabilities.ts` não tem essa dependência.
+import { capabilitiesOf } from "@/lib/channels/capabilities";
+import type { ChannelProvider } from "@/lib/channels/types";
 
 interface Props {
   conversation: ConversationWithContact;
@@ -41,11 +48,28 @@ export function ConversationHeader({ conversation }: Props) {
   const release = useReleaseConversation();
   const close = useCloseConversation();
   const retomar = useResumeAiAttendance();
+  const salvarContato = useSaveContactToWhatsapp();
   const [reassignOpen, setReassignOpen] = useState(false);
 
   const c = conversation.contacts ?? null;
   const displayName = rotuloDoContato(c);
   const phone = c?.phone_number ?? null;
+  const provider = conversation.channel_sessions?.provider ?? null;
+  // A tela pergunta a CAPABILITY, nunca compara o provider contra o nome de
+  // um canal específico — invariante 1 de `docs/doctrine/restricao-de-canal.md`.
+  // `capabilitiesOf` é fail-closed
+  // (lança para provider fora da matriz) — o try/catch trata "não sei" como
+  // "não oferece", nunca deixa a tela quebrar por um dado de banco estranho.
+  let podeSalvarNaAgenda = false;
+  try {
+    podeSalvarNaAgenda =
+      !!provider &&
+      !!phone &&
+      !!conversation.channel_session_id &&
+      capabilitiesOf(provider as ChannelProvider).canSaveContact;
+  } catch {
+    podeSalvarNaAgenda = false;
+  }
   const status = conversation.status;
   const isMineAssigned = conversation.assigned_to_user_id === user.id;
   const isOpen = status === "open" || conversation.assigned_to_user_id == null;
@@ -182,6 +206,21 @@ export function ConversationHeader({ conversation }: Props) {
             Abaixo de 1280 o painel não existe, e aí esta é a única porta para o
             contato — por isso a condição é a mesma do painel, e não um valor
             escolhido à parte. Não é esconder ação; é não repeti-la. */}
+        {podeSalvarNaAgenda && c?.id && (
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={salvarContato.isPending}
+            onClick={() =>
+              salvarContato.mutate({
+                contact_id: c.id,
+                channel_session_id: conversation.channel_session_id as string,
+              })
+            }
+          >
+            {salvarContato.isPending ? "Salvando..." : "Adicionar ao WhatsApp"}
+          </Button>
+        )}
         {c?.id && (
           <Button asChild size="sm" variant="ghost" className="xl:hidden">
             <Link href={`/app/contacts/${c.id}`} className="flex items-center gap-1">

@@ -22,6 +22,10 @@ export const CHANNEL_CAPABILITIES: Record<ChannelProvider, ChannelCapabilities> 
     voiceNote: "server-convert",
     groups: "full",
     costPerMessage: false,
+    // WAHA tem endpoint de contato na engine NOWEB, mas nada no repo chama —
+    // capability sem implementação seria código morto do outro lado
+    // (invariante 2). Fica `false` até alguém implementar de verdade.
+    canSaveContact: false,
   },
   // Hetero-restrição: não me banem, mas a Meta me proíbe e me cobra.
   meta_cloud: {
@@ -35,6 +39,9 @@ export const CHANNEL_CAPABILITIES: Record<ChannelProvider, ChannelCapabilities> 
     voiceNote: "opus-only",
     groups: "limited",
     costPerMessage: true,
+    // A Graph API não tem "adicionar contato à agenda" — não é celular, é
+    // conta business. O conceito não existe para este canal.
+    canSaveContact: false,
   },
   // Mesma hetero-restrição do canal oficial, por baixo: é um BSP: a WABA é da
   // Meta, os templates são aprovados pela Meta e a janela de 24h é da Meta. O
@@ -68,6 +75,33 @@ export const CHANNEL_CAPABILITIES: Record<ChannelProvider, ChannelCapabilities> 
     voiceNote: "opus-only",
     groups: "limited",
     costPerMessage: true,
+    // O intermediário fala com a agenda do WHATSAPP CLOUD API, que não tem
+    // esse conceito (mesma razão do meta_cloud).
+    canSaveContact: false,
+  },
+  // Auto-restrição, como o WAHA: QR não oficial, o WhatsApp bane por abuso —
+  // e por isso NÃO herda cegamente os valores dele (ver módulo `uazapi/`).
+  //
+  //  - `voiceNote: "opus-only"`. O OpenAPI 2.1.1 não documenta conversão
+  //    server-side para `ptt`/`audio` (sem menção a ffmpeg/opus em
+  //    `/send/media`, diferente do WAHA que converte) — na dúvida, o lado
+  //    conservador é EXIGIR o formato certo, não supor que o provedor resolve.
+  //  - `groups: "none"`. A ingestão (`uazapi/webhook.ts`) ignora mensagem de
+  //    grupo de propósito, mesma política do canal por QR (CLAUDE.md:
+  //    "Grupos: SKIP CRM binding") — declarar "full"/"limited" aqui prometeria
+  //    um caminho que não existe do outro lado.
+  //  - `canSaveContact: true`. `/contact/add` é endpoint real, medido no
+  //    OpenAPI — `POST /contact/add {number, name}` → `{success, contact}`.
+  uazapi: {
+    freeformOutsideWindow: true,
+    requiresTemplates: false,
+    canManageTemplates: false,
+    banRisk: true,
+    minIntervalMs: null,
+    voiceNote: "opus-only",
+    groups: "none",
+    costPerMessage: false,
+    canSaveContact: true,
   },
 };
 
@@ -90,6 +124,7 @@ export const DEFAULT_CHANNEL_PROVIDER: ChannelProvider = "waha";
 export const CHANNEL_PROVIDER_WAHA: ChannelProvider = "waha";
 export const CHANNEL_PROVIDER_META: ChannelProvider = "meta_cloud";
 export const CHANNEL_PROVIDER_ZERNIO: ChannelProvider = "zernio";
+export const CHANNEL_PROVIDER_UAZAPI: ChannelProvider = "uazapi";
 
 export function capabilitiesOf(provider: ChannelProvider): ChannelCapabilities {
   const caps = CHANNEL_CAPABILITIES[provider];

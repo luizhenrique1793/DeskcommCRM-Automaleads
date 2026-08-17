@@ -8446,12 +8446,25 @@ alter table public.channel_sessions alter column waha_session_name drop not null
 alter table public.channel_sessions
   add column if not exists zernio_account_id text;
 
+-- ---- vocabulário do quarto canal, UAZAPI (migration 0156) ----
+-- Mesmo bloco único, ampliado — não um quinto `drop`/`add` (regra da
+-- `baseline-constraint-reconstruida`, ver comentário logo acima). `uazapi_instance_id`
+-- é o `id` da instância (NÃO o token: o token é segredo e mora só em
+-- `uazapi_token_encrypted`, cifrado — ver `lib/channels/uazapi/credentials.ts`
+-- para o porquê da separação entre os dois). `uazapi_base_url` é NULLABLE de
+-- propósito: sem linha, `resolveUazapiCreds` cai no fallback `UAZAPI_BASE_URL`
+-- do ambiente (instalação de instância única, sem tela).
+alter table public.channel_sessions
+  add column if not exists uazapi_instance_id text,
+  add column if not exists uazapi_token_encrypted bytea,
+  add column if not exists uazapi_base_url text;
+
 alter table public.channel_sessions
   drop constraint if exists channel_sessions_provider_check;
 
 alter table public.channel_sessions
   add constraint channel_sessions_provider_check
-  check (provider = any (array['waha'::text, 'meta_cloud'::text, 'zernio'::text]));
+  check (provider = any (array['waha'::text, 'meta_cloud'::text, 'zernio'::text, 'uazapi'::text]));
 
 alter table public.channel_sessions
   drop constraint if exists channel_sessions_provider_ref_check;
@@ -8460,11 +8473,21 @@ alter table public.channel_sessions
   add constraint channel_sessions_provider_ref_check check (
     (provider = 'waha'       and waha_session_name    is not null) or
     (provider = 'meta_cloud' and meta_phone_number_id is not null) or
-    (provider = 'zernio'     and zernio_account_id    is not null)
+    (provider = 'zernio'     and zernio_account_id    is not null) or
+    (provider = 'uazapi'     and uazapi_instance_id    is not null)
   );
 
 comment on column public.channel_sessions.zernio_account_id is
   'Identificador da conta conectada NO INTERMEDIÁRIO (accountId), não o phone_number_id da Meta. É o que endereça envio e webhook. Espelhado em lib/channels/session-ref.ts.';
+
+comment on column public.channel_sessions.uazapi_instance_id is
+  'Id da instância UAZAPI (não-secreto, devolvido por /instance/create e /instance/status). Endereça envio e webhook. O token fica só em uazapi_token_encrypted. Espelhado em lib/channels/session-ref.ts.';
+
+comment on column public.channel_sessions.uazapi_token_encrypted is
+  'Token da instância UAZAPI, cifrado por fn_encrypt_oauth. Por SESSÃO (não por instalação) — mesma decisão da 0087/0132 para os canais oficial e intermediado.';
+
+comment on column public.channel_sessions.uazapi_base_url is
+  'Base do servidor UAZAPI desta instância. NULLABLE: sem linha, resolveUazapiCreds cai no fallback UAZAPI_BASE_URL do ambiente.';
 
 -- ---- o que falta para o terceiro canal ENVIAR (migration 0132) ----
 -- Espelho idempotente da 0117. Racional completo no arquivo da migration.
@@ -11738,11 +11761,20 @@ create index if not exists meta_templates_sessao_idx
 --
 -- Alargamento puro: um CHECK que aceita MAIS valores não pode ser violado por
 -- linha que já passava pelo antigo, então não precisa de backfill antes.
+-- ---- e o quarto canal (migration 0157) ----
+-- Espelho idempotente da 0151: bloco único ampliado, não um segundo. Achado em
+-- homologação real: todo POST no webhook genérico do UAZAPI (real ou de teste)
+-- caía no catch de `abrirArquivoDoWebhook` com "violates check constraint
+-- webhook_events_log_provider_check" — silencioso (`logger.warn`, sem
+-- derrubar a ingestão), então a mensagem seguia processando normalmente, mas
+-- o arquivo do corpo cru — o único instrumento para investigar o que chegou —
+-- ficava vazio. Sem ele, esta própria investigação não teria como confirmar
+-- se o UAZAPI mandou algo.
 alter table public.webhook_events_log
   drop constraint if exists webhook_events_log_provider_check;
 alter table public.webhook_events_log
   add constraint webhook_events_log_provider_check check (provider in (
-    'waha', 'nuvemshop', 'generic', 'meta_cloud', 'zernio'
+    'waha', 'nuvemshop', 'generic', 'meta_cloud', 'zernio', 'uazapi'
   ));
 
 notify pgrst, 'reload schema';

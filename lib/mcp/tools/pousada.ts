@@ -166,7 +166,18 @@ const hospedeInputShape = {
     .regex(/^\d{11}$/)
     .describe("CPF do titular da reserva, só dígitos (11 números)."),
   nome: z.string().min(2).describe("Nome completo do titular."),
-  email: z.string().email().optional().describe("E-mail do titular, se informado."),
+  // Zod .email() usa lookahead negativo no regex padrão (`(?!\.)`, `(?!.*\.\.)`)
+  // para barrar ponto duplicado/inicial — a Anthropic aceita esse regex no JSON
+  // Schema da tool, mas a validação da OpenAI recusa lookaround com "Invalid
+  // JSON schema: regex lookaround is not supported", e o agent_turn inteiro
+  // morre pra QUALQUER org (esta tool está no catálogo fixo de todas, não só
+  // de quem usa o nicho pousada). Regex sem lookaround, permissivo o bastante
+  // pro caso de uso (campo opcional, validação de tool call).
+  email: z
+    .string()
+    .regex(/^[^\s@]+@[^\s@]+\.[^\s@]+$/)
+    .optional()
+    .describe("E-mail do titular, se informado."),
   data_nascimento: z
     .string()
     .regex(/^\d{4}-\d{2}-\d{2}$/)

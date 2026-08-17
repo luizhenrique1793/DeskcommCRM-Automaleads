@@ -42,6 +42,9 @@ const FONTE: Record<ChannelProvider, FonteDeTemplates | null> = {
   waha: null,
   meta_cloud: "oficial",
   zernio: "parceiro",
+  // Mesma razão do WAHA: texto livre a qualquer hora, sem WABA por trás — não
+  // há definição aprovada a listar (capability `requiresTemplates: false`).
+  uazapi: null,
 };
 
 /** `null` quando este canal não trabalha com definições aprovadas. */

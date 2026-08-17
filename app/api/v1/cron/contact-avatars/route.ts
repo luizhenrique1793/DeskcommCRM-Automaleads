@@ -24,7 +24,14 @@ import { randomUUID } from "node:crypto";
 import type { NextRequest } from "next/server";
 
 import { ok, fail } from "@/lib/api/wrappers";
-import { DEFAULT_CHANNEL_PROVIDER, getAdapter, type ChannelProvider } from "@/lib/channels";
+import {
+  CHANNEL_SESSION_REF_COLUMNS,
+  DEFAULT_CHANNEL_PROVIDER,
+  getAdapter,
+  resolveSessionRef,
+  type ChannelProvider,
+  type ChannelSessionRef,
+} from "@/lib/channels";
 import { env } from "@/lib/env";
 import { logger } from "@/lib/logger";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -127,12 +134,17 @@ async function handle(req: NextRequest): Promise<Response> {
     try {
       const { data: sessao } = await admin
         .from("channel_sessions")
-        .select("waha_session_name, provider")
+        .select(`provider, ${CHANNEL_SESSION_REF_COLUMNS}`)
         .eq("organization_id", c.organization_id)
         .eq("status", "WORKING")
         .limit(1)
         .maybeSingle();
-      const ref = (sessao as { waha_session_name?: string | null } | null)?.waha_session_name;
+      // `resolveSessionRef`, não `waha_session_name` direto: a coluna do ref
+      // muda por provider (migration 0087), e ler só a do WAHA fazia UAZAPI
+      // (e Meta/Zernio) cair sempre em "sem ref" aqui — nenhum avatar de
+      // conexão não-WAHA era buscado, mesmo com `fetchProfilePictureUrl`
+      // implementado no adapter.
+      const ref = sessao ? resolveSessionRef(sessao as unknown as ChannelSessionRef) : null;
       if (!ref) {
         await carimbar(null);
         semFoto++;

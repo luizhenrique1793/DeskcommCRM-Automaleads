@@ -3,6 +3,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
+import { CanalGatewayClient } from "./CanalGatewayClient";
 import { CanalOficialClient } from "./CanalOficialClient";
 import { CanalParceiroClient } from "./CanalParceiroClient";
 import { ConnectionsClient } from "./ConnectionsClient";
@@ -36,7 +37,14 @@ export function ConexoesShell({ wahaConfigured }: { wahaConfigured: boolean }) {
   const router = useRouter();
   const params = useSearchParams();
   const abaParam = params.get("aba");
-  const aba = abaParam === "oficial" ? "oficial" : abaParam === "parceiro" ? "parceiro" : "numeros";
+  const aba =
+    abaParam === "oficial"
+      ? "oficial"
+      : abaParam === "parceiro"
+        ? "parceiro"
+        : abaParam === "gateway"
+          ? "gateway"
+          : "numeros";
   const sub = params.get("sub") === "templates" ? "templates" : "conexao";
 
   const irPara = (proximaAba: string, proximaSub?: string): void => {
@@ -69,10 +77,19 @@ export function ConexoesShell({ wahaConfigured }: { wahaConfigured: boolean }) {
             porque no dia em que houver um segundo parceiro esta aba não muda.
             Aqui fica o CONCEITO; lá dentro o cartão diz de quem se trata. */}
         <TabsTrigger value="parceiro">Provedor parceiro</TabsTrigger>
+        {/* Mesmo raciocínio da aba acima: o rótulo da marca vem do servidor
+            (`lib/channels/gateway`). "Gateway próprio" é o CONCEITO — servidor
+            que a própria pessoa (ou o self-host) hospeda, endereço + token —
+            distinto tanto do QR embutido quanto de uma conta parceira BSP. */}
+        <TabsTrigger value="gateway">Gateway próprio</TabsTrigger>
       </TabsList>
 
       <TabsContent value="numeros" className="mt-0">
         <ConnectionsClient wahaConfigured={wahaConfigured} />
+      </TabsContent>
+
+      <TabsContent value="gateway" className="mt-0">
+        <CanalGatewayClient />
       </TabsContent>
 
       <TabsContent value="parceiro" className="mt-0">

@@ -29,6 +29,9 @@ export type AuditAction =
   | "contact.anonymized"
   | "contact.merge_pending"
   | "contact.merged"
+  // Salvar o lead na AGENDA do transporte (WhatsApp) — feature de canal, não
+  // de contato do CRM. Ver `ChannelCapabilities.canSaveContact`.
+  | "contact.saved_to_whatsapp"
   | "lgpd.anonymize_executed"
   | "member.invited"
   | "member.accepted"
