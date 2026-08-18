@@ -25,6 +25,29 @@ import { executarChamadaPousada } from "@/lib/pousada/executor";
 import type { McpContext, McpToolDefinition } from "../types";
 
 /**
+ * CPF só com dígito verificador batendo — antes disso qualquer coisa que
+ * "parecesse" CPF (`00000000000`, `11111111111`, 11 dígitos aleatórios)
+ * passava pro PMS e virava cadastro de hóspede com CPF falso. Achado
+ * revisando as 3 tools que recebem CPF (hospede/reserva/PIX) — nenhuma delas
+ * valida o dígito, só o formato (`^\d{11}$`).
+ */
+function cpfValido(cpf: string): boolean {
+  if (!/^\d{11}$/.test(cpf)) return false;
+  if (/^(\d)\1{10}$/.test(cpf)) return false; // todos os dígitos iguais — formato válido, CPF nunca é
+  const digitos = cpf.split("").map(Number);
+  const calcularDigito = (fatorInicial: number): number => {
+    let soma = 0;
+    for (let i = 0; i < fatorInicial - 1; i++) soma += digitos[i]! * (fatorInicial - i);
+    const resto = (soma * 10) % 11;
+    return resto === 10 ? 0 : resto;
+  };
+  return calcularDigito(10) === digitos[9] && calcularDigito(11) === digitos[10];
+}
+
+const CPF_MSG = "CPF inválido (dígito verificador não confere) — confirme o número com o hóspede.";
+const cpfSchema = z.string().regex(/^\d{11}$/).refine(cpfValido, { message: CPF_MSG });
+
+/**
  * O PMS responde HTTP 200 com `idDoQuarto` preenchido mesmo quando não há
  * pacote/tarifa cadastrada pro período (visto ao vivo: agosto/2026 devolve
  * `valorTotal: 0` e `descricaoPacotes: "Pacote não encontrado"`, enquanto
@@ -161,10 +184,7 @@ export const pousadaConsultarDisponibilidade: McpToolDefinition<typeof disponibi
 // ---------------------------------------------------------------------------
 
 const hospedeInputShape = {
-  cpf: z
-    .string()
-    .regex(/^\d{11}$/)
-    .describe("CPF do titular da reserva, só dígitos (11 números)."),
+  cpf: cpfSchema.describe("CPF do titular da reserva, só dígitos (11 números)."),
   nome: z.string().min(2).describe("Nome completo do titular."),
   // Zod .email() usa lookahead negativo no regex padrão (`(?!\.)`, `(?!.*\.\.)`)
   // para barrar ponto duplicado/inicial — a Anthropic aceita esse regex no JSON
@@ -299,7 +319,7 @@ const criarReservaInputShape = {
     .min(1)
     .describe("id_titular devolvido por pousada_verificar_ou_cadastrar_hospede."),
   titular_nome: z.string().min(2),
-  cpf_titular: z.string().regex(/^\d{11}$/),
+  cpf_titular: cpfSchema,
   total_cotado: z
     .number()
     .positive()
@@ -337,6 +357,38 @@ export const pousadaCriarReserva: McpToolDefinition<typeof criarReservaInputShap
         erro: "id_titular_invalido",
         mensagem:
           "Não foi possível identificar o cadastro interno do titular. Verifique ou fale com a recepção.",
+      };
+    }
+
+    // Trava de duplicidade: hoje só existe uma instrução no PROMPT pedindo pro
+    // modelo não criar reserva repetida — frágil (o modelo pode reformular a
+    // pergunta do hóspede e concluir que é um pedido novo, ou reprocessar após
+    // timeout). Aqui é código, não sugestão: mesmo titular + mesmas datas nas
+    // últimas 6h já vira reserva no PMS, e um duplicado real também duplica
+    // COBRANÇA — o hóspede recebendo dois PIX pra pagar a mesma estadia é pior
+    // do que a tool recusar e o agente perguntar antes de tentar de novo.
+    const { data: possivelDuplicata } = await ctx.supabase
+      .from("crm_leads")
+      .select("id, custom_fields")
+      .eq("organization_id", ctx.organizationId)
+      .contains("custom_fields", {
+        cpf_titular: input.cpf_titular,
+        checkin: input.checkin,
+        checkout: input.checkout,
+      })
+      .gte("created_at", new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString())
+      .limit(1)
+      .maybeSingle();
+    if (possivelDuplicata) {
+      const reservaExistente = (possivelDuplicata.custom_fields as Record<string, unknown> | null)
+        ?.pms_reserva_id;
+      return {
+        ok: false,
+        erro: "reserva_possivelmente_duplicada",
+        reserva_id_existente: reservaExistente ? String(reservaExistente) : null,
+        mensagem:
+          "Já existe uma reserva recente (últimas 6h) para este mesmo hóspede e período — confirme com " +
+          "ele se já reservou antes de criar outra. Se for engano do sistema, peça pra recepção verificar.",
       };
     }
 
@@ -487,6 +539,9 @@ export const pousadaCriarReserva: McpToolDefinition<typeof criarReservaInputShap
           custom_fields: {
             checkin: input.checkin,
             checkout: input.checkout,
+            // Grava pra trava de duplicidade (acima nesta mesma função) conseguir
+            // comparar reserva nova × reservas recentes deste titular.
+            cpf_titular: input.cpf_titular,
             quantidade_adultos: input.quantidade_adultos,
             quantidade_criancas: input.quantidade_criancas,
             quantidade_11_12: input.quantidade_11_12,
@@ -529,10 +584,7 @@ export const pousadaCriarReserva: McpToolDefinition<typeof criarReservaInputShap
 const gerarPixInputShape = {
   reserva_id: z.string().min(1).describe("Número da reserva devolvido por pousada_criar_reserva."),
   nome_cliente: z.string().min(2),
-  cpf_cliente: z
-    .string()
-    .regex(/^\d{11}$/)
-    .describe("CPF do titular, só dígitos."),
+  cpf_cliente: cpfSchema.describe("CPF do titular, só dígitos."),
 };
 
 export const pousadaGerarCobrancaPix: McpToolDefinition<typeof gerarPixInputShape> = {
