@@ -39,6 +39,7 @@ import { TETO_TOOLS_POR_AGENTE } from "@/lib/mcp/tools/selecao-por-pacote";
 import { ModelPicker, useModelMeta } from "./ModelPicker";
 import { CredentialPicker, findCredential } from "./CredentialPicker";
 import { ToolPicker } from "./ToolPicker";
+import { ReferenciaDeCapacidades } from "./ReferenciaDeCapacidades";
 import { TriggerEditor, type TriggerValue } from "./TriggerEditor";
 import { HandoffKeywordsInput } from "./HandoffKeywordsInput";
 import { FollowupFlowPicker } from "./FollowupFlowPicker";
@@ -746,6 +747,7 @@ export function AgentForm(props: Props) {
                 className="text-xs"
               />
             </div>
+            <ReferenciaDeCapacidades toolIds={form.tool_ids} />
             <Textarea
               value={form.system_prompt}
               onChange={(e) => patch({ system_prompt: e.target.value })}
