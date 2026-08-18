@@ -30,6 +30,7 @@
 import type pg from 'pg';
 import { z } from 'zod';
 import { auxModelArgs, type AuxModelArgs } from './aux-model-args';
+import { dispararDigitando } from './typing-indicator';
 import type { ChannelAdapter, ChannelSendResult } from '../channel-adapter';
 
 import { withFields, type Logger } from '../obs/logger';
@@ -900,6 +901,12 @@ export async function runAgentTurn(
       router_outcome: routed.outcome,
       intent: routed.intentName,
     });
+  }
+  // "Digitando…" (F?): cosmético, fire-and-forget — NUNCA await'd no caminho
+  // crítico. Só dispara quando o agente publicado liga o toggle; sem toggle
+  // ligado, zero query extra por turno. Ver lib/agent-engine/agent/typing-indicator.ts.
+  if (agentConfig?.typingIndicatorEnabled === true) {
+    void dispararDigitando(pool, tenantId, input.conversationId, runLog);
   }
   // Fase 3: grava a decisão de roteamento e a aderência da conversa ao agente.
   // Fire-and-forget — falha de telemetria nunca derruba a resposta ao lead.

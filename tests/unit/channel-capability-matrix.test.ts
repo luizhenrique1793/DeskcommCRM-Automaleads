@@ -43,6 +43,7 @@ const CAPABILITIES = [
   "groups",
   "costPerMessage",
   "canSaveContact",
+  "canShowTyping",
 ] as const;
 
 describe("matriz capability × provider é exaustiva", () => {

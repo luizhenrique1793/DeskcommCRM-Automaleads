@@ -184,6 +184,31 @@ export const uazapiClient = {
     return status === 200;
   },
 
+  /**
+   * `POST /message/presence` — indicador de "digitando…"/"gravando áudio…".
+   * Confirmado na doc oficial do endpoint (2026-08-19; não está no OpenAPI
+   * bundled 2.1.1, que não lista este path apesar de ter a tag de presença):
+   * corpo `{number, presence, delay?}`, resposta 200
+   * `{response: "Chat presence sent successfully"}`. Assíncrono do lado do
+   * UAZAPI — reenvia o presence a cada 10s até `delay` (teto 300000ms) ou até
+   * detectar envio nosso pro mesmo chat, o que cancela sozinho. `paused`
+   * cancela na hora, mas esta função só expõe composing/recording — cancelar
+   * não tem caller hoje (o envio real já cancela) e código sem chamador é
+   * código morto.
+   */
+  async sendPresence(
+    creds: UazapiCredentials,
+    to: string,
+    presence: "composing" | "recording",
+    delayMs?: number,
+  ): Promise<boolean> {
+    const { status } = await call(creds, "/message/presence", {
+      method: "POST",
+      body: { number: to, presence, ...(delayMs !== undefined ? { delay: delayMs } : {}) },
+    });
+    return status === 200;
+  },
+
   /** `POST /send/text`. */
   async sendText(creds: UazapiCredentials, to: string, text: string): Promise<UazapiSendResult> {
     const { json } = await call(creds, "/send/text", { method: "POST", body: { number: to, text } });

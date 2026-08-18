@@ -26,6 +26,9 @@ export const CHANNEL_CAPABILITIES: Record<ChannelProvider, ChannelCapabilities> 
     // capability sem implementação seria código morto do outro lado
     // (invariante 2). Fica `false` até alguém implementar de verdade.
     canSaveContact: false,
+    // Sem endpoint de presença no repo — nada chama, capability seria código
+    // morto do outro lado (invariante 2). Fica `false` até alguém implementar.
+    canShowTyping: false,
   },
   // Hetero-restrição: não me banem, mas a Meta me proíbe e me cobra.
   meta_cloud: {
@@ -42,6 +45,9 @@ export const CHANNEL_CAPABILITIES: Record<ChannelProvider, ChannelCapabilities> 
     // A Graph API não tem "adicionar contato à agenda" — não é celular, é
     // conta business. O conceito não existe para este canal.
     canSaveContact: false,
+    // A Graph API não tem endpoint de presença por contato — é conta
+    // business, não celular com sessão do WhatsApp Web.
+    canShowTyping: false,
   },
   // Mesma hetero-restrição do canal oficial, por baixo: é um BSP: a WABA é da
   // Meta, os templates são aprovados pela Meta e a janela de 24h é da Meta. O
@@ -78,6 +84,8 @@ export const CHANNEL_CAPABILITIES: Record<ChannelProvider, ChannelCapabilities> 
     // O intermediário fala com a agenda do WHATSAPP CLOUD API, que não tem
     // esse conceito (mesma razão do meta_cloud).
     canSaveContact: false,
+    // Mesmo motivo do meta_cloud — por baixo é a mesma Graph API.
+    canShowTyping: false,
   },
   // Auto-restrição, como o WAHA: QR não oficial, o WhatsApp bane por abuso —
   // e por isso NÃO herda cegamente os valores dele (ver módulo `uazapi/`).
@@ -92,6 +100,10 @@ export const CHANNEL_CAPABILITIES: Record<ChannelProvider, ChannelCapabilities> 
   //    um caminho que não existe do outro lado.
   //  - `canSaveContact: true`. `/contact/add` é endpoint real, medido no
   //    OpenAPI — `POST /contact/add {number, name}` → `{success, contact}`.
+  //  - `canShowTyping: true`. `POST /message/presence {number, presence,
+  //    delay}` — confirmado na doc oficial (2026-08-19), não no OpenAPI
+  //    bundled (não estava lá; a doc dedicada do endpoint é que veio com o
+  //    contrato real). Cancela sozinho ao detectar nosso envio no mesmo chat.
   uazapi: {
     freeformOutsideWindow: true,
     requiresTemplates: false,
@@ -102,6 +114,7 @@ export const CHANNEL_CAPABILITIES: Record<ChannelProvider, ChannelCapabilities> 
     groups: "none",
     costPerMessage: false,
     canSaveContact: true,
+    canShowTyping: true,
   },
 };
 

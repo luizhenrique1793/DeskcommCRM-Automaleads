@@ -388,6 +388,7 @@ export type Database = {
           token_budget: number
           tool_ids: string[]
           trigger_config: Json
+          typing_indicator_enabled: boolean
           version_number: number
           video_frames_enabled: boolean
         }
@@ -422,6 +423,7 @@ export type Database = {
           token_budget?: number
           tool_ids?: string[]
           trigger_config?: Json
+          typing_indicator_enabled?: boolean
           version_number: number
           video_frames_enabled?: boolean
         }
@@ -456,6 +458,7 @@ export type Database = {
           token_budget?: number
           tool_ids?: string[]
           trigger_config?: Json
+          typing_indicator_enabled?: boolean
           version_number?: number
           video_frames_enabled?: boolean
         }

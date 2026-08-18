@@ -48,6 +48,16 @@ export interface ChannelCapabilities {
    * opcionais de `ChannelAdapter`.
    */
   canSaveContact: boolean;
+  /**
+   * O canal expõe presença ("digitando…"/"gravando áudio…") que a gente pode
+   * disparar ANTES de mandar a resposta, pra sinalizar que o agente está
+   * processando (turno com várias chamadas de ferramenta pode levar dezenas
+   * de segundos, e silêncio total nesse tempo parece o bot travado).
+   *
+   * A feature pergunta esta capability (ou testa `!!adapter.sendTyping`),
+   * nunca `provider === 'uazapi'` — mesmo padrão de `canSaveContact`.
+   */
+  canShowTyping: boolean;
 }
 
 /**
@@ -266,6 +276,27 @@ export interface ChannelAdapter {
     phoneNumber: string;
     name: string;
   }): Promise<{ ok: true } | { ok: false; reason: string }>;
+
+  /**
+   * Sinaliza presença ("digitando…"/"gravando áudio…") ao destinatário. Ver
+   * `ChannelCapabilities.canShowTyping`.
+   *
+   * Puramente cosmético — NÃO é o envio, não conta pra idempotência, pacing
+   * anti-ban ou cap diário (é sinal de presença, não mensagem). O adapter é
+   * quem decide o que fazer com falha de transporte aqui: nunca deve lançar
+   * por isto, e quem chama trata ausência do método e falha da promise do
+   * mesmo jeito — "sem indicador desta vez", nunca "turno interrompido".
+   *
+   * OPCIONAL como os demais métodos de canal: nem todo provider expõe isso, e
+   * quem chama testa a presença em vez de perguntar QUAL provider é.
+   */
+  sendTyping?(input: {
+    sessionRef: string;
+    to: string;
+    presence: "composing" | "recording";
+    /** Duração do indicador em ms; o provider decide o teto/renovação. */
+    durationMs?: number;
+  }): Promise<void>;
 
   sendTemplate?(input: {
     sessionRef: string;

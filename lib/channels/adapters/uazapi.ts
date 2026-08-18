@@ -219,4 +219,26 @@ export const uazapiAdapter: ChannelAdapter = {
       name: input.name,
     });
   },
+
+  /**
+   * Ver `ChannelAdapter.sendTyping` — cosmético, NUNCA lança. Sem credencial
+   * ou falha de transporte: engole e volta (`catch` interno), porque quem
+   * chama trata "sem indicador" e "indicador falhou" do mesmo jeito, e não
+   * existe fallback de negócio para "digitando" não ter saído.
+   */
+  async sendTyping(input: {
+    sessionRef: string;
+    to: string;
+    presence: "composing" | "recording";
+    durationMs?: number;
+  }): Promise<void> {
+    try {
+      const admin = createAdminClient();
+      const creds = await resolveUazapiCreds(admin, input.sessionRef);
+      if (!creds) return;
+      await uazapiClient.sendPresence(creds, input.to, input.presence, input.durationMs);
+    } catch {
+      // Best-effort de propósito — ver doc do método na interface.
+    }
+  },
 };
