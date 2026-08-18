@@ -719,14 +719,20 @@ export const pousadaConsultarStatusReserva: McpToolDefinition<typeof statusReser
     const idDigits = input.reserva_id.replace(/\D/g, "");
     let raw: unknown;
     try {
+      // Confirmado ao vivo com o dono do PMS (2026-08-18), mesma classe do bug
+      // de buscaPorDocumentoTitular: este endpoint é POST com corpo JSON
+      // (`IdReserva` numérico), não GET com query string — a versão GET nunca
+      // funcionou (sempre 404, com ou sem token). Exige `X-Api-Key` (401 sem
+      // ele), configurado na aba Capacidades → Autenticação, não em código.
       raw = await executarChamadaPousada({
         supabase: ctx.supabase,
         organizationId: ctx.organizationId,
         toolName: "pousada_consultar_status_reserva",
         callKey: "default",
-        method: "GET",
-        path: `/api/Reservas/BuscarStatus?IdReserva=${idDigits}`,
+        method: "POST",
+        path: "/api/Reservas/BuscarStatus",
         baseUrl: settings.pmsBaseUrl,
+        body: { IdReserva: Number(idDigits) },
         input,
       });
     } catch (err) {
@@ -743,6 +749,11 @@ export const pousadaConsultarStatusReserva: McpToolDefinition<typeof statusReser
       throw err;
     }
     const status = typeof raw === "string" ? raw : String(unwrapPmsObject(raw).status ?? raw ?? "");
+    // "reserva confirmada" nunca foi visto vindo do PMS de verdade — o único
+    // exemplo real capturado até agora (reserva sem pagamento) devolve
+    // status:"Reservado". Sem um exemplo real de reserva PAGA, não dá pra
+    // saber a string exata que o PMS usa pra "confirmada" (pode ser
+    // "Confirmada", "Pago", outra coisa) — perguntar ao dev em vez de adivinhar.
     return {
       status,
       confirmada: status.trim().toLowerCase() === "reserva confirmada",
