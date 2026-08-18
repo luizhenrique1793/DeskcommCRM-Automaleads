@@ -222,9 +222,14 @@ export const pousadaVerificarOuCadastrarHospede: McpToolDefinition<typeof hosped
   requiresScope: "mcp:write",
   handler: async (input, ctx) => {
     const settings = await loadPousadaSettings(ctx.supabase, ctx.organizationId);
-    // O PMS responde 404 (corpo vazio) quando o CPF nunca se hospedou — é o
-    // caminho mais comum (hóspede novo), não uma falha. `pmsRequest` rejeita em
-    // status >= 400, então tratamos esse 404 especificamente como "não achou".
+    // Confirmado ao vivo com o dono do PMS (2026-08-18): este endpoint é POST
+    // com corpo JSON (`Documento`/`TipoReserva`, maiúsculos), NÃO GET com
+    // query string — a versão anterior (herdada do fluxo n8n, mas transcrita
+    // errado aqui) sempre batia 404 e mandava a tool achar QUALQUER hóspede
+    // "não encontrado", cadastrando duplicado a cada conversa nova do mesmo
+    // hóspede. "Não encontrado" nesta API é HTTP 200 com `jaExistia:false` e
+    // `id:0` — não HTTP 404. O catch abaixo continua existindo por segurança
+    // (rede fora do ar, 5xx), mas não é mais o caminho normal de "não achei".
     let busca: Record<string, unknown> = {};
     try {
       busca = unwrapPmsObject(
@@ -233,9 +238,10 @@ export const pousadaVerificarOuCadastrarHospede: McpToolDefinition<typeof hosped
           organizationId: ctx.organizationId,
           toolName: "pousada_verificar_ou_cadastrar_hospede",
           callKey: "buscar_hospede",
-          method: "GET",
-          path: `/api/hospedes/buscaPorDocumentoTitular?Documento=${input.cpf}&tipoReserva=RESERVA`,
+          method: "POST",
+          path: "/api/hospedes/buscaPorDocumentoTitular",
           baseUrl: settings.pmsBaseUrl,
+          body: { Documento: input.cpf, TipoReserva: "RESERVA" },
           input,
         }),
       );

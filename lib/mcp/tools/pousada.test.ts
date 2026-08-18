@@ -137,9 +137,21 @@ describe("pousadaVerificarOuCadastrarHospede — contrato congelado", () => {
     expect(executarChamadaPousada).toHaveBeenCalledTimes(1);
   });
 
-  it("busca 404 (hóspede novo): cadastra e devolve status created", async () => {
+  it("busca 404 (defensivo — não é mais o caminho normal, ver teste abaixo): cadastra e devolve status created", async () => {
     vi.mocked(executarChamadaPousada)
       .mockRejectedValueOnce(new Error("pms_http_404: not found"))
+      .mockResolvedValueOnce({ id: "999" });
+    const out = await pousadaVerificarOuCadastrarHospede.handler(input, ctx());
+    expect(out).toMatchObject({ status: "created", id_titular: "999" });
+    expect(executarChamadaPousada).toHaveBeenCalledTimes(2);
+  });
+
+  it("busca 200 com jaExistia:false (formato REAL da API, confirmado ao vivo 2026-08-18): cadastra e devolve status created", async () => {
+    // "Não encontrado" nesta API não é HTTP 404 — é 200 com id:0/jaExistia:false.
+    // Esse é o bug que fazia TODO CPF (inclusive de hóspede recém-cadastrado)
+    // cair no branch de cadastro, duplicando hóspede a cada conversa nova.
+    vi.mocked(executarChamadaPousada)
+      .mockResolvedValueOnce({ id: 0, nome: null, jaExistia: false })
       .mockResolvedValueOnce({ id: "999" });
     const out = await pousadaVerificarOuCadastrarHospede.handler(input, ctx());
     expect(out).toMatchObject({ status: "created", id_titular: "999" });
