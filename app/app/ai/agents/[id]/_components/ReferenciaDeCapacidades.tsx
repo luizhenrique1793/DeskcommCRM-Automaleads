@@ -21,11 +21,12 @@ import { Copy, CaretDown, CaretUp, Robot } from "@/lib/ui/icons";
 
 interface ToolMetaResumo {
   id: string;
+  name: string;
   rotulo: string;
   o_que_toca: string;
 }
 interface ApiResponse {
-  data: { tools: ToolMetaResumo[] };
+  data: { tools: Array<Omit<ToolMetaResumo, "name">> };
 }
 
 export function ReferenciaDeCapacidades({ toolIds }: { toolIds: string[] }) {
@@ -35,9 +36,21 @@ export function ReferenciaDeCapacidades({ toolIds }: { toolIds: string[] }) {
   // o "modo avançado" do ToolPicker, em outra seção, e nunca viu este bloco).
   const [aberto, setAberto] = React.useState(true);
 
+  // MESMA queryKey do ToolPicker (["mcp","tools"]) de propósito — dedupe de
+  // rede. Por isso o shape devolvido aqui tem que ser IDÊNTICO ao de lá
+  // (inclusive o `name: t.id`, que só esta função usaria sem o merge): como o
+  // React Query cacheia por chave, quem "vencer" a corrida populando o cache
+  // dita o dado que o OUTRO componente também vê. Divergir o shape aqui fazia
+  // o ToolPicker herdar tools sem `name` — o Map de busca dele colapsava pra
+  // 1 entrada e as 11 capacidades do agente apareciam como "órfãs" (achado ao
+  // vivo, 2026-08-19).
   const query = useQuery({
     queryKey: ["mcp", "tools"],
-    queryFn: async () => (await apiClient.get<ApiResponse>("/api/v1/mcp/tools")).data.tools,
+    queryFn: async () =>
+      (await apiClient.get<ApiResponse>("/api/v1/mcp/tools")).data.tools.map((t) => ({
+        ...t,
+        name: t.id,
+      })),
     staleTime: 60_000,
   });
 
