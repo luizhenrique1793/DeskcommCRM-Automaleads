@@ -29,6 +29,9 @@ export const CHANNEL_CAPABILITIES: Record<ChannelProvider, ChannelCapabilities> 
     // Sem endpoint de presença no repo — nada chama, capability seria código
     // morto do outro lado (invariante 2). Fica `false` até alguém implementar.
     canShowTyping: false,
+    // Sem endpoint de botão nativo no repo — nada chama, capability seria
+    // código morto do outro lado (invariante 2). Fica `false` até implementar.
+    canSendButtons: false,
   },
   // Hetero-restrição: não me banem, mas a Meta me proíbe e me cobra.
   meta_cloud: {
@@ -48,6 +51,9 @@ export const CHANNEL_CAPABILITIES: Record<ChannelProvider, ChannelCapabilities> 
     // A Graph API não tem endpoint de presença por contato — é conta
     // business, não celular com sessão do WhatsApp Web.
     canShowTyping: false,
+    // Botões nativos de mensagem interativa da Cloud API existem (List/Reply),
+    // mas nenhum é "copiar código" — o conceito não existe para este canal.
+    canSendButtons: false,
   },
   // Mesma hetero-restrição do canal oficial, por baixo: é um BSP: a WABA é da
   // Meta, os templates são aprovados pela Meta e a janela de 24h é da Meta. O
@@ -86,6 +92,8 @@ export const CHANNEL_CAPABILITIES: Record<ChannelProvider, ChannelCapabilities> 
     canSaveContact: false,
     // Mesmo motivo do meta_cloud — por baixo é a mesma Graph API.
     canShowTyping: false,
+    // Mesmo motivo do meta_cloud — por baixo é a mesma Graph API.
+    canSendButtons: false,
   },
   // Auto-restrição, como o WAHA: QR não oficial, o WhatsApp bane por abuso —
   // e por isso NÃO herda cegamente os valores dele (ver módulo `uazapi/`).
@@ -115,6 +123,11 @@ export const CHANNEL_CAPABILITIES: Record<ChannelProvider, ChannelCapabilities> 
     costPerMessage: false,
     canSaveContact: true,
     canShowTyping: true,
+    // `POST /send/menu` com `type: "button"` e um botão `copy:` — confirmado
+    // na doc oficial (2026-08-19). Recurso não-oficial do WhatsApp: a própria
+    // UAZAPI avisa que pode ser descontinuado sem aviso — por isso o código
+    // PIX sempre continua indo em texto puro também (regra dura já existente).
+    canSendButtons: true,
   },
 };
 

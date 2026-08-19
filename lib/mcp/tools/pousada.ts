@@ -22,6 +22,8 @@ import { createLeadSchema } from "@/lib/schemas/leads";
 import { unwrapPmsObject, extrairId, formatarTelefoneBR } from "@/lib/pousada/pms-client";
 import { loadPousadaSettings } from "@/lib/pousada/settings";
 import { executarChamadaPousada } from "@/lib/pousada/executor";
+import { getAdapter, resolveSessionRef, CHANNEL_SESSION_REF_COLUMNS } from "@/lib/channels";
+import type { ChannelProvider, ChannelSessionRef } from "@/lib/channels";
 import type { McpContext, McpToolDefinition } from "../types";
 
 /**
@@ -694,6 +696,115 @@ export const pousadaGerarCobrancaPix: McpToolDefinition<typeof gerarPixInputShap
       expira_em: expiraEm,
       instrucao: "Envie qr_code numa mensagem própria, sem formatação nenhuma.",
     };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// pousada_enviar_botao_copiar_pix
+// ---------------------------------------------------------------------------
+
+const enviarBotaoPixInputShape = {
+  conversation_id: z
+    .string()
+    .uuid()
+    .describe("A mesma conversa em que você já mandou o qr_code em texto."),
+  codigo_pix: z
+    .string()
+    .min(10)
+    .describe("O MESMO qr_code que pousada_gerar_cobranca_pix devolveu, sem nenhuma alteração."),
+};
+
+/**
+ * Botão de "copiar código" como mensagem EXTRA, fora da tabela `messages` de
+ * propósito (não entra no histórico do CRM nem nos crons de retry) — ver o
+ * doc de `ChannelAdapter.sendButtonCopy`. Falha aqui NUNCA é motivo pra
+ * avisar o hóspede que algo deu errado: o código já foi entregue em texto
+ * antes desta tool ser chamada (regra dura do PIX), isto é só conveniência.
+ */
+export const pousadaEnviarBotaoCopiarPix: McpToolDefinition<typeof enviarBotaoPixInputShape> = {
+  name: "pousada_enviar_botao_copiar_pix",
+  description:
+    "Manda uma mensagem EXTRA com um botão de 'copiar código' pro código PIX. Chame isto DEPOIS de já " +
+    "ter mandado o qr_code em texto puro, numa mensagem própria (regra do PIX não muda) — este botão é só " +
+    "um toque a mais de conveniência, nunca o único jeito de entregar o código. Se o canal não suportar ou " +
+    "o envio falhar, a tool devolve enviado=false; nesse caso não fale sobre nenhum botão pro cliente.",
+  inputSchema: enviarBotaoPixInputShape,
+  category: "write",
+  requiresRole: "ai_operator",
+  requiresScope: "mcp:write",
+  handler: async (input, ctx) => {
+    const { data: conversa, error: convErr } = await ctx.supabase
+      .from("conversations")
+      .select("contact_id, channel_session_id, is_group, group_chat_id")
+      .eq("organization_id", ctx.organizationId)
+      .eq("id", input.conversation_id)
+      .maybeSingle();
+    if (convErr) throw new Error(`buscar_conversa_falhou: ${convErr.message}`);
+    if (!conversa) {
+      console.error("[pousada_enviar_botao_copiar_pix] conversa_nao_encontrada", input.conversation_id);
+      return { enviado: false, motivo: "conversa_nao_encontrada" };
+    }
+    const cv = conversa as {
+      contact_id: string;
+      channel_session_id: string;
+      is_group: boolean;
+      group_chat_id: string | null;
+    };
+
+    const { data: contato, error: ctErr } = await ctx.supabase
+      .from("contacts")
+      .select("phone_number, wa_identity, wa_lid")
+      .eq("organization_id", ctx.organizationId)
+      .eq("id", cv.contact_id)
+      .maybeSingle();
+    if (ctErr) throw new Error(`buscar_contato_falhou: ${ctErr.message}`);
+    if (!contato) {
+      console.error("[pousada_enviar_botao_copiar_pix] contato_nao_encontrado", cv.contact_id);
+      return { enviado: false, motivo: "contato_nao_encontrado" };
+    }
+    const ct = contato as { phone_number: string | null; wa_identity: string | null; wa_lid: string | null };
+
+    const { data: sessao, error: csErr } = await ctx.supabase
+      .from("channel_sessions")
+      .select(CHANNEL_SESSION_REF_COLUMNS)
+      .eq("organization_id", ctx.organizationId)
+      .eq("id", cv.channel_session_id)
+      .maybeSingle();
+    if (csErr) throw new Error(`buscar_canal_falhou: ${csErr.message}`);
+    if (!sessao) {
+      console.error("[pousada_enviar_botao_copiar_pix] canal_nao_encontrado", cv.channel_session_id);
+      return { enviado: false, motivo: "canal_nao_encontrado" };
+    }
+    const cs = sessao as unknown as ChannelSessionRef;
+
+    const adapter = getAdapter(cs.provider as ChannelProvider);
+    if (!adapter.sendButtonCopy) {
+      console.error("[pousada_enviar_botao_copiar_pix] canal_sem_suporte_a_botao", cs.provider);
+      return { enviado: false, motivo: "canal_sem_suporte_a_botao" };
+    }
+
+    const to = adapter.resolveRecipient({
+      isGroup: cv.is_group,
+      groupChatId: cv.group_chat_id,
+      phoneNumber: ct.phone_number,
+      waIdentity: ct.wa_identity,
+      waLid: ct.wa_lid,
+    });
+    if (to === null) {
+      console.error("[pousada_enviar_botao_copiar_pix] destinatario_nao_resolvivel", cv.contact_id);
+      return { enviado: false, motivo: "destinatario_nao_resolvivel" };
+    }
+
+    const enviado = await adapter.sendButtonCopy({
+      sessionRef: resolveSessionRef(cs),
+      to,
+      text: "Toque para copiar o código PIX:",
+      buttonLabel: "Copiar código PIX",
+      copyValue: input.codigo_pix,
+    });
+    console.error("[pousada_enviar_botao_copiar_pix] resultado", { enviado, conversation_id: input.conversation_id });
+
+    return { enviado };
   },
 };
 

@@ -191,21 +191,55 @@ export const uazapiClient = {
    * corpo `{number, presence, delay?}`, resposta 200
    * `{response: "Chat presence sent successfully"}`. Assíncrono do lado do
    * UAZAPI — reenvia o presence a cada 10s até `delay` (teto 300000ms) ou até
-   * detectar envio nosso pro mesmo chat, o que cancela sozinho. `paused`
-   * cancela na hora, mas esta função só expõe composing/recording — cancelar
-   * não tem caller hoje (o envio real já cancela) e código sem chamador é
-   * código morto.
+   * detectar envio nosso pro mesmo chat, o que cancela sozinho — mas esse
+   * cancelamento automático não é instantâneo (achado ao vivo, 2026-08-19:
+   * o indicador reapareceu minutos depois de o turno já ter terminado sem
+   * mandar nada). `paused` cancela na hora — é o que `cancelarDigitando`
+   * (typing-indicator.ts) chama quando o turno acaba em silêncio.
    */
   async sendPresence(
     creds: UazapiCredentials,
     to: string,
-    presence: "composing" | "recording",
+    presence: "composing" | "recording" | "paused",
     delayMs?: number,
   ): Promise<boolean> {
     const { status } = await call(creds, "/message/presence", {
       method: "POST",
       body: { number: to, presence, ...(delayMs !== undefined ? { delay: delayMs } : {}) },
     });
+    return status === 200;
+  },
+
+  /**
+   * `POST /send/menu` com `type: "button"` — um único botão de "copiar
+   * código" (`"rotulo|copy:valor"` em `choices`). Confirmado na doc oficial
+   * do endpoint (2026-08-19); recurso NÃO-oficial do WhatsApp (a própria
+   * UAZAPI avisa que pode ser descontinuado a qualquer momento) — por isso
+   * quem chama isto nunca depende só do botão, sempre manda o valor em texto
+   * puro também por outro caminho.
+   */
+  async sendMenuButtonCopy(
+    creds: UazapiCredentials,
+    to: string,
+    input: { text: string; buttonLabel: string; copyValue: string; footerText?: string },
+  ): Promise<boolean> {
+    const { status, json } = await call(creds, "/send/menu", {
+      method: "POST",
+      body: {
+        number: to,
+        type: "button",
+        text: input.text,
+        choices: [`${input.buttonLabel}|copy:${input.copyValue}`],
+        ...(input.footerText ? { footerText: input.footerText } : {}),
+      },
+    });
+    // Sem caller que trate o motivo hoje (o botão é conveniência, best-effort) —
+    // mas silenciar o corpo aqui deixaria a primeira falha real sem pista
+    // nenhuma pra investigar (achado ao vivo, 2026-08-19: botão nunca chegou,
+    // zero log em qualquer camada).
+    if (status !== 200) {
+      console.error("[uazapi] POST /send/menu falhou", { status, json });
+    }
     return status === 200;
   },
 

@@ -23,13 +23,11 @@ import type { Logger } from '../obs/logger';
  * "auto-cancela ao enviar mensagem" da UAZAPI não é instantâneo — a renovação
  * a cada 10s do lado deles pode não pegar o cancelamento a tempo, e o
  * indicador reaparece sozinho minutos depois de a resposta já ter saído (sem
- * nada pra cancelar contra). Não tem como forçar o cancelamento cedo daqui
- * (best-effort, fire-and-forget, sem endpoint de "cancelar" documentado além
- * de mandar presence de novo) — o controle que temos é não pedir mais teto do
- * que o turno típico precisa. 30s cobre o turno observado (~15s, ida única ao
- * modelo); turnos mais lentos (várias chamadas de ferramenta em sequência)
- * simplesmente perdem o indicador antes da resposta, o que é preferível a um
- * "digitando" fantasma sobrando por até 2 minutos depois de já ter respondido.
+ * nada pra cancelar contra). 30s é o teto de ÚLTIMO RECURSO — o caminho
+ * normal agora é `cancelarDigitando` (chamado por runAgentTurn nos 3 pontos
+ * onde o turno termina SEM mandar mensagem: handoff, opt-out, e "acabou e não
+ * mandou nada"), que cancela na hora via `presence: "paused"`. Este teto só
+ * entra em jogo se `cancelarDigitando` também falhar (rede caiu, etc.).
  */
 const TYPING_DURATION_MS = 30_000;
 
@@ -46,6 +44,39 @@ interface ConversaParaDigitandoRow {
   uazapi_instance_id: string | null;
 }
 
+async function resolverDestinoDigitando(
+  pool: pg.Pool,
+  tenantId: string,
+  conversationId: string,
+): Promise<{ sessionRef: string; to: string; sendTyping: NonNullable<ReturnType<typeof getAdapter>['sendTyping']> } | null> {
+  const { rows } = await pool.query<ConversaParaDigitandoRow>(
+    `select cv.is_group, cv.group_chat_id,
+            ct.phone_number, ct.wa_identity, ct.wa_lid,
+            ${CHANNEL_SESSION_REF_COLUMNS.split(', ').map((c) => `cs.${c}`).join(', ')}
+     from conversations cv
+     join contacts ct on ct.id = cv.contact_id
+     join channel_sessions cs on cs.id = cv.channel_session_id
+     where cv.organization_id = $1 and cv.id = $2`,
+    [tenantId, conversationId],
+  );
+  const r = rows[0];
+  if (r === undefined) return null;
+
+  const adapter = getAdapter(r.provider as ChannelProvider);
+  if (!adapter.sendTyping) return null; // canal não suporta — noop silencioso, não é erro
+
+  const to = adapter.resolveRecipient({
+    isGroup: r.is_group,
+    groupChatId: r.group_chat_id,
+    phoneNumber: r.phone_number,
+    waIdentity: r.wa_identity,
+    waLid: r.wa_lid,
+  });
+  if (to === null) return null; // grupo, ou contato sem endereço resolvível — mesmo tratamento do envio real
+
+  return { sessionRef: resolveSessionRef(r as unknown as ChannelSessionRef), to, sendTyping: adapter.sendTyping };
+}
+
 /**
  * Dispara o indicador de presença, se o canal suportar — chamada
  * fire-and-forget de propósito: `runAgentTurn` NUNCA `await`s isto no
@@ -60,41 +91,45 @@ export async function dispararDigitando(
   log: Logger,
 ): Promise<void> {
   try {
-    const { rows } = await pool.query<ConversaParaDigitandoRow>(
-      `select cv.is_group, cv.group_chat_id,
-              ct.phone_number, ct.wa_identity, ct.wa_lid,
-              ${CHANNEL_SESSION_REF_COLUMNS.split(', ').map((c) => `cs.${c}`).join(', ')}
-       from conversations cv
-       join contacts ct on ct.id = cv.contact_id
-       join channel_sessions cs on cs.id = cv.channel_session_id
-       where cv.organization_id = $1 and cv.id = $2`,
-      [tenantId, conversationId],
-    );
-    const r = rows[0];
-    if (r === undefined) return;
-
-    const adapter = getAdapter(r.provider as ChannelProvider);
-    if (!adapter.sendTyping) return; // canal não suporta — noop silencioso, não é erro
-
-    const to = adapter.resolveRecipient({
-      isGroup: r.is_group,
-      groupChatId: r.group_chat_id,
-      phoneNumber: r.phone_number,
-      waIdentity: r.wa_identity,
-      waLid: r.wa_lid,
-    });
-    if (to === null) return; // grupo, ou contato sem endereço resolvível — mesmo tratamento do envio real
-
-    const sessionRef = resolveSessionRef(r as unknown as ChannelSessionRef);
-    await adapter.sendTyping({
-      sessionRef,
-      to,
+    const destino = await resolverDestinoDigitando(pool, tenantId, conversationId);
+    if (destino === null) return;
+    await destino.sendTyping({
+      sessionRef: destino.sessionRef,
+      to: destino.to,
       presence: 'composing',
       durationMs: TYPING_DURATION_MS,
     });
   } catch (err) {
     // Best-effort: o turno segue normalmente sem o indicador.
     log.warn('digitando: não consegui disparar (turno segue normalmente)', {
+      error: (err instanceof Error ? err.message : String(err)).slice(0, 160),
+    });
+  }
+}
+
+/**
+ * Cancela o indicador ANTES do teto de `TYPING_DURATION_MS` — chamado por
+ * runAgentTurn nos pontos onde o turno termina sem mandar mensagem nenhuma
+ * (handoff, opt-out, "processou e não mandou nada"), depois de já ter
+ * chamado `dispararDigitando`. Mesmo tratamento de erro: best-effort, nunca
+ * lança, o turno já terminou de qualquer forma.
+ */
+export async function cancelarDigitando(
+  pool: pg.Pool,
+  tenantId: string,
+  conversationId: string,
+  log: Logger,
+): Promise<void> {
+  try {
+    const destino = await resolverDestinoDigitando(pool, tenantId, conversationId);
+    if (destino === null) return;
+    await destino.sendTyping({
+      sessionRef: destino.sessionRef,
+      to: destino.to,
+      presence: 'paused',
+    });
+  } catch (err) {
+    log.warn('digitando: não consegui cancelar (some sozinho no teto)', {
       error: (err instanceof Error ? err.message : String(err)).slice(0, 160),
     });
   }

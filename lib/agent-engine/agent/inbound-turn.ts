@@ -30,7 +30,7 @@
 import type pg from 'pg';
 import { z } from 'zod';
 import { auxModelArgs, type AuxModelArgs } from './aux-model-args';
-import { dispararDigitando } from './typing-indicator';
+import { dispararDigitando, cancelarDigitando } from './typing-indicator';
 import type { ChannelAdapter, ChannelSendResult } from '../channel-adapter';
 
 import { withFields, type Logger } from '../obs/logger';
@@ -902,10 +902,17 @@ export async function runAgentTurn(
       intent: routed.intentName,
     });
   }
-  // "Digitando…" (F?): cosmético, fire-and-forget — NUNCA await'd no caminho
-  // crítico. Só dispara quando o agente publicado liga o toggle; sem toggle
-  // ligado, zero query extra por turno. Ver lib/agent-engine/agent/typing-indicator.ts.
+  // "Digitando…": cedo de propósito — é o sinal de "estou trabalhando" que
+  // cobre os ~10-25s de chamadas de modelo/tools antes do primeiro envio.
+  // Fire-and-forget, NUNCA await'd no caminho crítico. `digitandoDisparado`
+  // é o que os 3 pontos de bail silencioso abaixo (handoff, opt-out, "turno
+  // terminou sem mandar nada") usam pra saber se precisam CANCELAR — sem
+  // isso o indicador fica aceso e some sozinho só no teto de 30s do
+  // provider, o que o hóspede vê como "digitando à toa" (achado ao vivo,
+  // 2026-08-19). Ver lib/agent-engine/agent/typing-indicator.ts.
+  let digitandoDisparado = false;
   if (agentConfig?.typingIndicatorEnabled === true) {
+    digitandoDisparado = true;
     void dispararDigitando(pool, tenantId, input.conversationId, runLog);
   }
   // Fase 3: grava a decisão de roteamento e a aderência da conversa ao agente.
@@ -1008,6 +1015,7 @@ export async function runAgentTurn(
     runLog.info('handoff humano acionado por pedido explícito do lead (detecção determinística)', {
       kind: job.kind,
     });
+    if (digitandoDisparado) void cancelarDigitando(pool, tenantId, input.conversationId, runLog);
     return; // bot silencia: sem modelo, sem envio neste turno
   }
 
@@ -1031,6 +1039,7 @@ export async function runAgentTurn(
     runLog.info('possível opt-out detectado no inbound — bot silenciado e escalado ao humano', {
       kind: job.kind,
     });
+    if (digitandoDisparado) void cancelarDigitando(pool, tenantId, input.conversationId, runLog);
     return; // bot silencia: sem modelo, sem envio neste turno
   }
 
@@ -2430,6 +2439,15 @@ export async function runAgentTurn(
   }
 
   await mcpCleanup?.();
+
+  // Turno processou (chamou modelo, pode ter tentado tool de envio) mas
+  // terminou sem mandar NADA — veto de pacing (janela/aquecimento/teto
+  // diário), gate de conteúdo, o que for. Mesmo cancelamento dos bails de
+  // handoff/opt-out acima: sem isso o indicador só some no teto de 30s,
+  // depois de a resposta já não vir (achado ao vivo, 2026-08-19).
+  if (digitandoDisparado && outcomes.length === 0) {
+    void cancelarDigitando(pool, tenantId, input.conversationId, runLog);
+  }
 
   runLog.info('turno do agente concluído', {
     kind: job.kind,

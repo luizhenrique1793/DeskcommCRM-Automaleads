@@ -51,6 +51,16 @@ export const TOOLS_POUSADA = declararTools([
     pacotes: ["vender"],
   },
   {
+    name: "pousada_enviar_botao_copiar_pix",
+    category: "write",
+    rotulo: "Mandar botão de copiar o código PIX",
+    explicacao:
+      "Depois de já ter mandado o código PIX em texto, manda uma mensagem extra com um botão de toque único pra copiar o mesmo código — conveniência a mais, não substitui o texto. Só funciona em canal conectado por UAZAPI.",
+    oQueToca: "Cobrança da reserva",
+    risco: "atencao",
+    pacotes: ["vender"],
+  },
+  {
     name: "pousada_consultar_status_reserva",
     category: "read",
     rotulo: "Consultar se a reserva já foi paga",

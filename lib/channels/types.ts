@@ -58,6 +58,15 @@ export interface ChannelCapabilities {
    * nunca `provider === 'uazapi'` — mesmo padrão de `canSaveContact`.
    */
   canShowTyping: boolean;
+  /**
+   * O canal expõe um botão nativo de "copiar código" — útil pra mandar o PIX
+   * copia-e-cola como toque único, além do texto puro (que continua sendo
+   * enviado do jeito de sempre; o botão é um EXTRA, nunca substitui).
+   *
+   * A feature pergunta esta capability (ou testa `!!adapter.sendButtonCopy`),
+   * nunca `provider === 'uazapi'` — mesmo padrão de `canSaveContact`.
+   */
+  canSendButtons: boolean;
 }
 
 /**
@@ -293,10 +302,42 @@ export interface ChannelAdapter {
   sendTyping?(input: {
     sessionRef: string;
     to: string;
-    presence: "composing" | "recording";
+    /**
+     * `"paused"` CANCELA o indicador na hora — usado quando o turno acaba
+     * sem mandar nada (handoff, opt-out, veto de pacing) depois de já ter
+     * disparado `"composing"`. Sem isso o indicador só some no teto de
+     * `durationMs`, e o hóspede vê "digitando" parado sem nada acontecer.
+     */
+    presence: "composing" | "recording" | "paused";
     /** Duração do indicador em ms; o provider decide o teto/renovação. */
     durationMs?: number;
   }): Promise<void>;
+
+  /**
+   * Manda uma mensagem EXTRA com um botão nativo de "copiar código". Ver
+   * `ChannelCapabilities.canSendButtons`.
+   *
+   * NÃO substitui o envio de texto normal — quem chama continua mandando o
+   * código também em texto puro (regra dura do PIX: código sozinho, sem
+   * formatação). Isto é só um toque a mais de conveniência, por isso o
+   * contrato devolve `boolean` em vez de lançar: falha aqui nunca derruba o
+   * fluxo que já entregou o código em texto. Passa por FORA da tabela
+   * `messages` (não entra no histórico do CRM nem nos crons de retry/canal
+   * caído) — decisão deliberada pra manter o raio de mudança pequeno; se
+   * algum dia isto precisar de histórico/retry, o caminho certo é promover
+   * pra um `OutboundKind` de verdade em `sendMessageHandler`, não aqui.
+   *
+   * OPCIONAL como os demais métodos de canal: nem todo provider expõe isso, e
+   * quem chama testa a presença em vez de perguntar QUAL provider é.
+   */
+  sendButtonCopy?(input: {
+    sessionRef: string;
+    to: string;
+    text: string;
+    buttonLabel: string;
+    copyValue: string;
+    footerText?: string;
+  }): Promise<boolean>;
 
   sendTemplate?(input: {
     sessionRef: string;
