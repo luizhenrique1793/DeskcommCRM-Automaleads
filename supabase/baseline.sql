@@ -11834,3 +11834,35 @@ create trigger trg_ai_agent_versions_content_immutable
   for each row execute function fn_ai_agent_version_content_immutable();
 
 notify pgrst, 'reload schema';
+
+-- ---- RBAC em capacidades HTTP (migration 0159) ----
+-- A 0155 criou mcp_http_capability_calls com policy `ALL` só de tenancy —
+-- qualquer papel do tenant (inclusive viewer) lia e ESCREVIA config de
+-- chamada HTTP de capacidade (inclusive credencial cifrada de PMS de
+-- terceiro), mesmo com a API já gating GET em manager+ e PUT em admin
+-- (app/api/v1/ai/capability-http-configs/route.ts). RLS é a última linha de
+-- defesa contra quem fala direto com o PostgREST, e não acompanhava o app.
+-- Mesmo padrão da 0150: SELECT em manager+ (espelha o GET), escrita em
+-- admin+ (espelha o PUT). fn_role_at_least é hierárquico.
+drop policy if exists tenant_isolation_mcp_http_capability_calls_select on public.mcp_http_capability_calls;
+create policy tenant_isolation_mcp_http_capability_calls_select on public.mcp_http_capability_calls
+  for select
+  using (
+    organization_id in (select public.fn_user_org_ids())
+      and public.fn_role_at_least(organization_id, 'manager')
+  );
+
+drop policy if exists tenant_isolation_mcp_http_capability_calls_modify on public.mcp_http_capability_calls;
+drop policy if exists tenant_isolation_mcp_http_capability_calls_write on public.mcp_http_capability_calls;
+create policy tenant_isolation_mcp_http_capability_calls_write on public.mcp_http_capability_calls
+  for all
+  using (
+    organization_id in (select public.fn_user_org_ids())
+      and public.fn_role_at_least(organization_id, 'admin')
+  )
+  with check (
+    organization_id in (select public.fn_user_org_ids())
+      and public.fn_role_at_least(organization_id, 'admin')
+  );
+
+notify pgrst, 'reload schema';

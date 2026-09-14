@@ -178,32 +178,37 @@ test.describe("Configurar o que o agente pode fazer", () => {
     await abrirConfiguracao(page);
 
     const antes = await consumo(page);
-    expect(antes).toMatch(/de 20$/);
+    expect(antes).toMatch(/de 21$/);
 
     // O TETO ENTRA NA JORNADA (issue #162), e entra antes do clique.
     //
-    // Medido pela API servida em 2026-08-06: o catálogo tem 51 capacidades e
-    // "Atender" exige 18 vagas (17 automáticas + a crítica que o pacote
-    // deliberadamente NÃO liga). Com as 3 do seed dá 21, num teto de 20.
+    // Remedido em 2026-09-14 (o catálogo cresceu desde a medição original de
+    // 2026-08-06, de 51 para 59 capacidades — número que já apodreceu uma vez,
+    // reconte antes de confiar): "Atender" exige 21 vagas (20 automáticas + a
+    // crítica que o pacote deliberadamente NÃO liga), e o teto subiu junto de
+    // 20 para 21 (mesma remedição) — o pacote sozinho, com o agente zerado,
+    // já ocupa o teto inteiro, sem sobrar 1 vaga sequer. Com as 3 do seed dá
+    // 24, excedente de 3 num teto de 21.
     //
-    // Antes da correção a tela aceitava o pacote, chegava a 20 exatas e deixava
-    // o checkbox da crítica DESABILITADO — prometia uma escolha que o produto
-    // não permitia fazer, sem dizer por quê. Agora recusa e diz quantas vagas
-    // faltam, e o operador faz o que a própria tela manda.
+    // Antes da correção (issue #162) a tela aceitava o pacote mesmo passando do
+    // teto e deixava o checkbox da crítica DESABILITADO — prometia uma escolha
+    // que o produto não permitia fazer, sem dizer por quê. Agora recusa e diz
+    // quantas vagas faltam, e o operador faz o que a própria tela manda.
     await page.getByTestId("switch-pacote-atender").click();
-    await expect(page.getByTestId("aviso-teto")).toContainText(/faltam? 1 vaga/);
+    await expect(page.getByTestId("aviso-teto")).toContainText(/faltam? 3 vagas?/);
     await expect(
       page.getByTestId("pacote-atender"),
       "recusar significa NÃO aplicar: pacote meio-ligado seria o pior dos dois mundos",
     ).not.toHaveAttribute("data-estado", "ligado");
 
-    // Libera a vaga desligando uma capacidade que o seed tinha ligado.
+    // Libera as 3 vagas desligando TUDO que o seed tinha ligado — com o teto
+    // em 21, "Atender" sozinho já ocupa o teto inteiro (0 vaga de sobra), então
+    // não basta liberar uma: precisa zerar o que não é da jornada.
     await page.getByTestId("toggle-avancado").click();
     await page.getByTestId("lista-avancada").waitFor({ state: "visible" });
-    await page
-      .getByTestId(`capacidade-${TOOLS_DO_SEED[2]}`)
-      .locator("input[type=checkbox]")
-      .click();
+    for (const nome of TOOLS_DO_SEED) {
+      await page.getByTestId(`capacidade-${nome}`).locator("input[type=checkbox]").click();
+    }
     await page.getByTestId("toggle-avancado").click();
 
     await page.getByTestId("switch-pacote-atender").click();
@@ -274,7 +279,7 @@ test.describe("Configurar o que o agente pode fazer", () => {
     // Espera a configuração CARREGAR. Ler o estado antes disso devolve lista
     // vazia, e um teste que compara vazio com vazio passa sem medir nada.
     await expect(page.getByTestId("consumo-teto")).toHaveText(
-      `${TOOLS_DO_SEED.length} de 20`,
+      `${TOOLS_DO_SEED.length} de 21`,
     );
 
     await page.getByTestId("switch-pacote-vender").click();
@@ -296,7 +301,7 @@ test.describe("Configurar o que o agente pode fazer", () => {
     await page.reload();
     await page.getByTestId("tool-picker").waitFor({ state: "visible" });
     await expect(page.getByTestId("consumo-teto")).toHaveText(
-      `${TOOLS_DO_SEED.length} de 20`,
+      `${TOOLS_DO_SEED.length} de 21`,
     );
   });
 });

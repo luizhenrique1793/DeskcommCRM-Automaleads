@@ -73,7 +73,7 @@ const versionShapeSchema = z
     credential_id: UUID,
     tool_ids: z
       .array(z.string().min(1).max(80))
-      // O mesmo teto que a tela mostra ("13 de 20") é o que o servidor recusa —
+      // O mesmo teto que a tela mostra ("13 de 21") é o que o servidor recusa —
       // ver `lib/mcp/tools/selecao-por-pacote.ts` para o porquê do número.
       .max(TETO_TOOLS_POR_AGENTE)
       .default([])

@@ -15,13 +15,20 @@
 import { entraPorPacote, type ToolBundle, type ToolRisk } from "./pacotes";
 
 /**
- * Teto de capacidades por agente. Não é burrice de produto: 60 tools num
+ * Teto de capacidades por agente. Não é burrice de produto: muitas tools num
  * prompt degradam a escolha do modelo (erra a tool, gasta contexto, alucina
  * argumento). `lib/ai/agents/validation.ts` importa daqui para que o número
  * exista em UM lugar — o mesmo teto que a tela mostra é o que o servidor
  * recusa.
+ *
+ * Subiu de 20 para 21 em 2026-09-14: o catálogo cresceu ao ponto de o próprio
+ * pacote "Atender e responder" sozinho (20 automáticas + 1 crítica reservada)
+ * já estourar 20 com ZERO outra capacidade ligada — a jornada mais básica que
+ * existe tinha ficado impossível de ligar por inteiro. Ver
+ * tests/e2e/capacidades-do-agente.spec.ts para o número medido contra o
+ * catálogo real (reconte antes de confiar — já apodreceu uma vez).
  */
-export const TETO_TOOLS_POR_AGENTE = 20;
+export const TETO_TOOLS_POR_AGENTE = 21;
 
 /** O mínimo que a regra precisa saber de uma capacidade. */
 export interface CapacidadeSelecionavel {
