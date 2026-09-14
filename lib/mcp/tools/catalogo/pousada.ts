@@ -55,7 +55,7 @@ export const TOOLS_POUSADA = declararTools([
     category: "write",
     rotulo: "Mandar botão de copiar o código PIX",
     explicacao:
-      "Depois de já ter mandado o código PIX em texto, manda uma mensagem extra com um botão de toque único pra copiar o mesmo código — conveniência a mais, não substitui o texto. Só funciona em canal conectado por UAZAPI.",
+      "Depois de já ter mandado o código PIX em texto, manda uma mensagem extra com um botão de toque único pra copiar o mesmo código — conveniência a mais, não substitui o texto. Só funciona em canais que suportam esse botão nativo (nem todo canal suporta).",
     oQueToca: "Cobrança da reserva",
     risco: "atencao",
     pacotes: ["vender"],

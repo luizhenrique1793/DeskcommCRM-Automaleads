@@ -15,13 +15,13 @@
 import type pg from 'pg';
 
 import { getAdapter, resolveSessionRef, CHANNEL_SESSION_REF_COLUMNS } from '@/lib/channels';
-import type { ChannelProvider, ChannelSessionRef } from '@/lib/channels';
+import type { ChannelSessionRef } from '@/lib/channels';
 import type { Logger } from '../obs/logger';
 
 /**
  * Teto curto de propósito. Testado em produção em 2026-08-18 com 120_000: o
- * "auto-cancela ao enviar mensagem" da UAZAPI não é instantâneo — a renovação
- * a cada 10s do lado deles pode não pegar o cancelamento a tempo, e o
+ * "auto-cancela ao enviar mensagem" de um dos canais não é instantâneo — a
+ * renovação periódica do lado deles pode não pegar o cancelamento a tempo, e o
  * indicador reaparece sozinho minutos depois de a resposta já ter saído (sem
  * nada pra cancelar contra). 30s é o teto de ÚLTIMO RECURSO — o caminho
  * normal agora é `cancelarDigitando` (chamado por runAgentTurn nos 3 pontos
@@ -31,18 +31,17 @@ import type { Logger } from '../obs/logger';
  */
 const TYPING_DURATION_MS = 30_000;
 
-interface ConversaParaDigitandoRow {
+/**
+ * As colunas de identidade do canal vêm de `ChannelSessionRef` (lib/channels)
+ * — nenhum nome de provider nasce aqui, só o resto que a query precisa.
+ */
+type ConversaParaDigitandoRow = {
   is_group: boolean;
   group_chat_id: string | null;
   phone_number: string | null;
   wa_identity: string | null;
   wa_lid: string | null;
-  provider: string;
-  waha_session_name: string | null;
-  meta_phone_number_id: string | null;
-  zernio_account_id: string | null;
-  uazapi_instance_id: string | null;
-}
+} & ChannelSessionRef;
 
 async function resolverDestinoDigitando(
   pool: pg.Pool,
@@ -62,7 +61,7 @@ async function resolverDestinoDigitando(
   const r = rows[0];
   if (r === undefined) return null;
 
-  const adapter = getAdapter(r.provider as ChannelProvider);
+  const adapter = getAdapter(r.provider);
   if (!adapter.sendTyping) return null; // canal não suporta — noop silencioso, não é erro
 
   const to = adapter.resolveRecipient({
@@ -74,7 +73,7 @@ async function resolverDestinoDigitando(
   });
   if (to === null) return null; // grupo, ou contato sem endereço resolvível — mesmo tratamento do envio real
 
-  return { sessionRef: resolveSessionRef(r as unknown as ChannelSessionRef), to, sendTyping: adapter.sendTyping };
+  return { sessionRef: resolveSessionRef(r), to, sendTyping: adapter.sendTyping };
 }
 
 /**
