@@ -17,6 +17,7 @@ import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { apiClient } from "@/lib/api/client";
+import { copyToClipboard } from "@/lib/clipboard";
 import { Copy, CaretDown, CaretUp, Robot } from "@/lib/ui/icons";
 
 interface ToolMetaResumo {
@@ -62,10 +63,10 @@ export function ReferenciaDeCapacidades({ toolIds }: { toolIds: string[] }) {
     .sort((a, b) => a.rotulo.localeCompare(b.rotulo, "pt-BR"));
 
   async function copiar(nome: string) {
-    try {
-      await navigator.clipboard.writeText(nome);
+    const ok = await copyToClipboard(nome);
+    if (ok) {
       toast.success(`Copiado: ${nome}`);
-    } catch {
+    } else {
       toast.error("Não consegui copiar — selecione o texto manualmente.");
     }
   }

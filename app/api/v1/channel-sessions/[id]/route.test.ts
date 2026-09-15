@@ -483,7 +483,7 @@ describe("GET /api/v1/channel-sessions/[id]", () => {
     expect(db.escritas).toHaveLength(1);
   });
 
-  it("canal OFICIAL não consulta o transporte — ele não tem sessão lá", async () => {
+  it("canal OFICIAL não consulta o transporte WAHA — pergunta ao próprio adapter", async () => {
     authOk();
     const db = makeDb({
       sessions: [
@@ -495,7 +495,14 @@ describe("GET /api/v1/channel-sessions/[id]", () => {
     const res = await GET(reqGet(), ctx());
 
     expect(res.status).toBe(200);
+    // Nunca fala com o transporte do WAHA — canal oficial não tem sessão lá.
     expect(waha.getSessionQr).not.toHaveBeenCalled();
-    expect((await res.json()).data.waha_configured).toBe(false);
+    // `waha_configured` aqui não é "é WAHA" — é "consegui tentar um health
+    // check ao vivo" (o mesmo campo, reaproveitado pelo seam de adapter em
+    // `checkHealth`; ver comentário na rota). Com `meta_phone_number_id`
+    // preenchido, o adapter Meta Cloud tem `checkHealth` e um sessionRef
+    // resolvível, então o check é tentado — daí `true`, mesmo o canal não
+    // sendo WAHA.
+    expect((await res.json()).data.waha_configured).toBe(true);
   });
 });

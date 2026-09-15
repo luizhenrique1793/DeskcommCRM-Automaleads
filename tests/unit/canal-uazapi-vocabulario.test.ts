@@ -31,6 +31,8 @@ describe("capabilities do gateway próprio", () => {
       groups: "none",
       costPerMessage: false,
       canSaveContact: true,
+      canShowTyping: true,
+      canSendButtons: true,
     });
   });
 
