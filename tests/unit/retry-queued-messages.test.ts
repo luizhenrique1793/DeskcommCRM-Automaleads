@@ -143,6 +143,10 @@ function clientDuble(presas: Record<string, unknown>[], opts: { conversa?: Recor
           filtros[`neq:${col}`] = val;
           return cadeia;
         },
+        in(col: string, vals: unknown) {
+          filtros[`in:${col}`] = vals;
+          return cadeia;
+        },
         order() {
           return cadeia;
         },
@@ -182,14 +186,14 @@ beforeEach(() => {
 });
 
 describe("retry-queued-messages", () => {
-  it("busca só outbound queued de HUMANO, sem template", async () => {
+  it("busca só outbound queued de HUMANO ou SISTEMA, sem template", async () => {
     const { client, chamadas } = clientDuble([]);
     await retryQueuedMessages(client as never, AGORA, "req-1");
 
     const busca = chamadas.find((c) => c.tabela === "messages" && c.op === "select");
     expect(busca?.filtros["eq:direction"]).toBe("outbound");
     expect(busca?.filtros["eq:status"]).toBe("queued");
-    expect(busca?.filtros["eq:sent_via"]).toBe("user");
+    expect(busca?.filtros["in:sent_via"]).toEqual(["user", "system"]);
     expect(busca?.filtros["neq:type"]).toBe("template");
   });
 
