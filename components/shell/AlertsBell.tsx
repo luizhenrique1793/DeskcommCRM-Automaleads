@@ -10,7 +10,9 @@ import { Bell } from "@/lib/ui/icons";
  */
 export function AlertsBell() {
   const { data } = useAgentInbox("open");
-  const count = data?.open_count ?? 0;
+  // open_count é uma contagem separada (não paginada) — igual em toda página,
+  // então a primeira já basta pro sino não precisar de mais nenhuma request.
+  const count = data?.pages[0]?.data.open_count ?? 0;
 
   return (
     <Link

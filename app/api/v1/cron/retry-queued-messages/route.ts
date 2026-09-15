@@ -1,8 +1,9 @@
 /**
  * GET/POST /api/v1/cron/retry-queued-messages
  *
- * Repesca mensagem outbound de HUMANO (`sent_via='user'`) presa em `queued`
- * porque o canal não estava pronto no instante do envio
+ * Repesca mensagem outbound de HUMANO (`sent_via='user'`) ou de SISTEMA
+ * (`sent_via='system'` — cron/regra automática, ex.: pix-watcher) presa em
+ * `queued` porque o canal não estava pronto no instante do envio
  * (`queued_reason: channel_session_not_working` ou `<provider>_not_configured`
  * — `app/api/v1/messages/_handler.ts`).
  *
@@ -10,12 +11,18 @@
  *
  * O comentário de `removerEcoDoProprioEnvio` (`_handler.ts`) já registra que
  * "`queued` é estado de espera com DONO: o agent-engine reagenda o job
- * (`SEND_QUEUED_RETRY_MS`)". Isso é verdade só para mensagem que passa pela
- * FILA DE JOB do agente (`sent_via='ai'`) — mensagem digitada no composer
- * nunca cria job nenhum, só grava `status:'queued'` e para. Medido em
- * homologação real (2026-08-14): reconectei uma instância, o atendente
- * mandou mensagem 3 minutos ANTES do canal terminar de subir para `WORKING`,
- * e ela ficou presa para sempre — ninguém a reenviou quando o canal voltou.
+ * (`SEND_QUEUED_RETRY_MS`)". Isso é verdade só para mensagem de um TURNO DE
+ * AGENTE, que passa pela fila de job (`sent_via='ai'`, ator `ai_agent`).
+ * Mensagem digitada no composer (`user`) ou disparada por cron/regra
+ * automática fora de um turno (`system`, ator `webhook_source` —
+ * `especieDe()` em `lib/operacao/autoria.ts`) nunca cria job nenhum, só grava
+ * `status:'queued'` e para. Medido em homologação real (2026-08-14): atendente
+ * mandou mensagem 3 minutos antes do canal subir, ficou presa para sempre.
+ * Medido AO VIVO em produção (2026-08-18): o próprio `pix-watcher` — que só
+ * ganhou o rótulo `system` correto nesta mesma correção, antes caía em `ai`
+ * sem estar coberto por nenhum dos dois resgates — travou 3 confirmações de
+ * pagamento quando o canal caiu no instante do envio, e ficaram presas até
+ * este cron passar a olhar `system` também.
  *
  * ─── Por que é SEGURO reenviar (ao contrário de `recover-stuck-messages`) ──
  *
@@ -26,7 +33,8 @@
  *
  * ─── Escopo deliberadamente estreito ────────────────────────────────────────
  *
- *   - só `sent_via='user'` — mensagem de IA tem dono próprio (agent-engine);
+ *   - só `sent_via IN ('user','system')` — mensagem de TURNO DE AGENTE
+ *     (`sent_via='ai'`) tem dono próprio (agent-engine);
  *   - só `type != 'template'` — template pede pré-voo de definição aprovada
  *     (`lib/channels/conferir-definicao.ts`), fora de escopo aqui; o operador
  *     já tem uma saída manual (`JanelaFechadaAviso`);
@@ -116,7 +124,7 @@ export async function retryQueuedMessages(
     .select("id, organization_id, conversation_id, type, body, media_url, media_mime, media_storage_path, metadata")
     .eq("direction", "outbound")
     .eq("status", "queued")
-    .eq("sent_via", "user")
+    .in("sent_via", ["user", "system"])
     .neq("type", "template")
     .order("created_at", { ascending: true })
     .limit(SCAN_LIMIT);

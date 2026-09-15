@@ -73,7 +73,7 @@ const versionShapeSchema = z
     credential_id: UUID,
     tool_ids: z
       .array(z.string().min(1).max(80))
-      // O mesmo teto que a tela mostra ("13 de 20") é o que o servidor recusa —
+      // O mesmo teto que a tela mostra ("13 de 21") é o que o servidor recusa —
       // ver `lib/mcp/tools/selecao-por-pacote.ts` para o porquê do número.
       .max(TETO_TOOLS_POR_AGENTE)
       .default([])
@@ -98,6 +98,10 @@ const versionShapeSchema = z
     // pelo pacing anti-ban. Defaults espelham a migration 0059.
     split_messages: z.boolean().default(false),
     split_max_chars: z.number().int().min(80).max(4000).default(600),
+    // "Digitando…" (migration 0158) — cosmético, sem efeito em canal que não
+    // suporta (ChannelCapabilities.canShowTyping). Default false: mesmo
+    // comportamento de hoje pra quem não ligar.
+    typing_indicator_enabled: z.boolean().default(false),
     followup: followupConfigSchema,
     // ── Papel OPERADOR (spec 16 §3.2) ───────────────────────────────────────
     // Todos com `.default(...)`, e é o que mantém retrocompatível: agent e

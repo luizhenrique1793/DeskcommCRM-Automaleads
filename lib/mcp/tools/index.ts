@@ -50,6 +50,7 @@ import {
   pousadaVerificarOuCadastrarHospede,
   pousadaCriarReserva,
   pousadaGerarCobrancaPix,
+  pousadaEnviarBotaoCopiarPix,
   pousadaConsultarStatusReserva,
   pousadaConsultarDataAtual,
 } from "./pousada";
@@ -145,6 +146,7 @@ export const allTools: ReadonlyArray<McpToolDefinition> = [
   pousadaVerificarOuCadastrarHospede,
   pousadaCriarReserva,
   pousadaGerarCobrancaPix,
+  pousadaEnviarBotaoCopiarPix,
   // read — pousada
   pousadaConsultarDisponibilidade,
   pousadaConsultarStatusReserva,

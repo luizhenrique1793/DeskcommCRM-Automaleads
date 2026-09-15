@@ -39,6 +39,7 @@ import { TETO_TOOLS_POR_AGENTE } from "@/lib/mcp/tools/selecao-por-pacote";
 import { ModelPicker, useModelMeta } from "./ModelPicker";
 import { CredentialPicker, findCredential } from "./CredentialPicker";
 import { ToolPicker } from "./ToolPicker";
+import { ReferenciaDeCapacidades } from "./ReferenciaDeCapacidades";
 import { TriggerEditor, type TriggerValue } from "./TriggerEditor";
 import { HandoffKeywordsInput } from "./HandoffKeywordsInput";
 import { FollowupFlowPicker } from "./FollowupFlowPicker";
@@ -120,6 +121,7 @@ interface FormState {
   cases_enabled: boolean;
   split_messages: boolean;
   split_max_chars: number;
+  typing_indicator_enabled: boolean;
   followup: FollowupValue;
   // Papel OPERADOR (spec 16 §3.2) — o que mexe no sistema depois da conversa.
   operator_enabled: boolean;
@@ -179,6 +181,7 @@ function buildState(args: {
     cases_enabled: version?.cases_enabled ?? false,
     split_messages: version?.split_messages ?? false,
     split_max_chars: version?.split_max_chars ?? 600,
+    typing_indicator_enabled: version?.typing_indicator_enabled ?? false,
     followup: version?.followup ?? DEFAULT_FOLLOWUP,
     operator_enabled: version?.operator_enabled ?? false,
     // O form usa "" onde o banco usa null — Select controlado não aceita null.
@@ -209,6 +212,7 @@ function toVersionPayload(s: FormState) {
     cases_enabled: s.cases_enabled,
     split_messages: s.split_messages,
     split_max_chars: s.split_max_chars,
+    typing_indicator_enabled: s.typing_indicator_enabled,
     followup: s.followup,
     operator_enabled: s.operator_enabled,
     // "" (não escolheu) → null (herda o do Conversador). São o mesmo conceito em
@@ -746,6 +750,7 @@ export function AgentForm(props: Props) {
                 className="text-xs"
               />
             </div>
+            <ReferenciaDeCapacidades toolIds={form.tool_ids} />
             <Textarea
               value={form.system_prompt}
               onChange={(e) => patch({ system_prompt: e.target.value })}
@@ -799,6 +804,22 @@ export function AgentForm(props: Props) {
                 ) : null}
               </div>
             ) : null}
+            <div className="flex items-center gap-2 border-t border-border/60 pt-3">
+              <Switch
+                id="typing_indicator_enabled"
+                checked={form.typing_indicator_enabled}
+                onCheckedChange={(v) => patch({ typing_indicator_enabled: v })}
+                disabled={disabled}
+              />
+              <Label htmlFor="typing_indicator_enabled">
+                Mostrar &quot;digitando…&quot; enquanto processa
+              </Label>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Sinaliza no WhatsApp que o agente está trabalhando na resposta — ajuda quando o
+              turno demora (várias ferramentas em sequência). Hoje só tem efeito em canais que
+              suportam esse indicador; nos demais o toggle fica sem efeito, sem erro.
+            </p>
           </Card>
 
           {/* Capacidades */}

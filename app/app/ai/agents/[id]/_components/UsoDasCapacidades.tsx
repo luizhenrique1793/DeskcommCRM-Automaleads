@@ -23,6 +23,11 @@ import { EditorDeCapacidadeHttp } from "./EditorDeCapacidadeHttp";
 /** Ferramentas com chamada HTTP editável (ver migration 0149) — as demais capacidades da lista são internas (banco/CRM), não têm o que configurar aqui. */
 const CAPACIDADES_HTTP_CONFIGURAVEIS = new Set(toolsComChamadaHttp());
 
+// CPF "11144477735" (111.444.777-35) é o CPF de teste padrão conhecido —
+// dígito verificador válido de propósito. "00000000000" passava antes porque
+// as tools só conferiam "11 dígitos"; desde que passaram a validar o dígito
+// verificador de verdade, um CPF de exemplo inválido quebrava o próprio botão
+// "Testar agora" com "argumentos inválidos" antes de chamar qualquer coisa.
 const EXEMPLO_TESTE_POR_TOOL: Record<string, string> = {
   pousada_consultar_disponibilidade: JSON.stringify(
     {
@@ -37,7 +42,7 @@ const EXEMPLO_TESTE_POR_TOOL: Record<string, string> = {
   ),
   pousada_verificar_ou_cadastrar_hospede: JSON.stringify(
     {
-      cpf: "00000000000",
+      cpf: "11144477735",
       nome: "TESTE INTEGRACAO",
       data_nascimento: "1990-01-01",
       telefone: "5511999998888",
@@ -54,7 +59,7 @@ const EXEMPLO_TESTE_POR_TOOL: Record<string, string> = {
       quantidade_11_12: 0,
       id_titular: "COLE_O_ID_TITULAR_AQUI",
       titular_nome: "TESTE INTEGRACAO",
-      cpf_titular: "00000000000",
+      cpf_titular: "11144477735",
       total_cotado: 2460,
       pacote_cotado: "Pacote de teste",
     },
@@ -62,7 +67,7 @@ const EXEMPLO_TESTE_POR_TOOL: Record<string, string> = {
     2,
   ),
   pousada_gerar_cobranca_pix: JSON.stringify(
-    { reserva_id: "COLE_O_NUMERO_DA_RESERVA", nome_cliente: "TESTE", cpf_cliente: "00000000000" },
+    { reserva_id: "COLE_O_NUMERO_DA_RESERVA", nome_cliente: "TESTE", cpf_cliente: "11144477735" },
     null,
     2,
   ),

@@ -50,6 +50,7 @@ const AGENT: PublishedAgentConfig = {
   operatorModel: null,
   operatorToolIds: [], pipelineIds: [],
   agentCreatedBy: null,
+  typingIndicatorEnabled: false,
 };
 
 function contextResult(overrides: Partial<LeadContextResult & { ok: true }> = {}): LeadContextResult {

@@ -30,6 +30,8 @@ export interface PublishedAgentConfig {
   handoffToolEnabled: boolean;
   splitMessages: boolean;
   splitMaxChars: number;
+  /** "digitando…" antes de responder — só tem efeito em canal que suporta (`ChannelCapabilities.canShowTyping`); nos demais, é lido e nunca dispara nada, sem erro. */
+  typingIndicatorEnabled: boolean;
   /** input multimodal (imagem/áudio/pdf) habilitado no turno (Onda 3). */
   multimodalInput: boolean;
   /** tools open_human_case/provide_case_update habilitadas no turno (spec 15). */
@@ -82,6 +84,7 @@ interface Row {
   handoff_tool_enabled: boolean;
   split_messages: boolean;
   split_max_chars: number;
+  typing_indicator_enabled: boolean | null;
   multimodal_input: boolean;
   cases_enabled: boolean;
   tool_ids: string[] | null;
@@ -109,6 +112,7 @@ const SELECT_AGENT_CONFIG_COLUMNS = `a.id as agent_id,
             v.handoff_tool_enabled,
             v.split_messages,
             v.split_max_chars,
+            v.typing_indicator_enabled,
             v.multimodal_input,
             v.cases_enabled,
             v.tool_ids,
@@ -149,6 +153,10 @@ function mapAgentConfigRow(r: Row): PublishedAgentConfig {
     handoffToolEnabled: r.handoff_tool_enabled,
     splitMessages: r.split_messages,
     splitMaxChars: r.split_max_chars,
+    // `?? false` cobre o clone sem a 0158: coluna ausente vem null, e a
+    // direção segura é o indicador DESLIGADO — mesmo raciocínio de
+    // operatorEnabled/pipelineIds abaixo.
+    typingIndicatorEnabled: r.typing_indicator_enabled ?? false,
     multimodalInput: r.multimodal_input,
     casesEnabled: r.cases_enabled,
     toolIds: r.tool_ids ?? [],

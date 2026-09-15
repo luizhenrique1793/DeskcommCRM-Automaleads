@@ -219,7 +219,11 @@ export async function PUT(req: NextRequest): Promise<Response> {
     actorUserId: user.id,
     organizationId: activeOrg.orgId,
     resourceType: "mcp_http_capability_calls",
-    resourceId: toolName,
+    // api_audit_log.resource_id é uuid; toolName é texto (ex.:
+    // "pousada_consultar_status_reserva") e o INSERT falhava com 22P02
+    // (medido em produção — "invalid input syntax for type uuid"), calado
+    // porque audit() é fire-and-forget. O tool_name já vai no metadata.
+    resourceId: null,
     requestId,
     metadata: { tool_name: toolName, call_keys: calls.map((c) => c.call_key) },
   });

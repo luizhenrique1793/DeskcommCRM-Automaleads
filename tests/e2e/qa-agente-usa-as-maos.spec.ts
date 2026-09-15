@@ -48,7 +48,7 @@ function loadCreds(): Creds {
 const creds = loadCreds();
 const ts = Date.now();
 
-/** As capacidades da W4 que cabem no teto de 20 por agente, mais o essencial de contexto. */
+/** As capacidades da W4 que cabem no teto de 21 por agente, mais o essencial de contexto. */
 const CAPACIDADES = [
   "crm_list_pipelines",
   "crm_list_stages",

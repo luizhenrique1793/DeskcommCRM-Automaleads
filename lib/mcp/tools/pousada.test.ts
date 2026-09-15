@@ -137,9 +137,21 @@ describe("pousadaVerificarOuCadastrarHospede — contrato congelado", () => {
     expect(executarChamadaPousada).toHaveBeenCalledTimes(1);
   });
 
-  it("busca 404 (hóspede novo): cadastra e devolve status created", async () => {
+  it("busca 404 (defensivo — não é mais o caminho normal, ver teste abaixo): cadastra e devolve status created", async () => {
     vi.mocked(executarChamadaPousada)
       .mockRejectedValueOnce(new Error("pms_http_404: not found"))
+      .mockResolvedValueOnce({ id: "999" });
+    const out = await pousadaVerificarOuCadastrarHospede.handler(input, ctx());
+    expect(out).toMatchObject({ status: "created", id_titular: "999" });
+    expect(executarChamadaPousada).toHaveBeenCalledTimes(2);
+  });
+
+  it("busca 200 com jaExistia:false (formato REAL da API, confirmado ao vivo 2026-08-18): cadastra e devolve status created", async () => {
+    // "Não encontrado" nesta API não é HTTP 404 — é 200 com id:0/jaExistia:false.
+    // Esse é o bug que fazia TODO CPF (inclusive de hóspede recém-cadastrado)
+    // cair no branch de cadastro, duplicando hóspede a cada conversa nova.
+    vi.mocked(executarChamadaPousada)
+      .mockResolvedValueOnce({ id: 0, nome: null, jaExistia: false })
       .mockResolvedValueOnce({ id: "999" });
     const out = await pousadaVerificarOuCadastrarHospede.handler(input, ctx());
     expect(out).toMatchObject({ status: "created", id_titular: "999" });
@@ -167,6 +179,70 @@ describe("pousadaCriarReserva — contrato congelado", () => {
     );
     expect(out).toMatchObject({ ok: false, erro: "id_titular_invalido" });
     expect(executarChamadaPousada).not.toHaveBeenCalled();
+  });
+
+  function ctxComDuplicataDeReserva(duplicata: unknown): McpContext {
+    const chain = {
+      select: () => chain,
+      eq: () => chain,
+      contains: () => chain,
+      gte: () => chain,
+      limit: () => chain,
+      maybeSingle: async () => ({ data: duplicata, error: null }),
+    };
+    return { ...ctx(), supabase: { from: () => chain } as never };
+  }
+
+  const inputValido = {
+    checkin: "2026-12-20",
+    checkout: "2026-12-22",
+    quantidade_adultos: 2,
+    quantidade_criancas: 0,
+    quantidade_11_12: 0,
+    id_titular: "555",
+    titular_nome: "Fulano",
+    cpf_titular: "11144477735",
+    total_cotado: 100,
+    pacote_cotado: "Pacote",
+    contact_id: undefined,
+  };
+
+  it("recusa quando já existe reserva recente do mesmo titular+datas (trava de duplicidade)", async () => {
+    const out = await pousadaCriarReserva.handler(
+      inputValido,
+      ctxComDuplicataDeReserva({ id: "lead-1", custom_fields: { pms_reserva_id: "999" } }),
+    );
+    expect(out).toMatchObject({
+      ok: false,
+      erro: "reserva_possivelmente_duplicada",
+      reserva_id_existente: "999",
+    });
+    expect(executarChamadaPousada).not.toHaveBeenCalled();
+  });
+
+  it("sem duplicata recente: segue e chama o PMS normalmente", async () => {
+    vi.mocked(executarChamadaPousada).mockResolvedValue({ quartos: [] }); // corta cedo, só interessa que TENTOU chamar
+    const out = await pousadaCriarReserva.handler(inputValido, ctxComDuplicataDeReserva(null));
+    expect(out).toMatchObject({ ok: false, erro: "sem_quartos_disponiveis" });
+    expect(executarChamadaPousada).toHaveBeenCalled();
+  });
+});
+
+describe("validação de CPF (dígito verificador) — pousadaVerificarOuCadastrarHospede.cpf", () => {
+  const cpfSchema = pousadaVerificarOuCadastrarHospede.inputSchema.cpf;
+
+  it("recusa CPF com todos os dígitos iguais (formato válido, dígito nunca bate)", () => {
+    expect(cpfSchema.safeParse("11111111111").success).toBe(false);
+    expect(cpfSchema.safeParse("00000000000").success).toBe(false);
+  });
+
+  it("recusa CPF com dígito verificador errado", () => {
+    expect(cpfSchema.safeParse("12345678900").success).toBe(false);
+  });
+
+  it("aceita CPF válido (dígito verificador confere)", () => {
+    // 111.444.777-35 — CPF de teste conhecido, matematicamente válido.
+    expect(cpfSchema.safeParse("11144477735").success).toBe(true);
   });
 });
 

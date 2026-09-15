@@ -11,6 +11,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { ApiError } from "@/lib/api/types";
 import type { Actor, HandlerCtx } from "@/lib/api/handlers/types";
 import { audit } from "@/lib/audit";
+import { especieDe } from "@/lib/operacao/autoria";
 import {
   CHANNEL_SESSION_REF_COLUMNS,
   DEFAULT_CHANNEL_PROVIDER,
@@ -330,7 +331,14 @@ export async function sendMessageHandler(
     media_mime: input.media_mime ?? null,
     media_storage_path: input.media_storage_path ?? null,
     media_size_bytes: input.media_size_bytes ?? null,
-    sent_via: ctx.actor.type !== "user" ? ("ai" as const) : ("user" as const),
+    // especieDe() distingue quem NÃO é humano: ai_agent (turno de agente, com
+    // dono próprio no job do agent-engine) vs webhook_source (cron/regra
+    // automática, SEM job nenhum por trás). Antes disto, os dois viravam
+    // 'ai' — e mensagem de cron presa em 'queued' (canal fora do ar no
+    // instante do envio) não tinha NENHUM cron de resgate, porque
+    // retry-queued-messages só cobre 'user' (achado ao vivo 2026-08-18: as
+    // mensagens do pix-watcher travaram e nunca se recuperaram sozinhas).
+    sent_via: especieDe(ctx.actor),
     sent_by_user_id: ctx.actor.type === "user" ? ctx.actor.id : null,
     sent_at: now,
     metadata: {

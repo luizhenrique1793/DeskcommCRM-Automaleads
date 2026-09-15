@@ -95,6 +95,9 @@ export const ALVO_DE_FUNIL: Record<string, AlvoDeFunil> = {
   // custom_fields — não por lead_id no argumento — então "funil_vem_do_lead"
   // não teria como resolver sem estender o mecanismo.
   pousada_gerar_cobranca_pix: "sem_funil",
+  // Manda uma mensagem extra (botão de copiar) sobre um PIX já gerado — não lê
+  // nem escreve `crm_leads`, só fala com o canal. Mesma classe das duas acima.
+  pousada_enviar_botao_copiar_pix: "sem_funil",
 };
 
 export type VereditoDoEscopo =

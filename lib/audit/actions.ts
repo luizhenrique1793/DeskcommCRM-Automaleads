@@ -133,6 +133,7 @@ export type AuditAction =
   | "ai.dispatcher_run"
   | "ai.pacing_knobs_updated"
   | "ai.inbox_item_status_changed"
+  | "ai.inbox_items_bulk_status_changed"
   | "ai.flywheel_proposal_applied"
   | "ai.org_memory_published"
   | "ai.org_memory_entry_created"

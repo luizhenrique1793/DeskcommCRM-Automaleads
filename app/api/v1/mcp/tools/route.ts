@@ -46,13 +46,25 @@ export async function GET(_req: NextRequest): Promise<Response> {
     );
   }
 
+  // z.toJSONSchema pode rejeitar um shape específico (já vimos isso com
+  // `.email()`, incompatível com o validador de tool-definition da OpenAI —
+  // ver lib/mcp/tools/pousada.ts). Sem isolar por tool, UMA ferramenta com
+  // shape incompatível derrubaria a rota inteira — a tela veria a resposta
+  // como "vazia" e trataria TODAS as capacidades já ligadas do agente como
+  // órfãs. Isolado aqui, o pior caso é uma ferramenta sem `input_schema` na
+  // tela, não a tela inteira quebrada.
   const schemaPorNome = new Map(allTools.map((t) => [t.name, t.inputSchema]));
-  const tools = servidas.map((capacidade) => ({
-    ...capacidade,
-    input_schema: z.toJSONSchema(z.object(schemaPorNome.get(capacidade.id) ?? {}), {
-      target: "openapi-3.0",
-    }),
-  }));
+  const tools = servidas.map((capacidade) => {
+    let input_schema: unknown = {};
+    try {
+      input_schema = z.toJSONSchema(z.object(schemaPorNome.get(capacidade.id) ?? {}), {
+        target: "openapi-3.0",
+      });
+    } catch (err) {
+      console.error("[mcp/tools] z.toJSONSchema falhou para", capacidade.id, "—", err);
+    }
+    return { ...capacidade, input_schema };
+  });
 
   return ok({ tools }, { requestId });
 }

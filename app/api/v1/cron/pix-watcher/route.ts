@@ -24,8 +24,9 @@ import { logger } from "@/lib/logger";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { moveLeadHandler } from "@/app/api/v1/leads/_handler";
 import { sendMessageHandler } from "@/app/api/v1/messages/_handler";
-import { pmsRequest, unwrapPmsObject } from "@/lib/pousada/pms-client";
+import { unwrapPmsObject } from "@/lib/pousada/pms-client";
 import { loadPousadaSettings, type PousadaSettings } from "@/lib/pousada/settings";
+import { executarChamadaPousada } from "@/lib/pousada/executor";
 
 export const dynamic = "force-dynamic";
 
@@ -40,6 +41,38 @@ type LeadRow = {
   contact_id: string | null;
   custom_fields: Record<string, unknown> | null;
 };
+
+/**
+ * `dataEntrada`/`dataSaida` da resposta do PMS são ISO local sem timezone
+ * (`"2026-12-18T12:00:00"`) — os 10 primeiros caracteres já são a data pura,
+ * mesmo formato de `custom_fields.checkin`/`checkout` (`"2026-12-18"`), então
+ * comparar por prefixo é exato, sem parsing de fuso.
+ */
+export function dataBate(pmsIso: unknown, nosso: unknown): boolean {
+  if (typeof pmsIso !== "string" || typeof nosso !== "string") return true; // sem dado pra comparar: não bloqueia
+  return pmsIso.slice(0, 10) === nosso;
+}
+
+/**
+ * Trava contra ID de reserva colidido no PMS — achado ao vivo em produção
+ * (2026-08-18): a reserva #39389 (nossa, teste, 21-22/12) e uma reserva REAL
+ * de outra hóspede (Neusa, 26-27/09, criada por atendente humano no PMS)
+ * receberam o MESMO número, provavelmente por causa da migração pro servidor
+ * novo (producao.cavoc.com.br) não ter sincronizado a sequência de IDs com o
+ * histórico importado. O pix-watcher confiou só no `status` da resposta e
+ * mandou a confirmação DA OUTRA HÓSPEDE pro contato de teste.
+ *
+ * `status`/`confirmada` sozinhos não provam que a resposta é da NOSSA
+ * reserva — as datas provam. Sem elas (campo ausente na resposta, mudança de
+ * contrato do PMS) a checagem não bloqueia nada: só age com PROVA positiva de
+ * divergência, nunca por falta de informação.
+ */
+export function reservaDivergente(
+  pms: Record<string, unknown>,
+  cf: Record<string, unknown>,
+): boolean {
+  return !dataBate(pms.dataEntrada, cf.checkin) || !dataBate(pms.dataSaida, cf.checkout);
+}
 
 async function enviarMensagem(
   admin: ReturnType<typeof createAdminClient>,
@@ -118,11 +151,64 @@ async function processarLead(
   const expiraEm = typeof expiraEmRaw === "string" ? new Date(expiraEmRaw) : null;
   const expirado = expiraEm !== null && !Number.isNaN(expiraEm.getTime()) && agora > expiraEm;
 
-  const raw = await pmsRequest("GET", `/api/Reservas/BuscarStatus?IdReserva=${reservaId}`, settings.pmsBaseUrl);
-  const status = typeof raw === "string" ? raw : String(unwrapPmsObject(raw).status ?? raw ?? "");
+  // Mesmo endpoint que pousada_consultar_status_reserva (lib/mcp/tools/pousada.ts)
+  // — POST com corpo JSON, não GET com query string, e exige o header X-Api-Key
+  // configurado na aba Capacidades → Autenticação. Por isso passa por
+  // executarChamadaPousada (que lê essa config), não pmsRequest cru: antes desta
+  // correção, este watcher chamava o PMS errado a cada minuto, sempre em 404,
+  // há dias — NENHUMA confirmação de pagamento por PIX chegou a avisar o
+  // hóspede pelo WhatsApp, mesmo reserva paga de verdade (achado ao vivo
+  // 2026-08-18, mesma causa raiz do bug já corrigido na tool).
+  const raw = await executarChamadaPousada({
+    supabase: admin,
+    organizationId: lead.organization_id,
+    toolName: "pousada_consultar_status_reserva",
+    callKey: "default",
+    method: "POST",
+    path: "/api/Reservas/BuscarStatus",
+    baseUrl: settings.pmsBaseUrl,
+    body: { IdReserva: Number(reservaId) },
+  });
+  const pmsObj = typeof raw === "string" ? {} : unwrapPmsObject(raw);
+  const status = typeof raw === "string" ? raw : String(pmsObj.status ?? raw ?? "");
   const confirmada = status.trim().toLowerCase() === "reserva confirmada";
 
   const novosCampos = { ...cf };
+
+  if (confirmada && reservaDivergente(pmsObj, cf)) {
+    // NÃO manda mensagem nenhuma pro contato — nem confirmação, nem qualquer
+    // outra coisa baseada nesta resposta: se as datas não batem, a resposta é
+    // de outra reserva, e nada nela é confiável pra ESTA. `pix_status` vira
+    // terminal (sai do pool de 'pending') pra não repetir o aviso a cada
+    // minuto — resolve o item quando corrigir a colisão no PMS e volte
+    // pix_status pra 'pending' na mão se quiser reprocessar.
+    novosCampos.pix_status = "id_mismatch";
+    await admin
+      .from("crm_leads")
+      .update({ custom_fields: novosCampos, updated_at: agora.toISOString() })
+      .eq("id", lead.id);
+    await admin.from("agent_inbox_items").insert({
+      organization_id: lead.organization_id,
+      kind: "other",
+      severity: "critical",
+      title: `Reserva #${reservaId}: PMS devolveu dados de outra reserva`,
+      body:
+        `O sistema da pousada respondeu à consulta da reserva #${reservaId} com datas diferentes das ` +
+        `que registramos (nós: ${String(cf.checkin)} a ${String(cf.checkout)}; PMS devolveu: ` +
+        `${String(pmsObj.dataEntrada ?? "?")} a ${String(pmsObj.dataSaida ?? "?")}) — provável colisão de ` +
+        `número de reserva no PMS. Nenhuma mensagem foi enviada ao hóspede por segurança. Confira o número ` +
+        `correto direto no sistema da pousada antes de resolver este aviso.`,
+      ref_kind: "crm_lead",
+      ref_id: lead.id,
+    });
+    logger.error("[pix-watcher] reserva divergente — confirmação NÃO enviada", {
+      leadId: lead.id,
+      organizationId: lead.organization_id,
+      reservaId,
+      requestId,
+    });
+    return "erro";
+  }
 
   if (confirmada) {
     novosCampos.pix_status = "confirmed";

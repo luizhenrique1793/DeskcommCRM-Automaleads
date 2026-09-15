@@ -79,28 +79,55 @@ function paraDraft(call: CapabilityHttpCall): CapabilityHttpCallWrite {
 function paramsParaLinhas(params: CapabilityHttpCallWrite["query_params"]): KeyValueRow[] {
   return params.map((p) => ({ key: p.key, value: p.value, source: p.source }));
 }
+// SEM filtro/trim de propósito — usada a cada onChange (inclusive o clique em
+// "Adicionar", que nasce com key:""). Filtrar aqui apagava a linha vazia no
+// mesmo clique que a criava, antes de dar tempo de digitar a chave (bug
+// reportado: "clico em adicionar header, nada acontece" — mesma causa em
+// query/path params e no mapeamento de corpo). Filtro entra só em
+// `sanitizarParaSalvar`, na hora de montar o payload do PUT.
 function linhasParaParams(rows: KeyValueRow[]): CapabilityHttpCallWrite["query_params"] {
-  return rows
-    .filter((r) => r.key.trim())
-    .map((r) => ({ key: r.key.trim(), source: r.source ?? "fixed", value: r.value }));
+  return rows.map((r) => ({ key: r.key, source: r.source ?? "fixed", value: r.value }));
 }
 
 function bodyMapParaLinhas(map: CapabilityHttpCallWrite["body_field_map"]): KeyValueRow[] {
   return map.map((m) => ({ key: m.api_field_path, value: m.value, source: m.source }));
 }
+// Mesmo motivo de linhasParaParams acima — sem filtro durante a edição.
 function linhasParaBodyMap(rows: KeyValueRow[]): CapabilityHttpCallWrite["body_field_map"] {
-  return rows
-    .filter((r) => r.key.trim())
-    .map((r) => ({ api_field_path: r.key.trim(), source: r.source ?? "fixed", value: r.value }));
+  return rows.map((r) => ({ api_field_path: r.key, source: r.source ?? "fixed", value: r.value }));
 }
 
 function responseMapParaLinhas(map: CapabilityHttpCallWrite["response_field_map"]): KeyValueRow[] {
   return map.map((m) => ({ key: m.agent_field, value: m.response_path }));
 }
+// Mesmo motivo de linhasParaParams acima — sem filtro durante a edição.
 function linhasParaResponseMap(rows: KeyValueRow[]): CapabilityHttpCallWrite["response_field_map"] {
-  return rows
-    .filter((r) => r.key.trim())
-    .map((r) => ({ agent_field: r.key.trim(), response_path: r.value }));
+  return rows.map((r) => ({ agent_field: r.key, response_path: r.value }));
+}
+
+/**
+ * Filtro/trim de linha vazia que ANTES rodava a cada tecla (ver comentário
+ * acima) — movido pra cá, chamado só na hora de montar o payload do "Salvar".
+ */
+function sanitizarParaSalvar(draft: CapabilityHttpCallWrite): CapabilityHttpCallWrite {
+  return {
+    ...draft,
+    headers: draft.headers
+      .filter((h) => h.key.trim())
+      .map((h) => ({ key: h.key.trim(), value: h.value })),
+    query_params: draft.query_params
+      .filter((p) => p.key.trim())
+      .map((p) => ({ ...p, key: p.key.trim() })),
+    path_params: draft.path_params
+      .filter((p) => p.key.trim())
+      .map((p) => ({ ...p, key: p.key.trim() })),
+    body_field_map: draft.body_field_map
+      .filter((m) => m.api_field_path.trim())
+      .map((m) => ({ ...m, api_field_path: m.api_field_path.trim() })),
+    response_field_map: draft.response_field_map
+      .filter((m) => m.agent_field.trim())
+      .map((m) => ({ ...m, agent_field: m.agent_field.trim() })),
+  };
 }
 
 interface ChamadaEditorProps {
@@ -316,7 +343,7 @@ function ChamadaEditor({ draft, onChange, toolName, onCopiarDisponibilidade }: C
         <h4 className="text-sm font-semibold">Headers</h4>
         <KeyValueListEditor
           rows={draft.headers}
-          onChange={(rows) => onChange({ headers: rows.filter((r) => r.key.trim()) })}
+          onChange={(rows) => onChange({ headers: rows })}
           keyPlaceholder="nome do header"
           valuePlaceholder="valor"
           addLabel="Adicionar header"
@@ -512,7 +539,10 @@ export function EditorDeCapacidadeHttp({
   async function handleSave() {
     if (!drafts) return;
     try {
-      await save.mutateAsync({ tool_name: toolName, calls: Object.values(drafts) });
+      await save.mutateAsync({
+        tool_name: toolName,
+        calls: Object.values(drafts).map(sanitizarParaSalvar),
+      });
       toast.success("Configuração salva — vale para todos os agentes desta organização.");
     } catch {
       toast.error("Não foi possível salvar. Confira os campos e tente de novo.");

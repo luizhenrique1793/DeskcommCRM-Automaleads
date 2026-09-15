@@ -11647,6 +11647,152 @@ notify pgrst, 'reload schema';
 
 
 
+-- ---- mensagem editada e mensagem apagada (migration 0153) ----
+-- O cliente edita ou apaga no aplicativo e o CRM seguia mostrando a versão
+-- velha — sem erro em lugar nenhum. Combinar preço ou endereço a partir de um
+-- texto que o cliente já corrigiu gera um erro que ninguém rastreia depois.
+-- Duas colunas e não um estado: editada continua valendo (o texto novo conta),
+-- apagada deixou de valer (o texto não pode mais aparecer). Timestamp e não
+-- booleano porque a pergunta seguinte é "quando?". A linha apagada NÃO some: a
+-- remoção levaria junto o contexto das vizinhas e o histórico de quem atendeu.
+alter table public.messages add column if not exists edited_at timestamptz;
+alter table public.messages add column if not exists revoked_at timestamptz;
+
+-- ---- definição sabe de qual conexão é (migration 0154) ----
+-- `meta_templates` nasceu para um canal só: a única marca de origem é
+-- `waba_id`, o id da conta na plataforma da Meta. Um segundo canal não tem onde
+-- entrar sem mentir sobre o que aquele campo significa — e o endpoint, que
+-- resolve a sessão por `metaSessionForOrg`, devolvia lista VAZIA numa
+-- instalação que só tem o canal intermediado. A conexão, e não um `provider`:
+-- dois números do mesmo provider têm definições diferentes. `set null` no
+-- delete porque apagar a conexão não pode apagar o registro do que a
+-- plataforma aprovou — ela continua existindo lá.
+alter table public.meta_templates
+  add column if not exists channel_session_id uuid
+    references public.channel_sessions(id) on delete set null;
+create index if not exists meta_templates_sessao_idx
+  on public.meta_templates (channel_session_id, status)
+  where channel_session_id is not null;
+
+-- ---- o arquivo do webhook aceita os canais novos (migration 0151) ----
+-- `webhook_events_log` guarda o corpo CRU do que o provedor mandou — é o único
+-- lugar onde ele fica. O CHECK do dump conhecia três provedores e nenhum dos
+-- canais do seam, então a rota genérica de canal não tinha como gravar sem
+-- mentir sobre a origem ('generic' para um canal que se sabe qual é).
+--
+-- Este é o BLOCO ÚNICO desta constraint (regra da issue #159): canal novo edita
+-- ESTA lista, e não acrescenta um segundo bloco — dois blocos fazem o
+-- `update.sh` de um clone com dados falhar no primeiro e deixar a tabela sem
+-- constraint entre o `drop` e o `add` que funciona.
+--
+-- Alargamento puro: um CHECK que aceita MAIS valores não pode ser violado por
+-- linha que já passava pelo antigo, então não precisa de backfill antes.
+-- ---- e o quarto canal (migration 0157) ----
+-- Espelho idempotente da 0151: bloco único ampliado, não um segundo. Achado em
+-- homologação real: todo POST no webhook genérico do UAZAPI (real ou de teste)
+-- caía no catch de `abrirArquivoDoWebhook` com "violates check constraint
+-- webhook_events_log_provider_check" — silencioso (`logger.warn`, sem
+-- derrubar a ingestão), então a mensagem seguia processando normalmente, mas
+-- o arquivo do corpo cru — o único instrumento para investigar o que chegou —
+-- ficava vazio. Sem ele, esta própria investigação não teria como confirmar
+-- se o UAZAPI mandou algo.
+alter table public.webhook_events_log
+  drop constraint if exists webhook_events_log_provider_check;
+alter table public.webhook_events_log
+  add constraint webhook_events_log_provider_check check (provider in (
+    'waha', 'nuvemshop', 'generic', 'meta_cloud', 'zernio', 'uazapi'
+  ));
+
+notify pgrst, 'reload schema';
+
+-- ---- indicador de "digitando..." por-agente (migration 0158) ----
+-- Mesmo padrão da 0059 (split_messages): desligado por padrão, comportamento
+-- hoje idêntico pra quem não ligar. `fn_ai_agent_version_content_immutable`
+-- recriada com a coluna nova na lista (mesmo reparo da 0125) — sem isso, uma
+-- versão já PUBLICADA poderia ter o toggle trocado sem virar draft nova e sem
+-- deixar trilha, a mesma classe de buraco que a 0125 fechou.
+alter table ai_agent_versions
+  add column if not exists typing_indicator_enabled boolean not null default false;
+
+create or replace function fn_ai_agent_version_content_immutable() returns trigger
+language plpgsql as $fn$
+begin
+  if old.status <> 'draft' and (
+       new.system_prompt          is distinct from old.system_prompt
+    or new.provider               is distinct from old.provider
+    or new.model                  is distinct from old.model
+    or new.credential_id          is distinct from old.credential_id
+    or new.tool_ids               is distinct from old.tool_ids
+    or new.trigger_config         is distinct from old.trigger_config
+    or new.channel_session_id     is distinct from old.channel_session_id
+    or new.max_steps              is distinct from old.max_steps
+    or new.token_budget           is distinct from old.token_budget
+    or new.cost_budget_cents      is distinct from old.cost_budget_cents
+    or new.history_message_window is distinct from old.history_message_window
+    or new.history_token_window   is distinct from old.history_token_window
+    or new.handoff_keywords       is distinct from old.handoff_keywords
+    or new.handoff_tool_enabled   is distinct from old.handoff_tool_enabled
+    or new.followup               is distinct from old.followup
+    or new.multimodal_input       is distinct from old.multimodal_input
+    or new.video_frames_enabled   is distinct from old.video_frames_enabled
+    or new.split_messages         is distinct from old.split_messages
+    or new.split_max_chars        is distinct from old.split_max_chars
+    or new.cases_enabled          is distinct from old.cases_enabled
+    or new.operator_enabled       is distinct from old.operator_enabled
+    or new.operator_model         is distinct from old.operator_model
+    or new.operator_tool_ids      is distinct from old.operator_tool_ids
+    or new.pipeline_ids           is distinct from old.pipeline_ids
+    or new.typing_indicator_enabled is distinct from old.typing_indicator_enabled
+    or new.version_number         is distinct from old.version_number
+    or new.agent_id               is distinct from old.agent_id
+    or new.organization_id        is distinct from old.organization_id
+  ) then
+    raise exception 'ai_agent_versions % é imutável (status=%): mudança de conteúdo = versão draft nova; rollback = revert (clona + publica)',
+      old.id, old.status;
+  end if;
+  return new;
+end;
+$fn$;
+
+drop trigger if exists trg_ai_agent_versions_content_immutable on public.ai_agent_versions;
+create trigger trg_ai_agent_versions_content_immutable
+  before update on public.ai_agent_versions
+  for each row execute function fn_ai_agent_version_content_immutable();
+
+notify pgrst, 'reload schema';
+
+-- ---- RBAC em capacidades HTTP (migration 0159) ----
+-- A 0155 criou mcp_http_capability_calls com policy `ALL` só de tenancy —
+-- qualquer papel do tenant (inclusive viewer) lia e ESCREVIA config de
+-- chamada HTTP de capacidade (inclusive credencial cifrada de PMS de
+-- terceiro), mesmo com a API já gating GET em manager+ e PUT em admin
+-- (app/api/v1/ai/capability-http-configs/route.ts). RLS é a última linha de
+-- defesa contra quem fala direto com o PostgREST, e não acompanhava o app.
+-- Mesmo padrão da 0150: SELECT em manager+ (espelha o GET), escrita em
+-- admin+ (espelha o PUT). fn_role_at_least é hierárquico.
+drop policy if exists tenant_isolation_mcp_http_capability_calls_select on public.mcp_http_capability_calls;
+create policy tenant_isolation_mcp_http_capability_calls_select on public.mcp_http_capability_calls
+  for select
+  using (
+    organization_id in (select public.fn_user_org_ids())
+      and public.fn_role_at_least(organization_id, 'manager')
+  );
+
+drop policy if exists tenant_isolation_mcp_http_capability_calls_modify on public.mcp_http_capability_calls;
+drop policy if exists tenant_isolation_mcp_http_capability_calls_write on public.mcp_http_capability_calls;
+create policy tenant_isolation_mcp_http_capability_calls_write on public.mcp_http_capability_calls
+  for all
+  using (
+    organization_id in (select public.fn_user_org_ids())
+      and public.fn_role_at_least(organization_id, 'admin')
+  )
+  with check (
+    organization_id in (select public.fn_user_org_ids())
+      and public.fn_role_at_least(organization_id, 'admin')
+  );
+
+notify pgrst, 'reload schema';
+
 -- ---- VARREDURA anon: função nova nasce exposta em quem ATUALIZA (migration 0116) ----
 --
 -- ⚠️ ESTE BLOCO É, DE PROPÓSITO, O ÚLTIMO DO ARQUIVO. Apêndice novo entra ANTES
@@ -11721,60 +11867,3 @@ grant execute on function public.fn_encrypt_oauth(text) to service_role;
 grant execute on function public.fn_lgpd_cascade_redact_contact(uuid, uuid, uuid) to service_role;
 grant execute on function public.fn_update_budget_consumption() to service_role;
 
--- ---- mensagem editada e mensagem apagada (migration 0153) ----
--- O cliente edita ou apaga no aplicativo e o CRM seguia mostrando a versão
--- velha — sem erro em lugar nenhum. Combinar preço ou endereço a partir de um
--- texto que o cliente já corrigiu gera um erro que ninguém rastreia depois.
--- Duas colunas e não um estado: editada continua valendo (o texto novo conta),
--- apagada deixou de valer (o texto não pode mais aparecer). Timestamp e não
--- booleano porque a pergunta seguinte é "quando?". A linha apagada NÃO some: a
--- remoção levaria junto o contexto das vizinhas e o histórico de quem atendeu.
-alter table public.messages add column if not exists edited_at timestamptz;
-alter table public.messages add column if not exists revoked_at timestamptz;
-
--- ---- definição sabe de qual conexão é (migration 0154) ----
--- `meta_templates` nasceu para um canal só: a única marca de origem é
--- `waba_id`, o id da conta na plataforma da Meta. Um segundo canal não tem onde
--- entrar sem mentir sobre o que aquele campo significa — e o endpoint, que
--- resolve a sessão por `metaSessionForOrg`, devolvia lista VAZIA numa
--- instalação que só tem o canal intermediado. A conexão, e não um `provider`:
--- dois números do mesmo provider têm definições diferentes. `set null` no
--- delete porque apagar a conexão não pode apagar o registro do que a
--- plataforma aprovou — ela continua existindo lá.
-alter table public.meta_templates
-  add column if not exists channel_session_id uuid
-    references public.channel_sessions(id) on delete set null;
-create index if not exists meta_templates_sessao_idx
-  on public.meta_templates (channel_session_id, status)
-  where channel_session_id is not null;
-
--- ---- o arquivo do webhook aceita os canais novos (migration 0151) ----
--- `webhook_events_log` guarda o corpo CRU do que o provedor mandou — é o único
--- lugar onde ele fica. O CHECK do dump conhecia três provedores e nenhum dos
--- canais do seam, então a rota genérica de canal não tinha como gravar sem
--- mentir sobre a origem ('generic' para um canal que se sabe qual é).
---
--- Este é o BLOCO ÚNICO desta constraint (regra da issue #159): canal novo edita
--- ESTA lista, e não acrescenta um segundo bloco — dois blocos fazem o
--- `update.sh` de um clone com dados falhar no primeiro e deixar a tabela sem
--- constraint entre o `drop` e o `add` que funciona.
---
--- Alargamento puro: um CHECK que aceita MAIS valores não pode ser violado por
--- linha que já passava pelo antigo, então não precisa de backfill antes.
--- ---- e o quarto canal (migration 0157) ----
--- Espelho idempotente da 0151: bloco único ampliado, não um segundo. Achado em
--- homologação real: todo POST no webhook genérico do UAZAPI (real ou de teste)
--- caía no catch de `abrirArquivoDoWebhook` com "violates check constraint
--- webhook_events_log_provider_check" — silencioso (`logger.warn`, sem
--- derrubar a ingestão), então a mensagem seguia processando normalmente, mas
--- o arquivo do corpo cru — o único instrumento para investigar o que chegou —
--- ficava vazio. Sem ele, esta própria investigação não teria como confirmar
--- se o UAZAPI mandou algo.
-alter table public.webhook_events_log
-  drop constraint if exists webhook_events_log_provider_check;
-alter table public.webhook_events_log
-  add constraint webhook_events_log_provider_check check (provider in (
-    'waha', 'nuvemshop', 'generic', 'meta_cloud', 'zernio', 'uazapi'
-  ));
-
-notify pgrst, 'reload schema';
