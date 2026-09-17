@@ -127,7 +127,7 @@ before-send.
   outras não precisam de checagem de promessa semântica.
 - **Limite real:** só as camadas que já existem no catálogo são
   configuráveis. A maior parte das ~10 verificações do before-send
-  (`lib/agent-engine/agent/before-send.ts`) é determinística e sempre ativa —
+  (`lib/agent-engine/guardrails/before-send.ts`) é determinística e sempre ativa —
   não tem toggle porque não é opcional (ex.: vazamento de vocabulário
   interno). Uma checagem **nova** — um padrão de risco que ninguém cobre
   ainda — é gate novo no código, não configuração.
