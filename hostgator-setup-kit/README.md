@@ -19,11 +19,13 @@ Este kit sobe o **DeskcommCRM** no seu servidor VPS da HostGator. Você tem dois
 > de tentar subir um Caddy que não caberia. Ver
 > [VPS que já vem com proxy próprio](#vps-que-já-vem-com-proxy-próprio-hostinger-coolify-dokploy).
 
-## 🤖 Caminho fácil: deixe o Claude Code fazer
+## 🤖 Caminho fácil: deixe o assistente de código fazer
 
 1. Contrate um **VPS na HostGator** e acesse-o por SSH.
-2. Jogue esta pasta (ou o `.zip`) no chat do **Claude Code** rodando dentro do VPS.
-3. Diga: *"instala o DeskcommCRM pra mim"*. Ele lê o `CLAUDE.md` e conduz tudo —
+2. Clone o repositório (`git clone --depth 1 https://github.com/melgarafael/DeskcommCRM.git deskcommcrm`)
+   e abra a pasta no **Claude Code, Codex, Cursor, OpenCode ou Antigravity** dentro do VPS —
+   ou jogue só esta pasta no chat: o `CLAUDE.md` daqui manda clonar e abre o guia.
+3. Diga: *"instala o DeskcommCRM pra mim"*. O guia `deskcomm-instalar` conduz tudo —
    cria o banco, gera as senhas, sobe o CRM e te ajuda a conectar o WhatsApp.
 
 ## ⚙️ Caminho manual: um comando
@@ -40,8 +42,8 @@ bash install.sh
 > contrato desse modo. Se preferir instalar por conta própria, responda `n` e rode
 > `curl -fsSL https://get.docker.com | sh` antes.
 
-O instalador pergunta o que precisa (domínio, chaves do Supabase e da Anthropic,
-e-mail/senha do admin), gera o resto e sobe tudo.
+O instalador pergunta o que precisa (domínio, chaves do Supabase, provedor de IA
+— a chave pode ficar para depois —, e-mail/senha do admin), gera o resto e sobe tudo.
 
 > Modo não-interativo: copie `.env.hostgator.example` (do repositório) para `.env`,
 > preencha, e rode `bash install.sh --yes`.
@@ -83,8 +85,22 @@ Owner/Admin. Não dá para hospedar vários clientes numa conta só.
 | VPS (Docker) | HostGator — VPS com Docker (n8n/OpenClaw/GatorClaw). Outras hospedagens com Docker também servem — se a sua já tiver proxy próprio nas portas 80/443, [veja aqui](#vps-que-já-vem-com-proxy-próprio-hostinger-coolify-dokploy) |
 | Domínio | Registro de domínio (aponte um A-record pro IP do VPS) |
 | Banco de dados | Conta grátis no [supabase.com](https://supabase.com) (3 chaves + connection string) |
-| IA | Chave da [Anthropic](https://console.anthropic.com) |
+| IA | Chave da [Anthropic](https://console.anthropic.com) — opcional: dá para instalar sem ela e cadastrar depois pela tela (IA › Credenciais) |
 | WhatsApp | Seu número — conectado por QR code no onboarding |
+| Token do Supabase (opcional) | [supabase.com/dashboard/account/tokens](https://supabase.com/dashboard/account/tokens) — com ele o instalador configura sozinho os links dos e-mails de acesso. **Ele não fica salvo:** é usado uma vez e some com o processo |
+
+> **Sem esse token, um passo fica manual — e ele importa.** Os e-mails de
+> "esqueci minha senha", de confirmação de cadastro e de aceite de convite saem
+> com o endereço que estiver em **Authentication → URL Configuration** do seu
+> projeto Supabase. Ele nasce como `http://localhost:3000`, que só existe na
+> máquina de quem desenvolve — então o link chega quebrado para todo mundo, e
+> ninguém consegue redefinir a própria senha.
+>
+> Se você pular o token, o instalador termina avisando exatamente o que
+> preencher, com o seu domínio já escrito. Se preferir fazer agora:
+>
+> - **Site URL:** `https://SEU_DOMINIO`
+> - **Redirect URLs:** `https://SEU_DOMINIO/auth/confirm`
 
 ## Requisitos do VPS
 

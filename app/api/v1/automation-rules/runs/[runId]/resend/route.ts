@@ -1,3 +1,4 @@
+import { requireSupportWrite } from "@/lib/impersonate/support";
 /**
  * POST /api/v1/automation-rules/runs/[runId]/resend — reexecuta SÓ as ações
  * `call_webhook` da regra do run, contra o evento original (`event_log` do
@@ -16,6 +17,7 @@ import { buildContext } from "@/lib/automation/engine";
 import { executeCallWebhook } from "@/lib/automation/actions/call-webhook";
 import type { ActionCtx, ActionResultDetail } from "@/lib/automation/types";
 import type { EventRow } from "@/lib/event-log/dispatcher";
+import { traduzir } from "@/lib/i18n/dicionario";
 
 export const dynamic = "force-dynamic";
 
@@ -29,10 +31,14 @@ interface RuleAction {
 }
 
 export async function POST(_req: NextRequest, ctx: RouteCtx): Promise<Response> {
+  const supportDenied = await requireSupportWrite();
+  if (supportDenied) return supportDenied;
+
   const requestId = randomUUID();
   const { runId } = await ctx.params;
   const authz = await requireRole("manager", { requestId, resource: "automation_rules" });
   if (!authz.ok) return authz.response;
+  const t = (texto: string) => traduzir(texto, authz.user.idioma);
   const { user, org: activeOrg } = authz;
 
   const supabase = await createClient();
@@ -44,20 +50,20 @@ export async function POST(_req: NextRequest, ctx: RouteCtx): Promise<Response> 
     .eq("organization_id", activeOrg.orgId)
     .maybeSingle();
   if (runErr) return fail("internal_error", runErr.message, 500, { requestId });
-  if (!run) return fail("not_found", "Run não encontrado.", 404, { requestId });
+  if (!run) return fail("not_found", t("Run não encontrado."), 404, { requestId });
 
   if (!run.event_id) {
-    return fail("event_gone", "O evento original deste run foi removido.", 409, { requestId });
+    return fail("event_gone", t("O evento original deste run foi removido."), 409, { requestId });
   }
 
   const { data: rule, error: ruleErr } = await supabase
     .from("automation_rules")
-    .select("id, actions")
+    .select("id, name, actions")
     .eq("id", run.rule_id)
     .eq("organization_id", activeOrg.orgId)
     .maybeSingle();
   if (ruleErr) return fail("internal_error", ruleErr.message, 500, { requestId });
-  if (!rule) return fail("not_found", "Regra do run não encontrada.", 404, { requestId });
+  if (!rule) return fail("not_found", t("Regra do run não encontrada."), 404, { requestId });
 
   const { data: eventRow, error: eventErr } = await supabase
     .from("event_log")
@@ -67,7 +73,7 @@ export async function POST(_req: NextRequest, ctx: RouteCtx): Promise<Response> 
     .maybeSingle();
   if (eventErr) return fail("internal_error", eventErr.message, 500, { requestId });
   if (!eventRow) {
-    return fail("event_gone", "O evento original deste run foi removido.", 409, { requestId });
+    return fail("event_gone", t("O evento original deste run foi removido."), 409, { requestId });
   }
 
   const typedEvent = eventRow as unknown as EventRow;
@@ -76,6 +82,29 @@ export async function POST(_req: NextRequest, ctx: RouteCtx): Promise<Response> 
   const callWebhookActions = ((rule.actions ?? []) as RuleAction[]).filter(
     (action) => action.type === "call_webhook",
   );
+
+  // ─── REENVIAR NADA NÃO É SUCESSO ──────────────────────────────────────────
+  //
+  // `failed === 0` é VERDADEIRO para lista vazia, e sem esta guarda uma regra
+  // que perdeu as ações de webhook (o operador removeu a ação no editor, e o
+  // botão "Reenviar" segue renderizado no run antigo) gravava uma linha
+  // `status: "success"` com `actions_result: []`. A tela então mostra o toast
+  // verde e o badge "Sucesso" com corpo vazio: o operador é informado de um
+  // reenvio que não aconteceu.
+  //
+  // É exatamente a classe de defeito que este PR existe para fechar — a
+  // automação dizer que deu certo quando não deu —, e ela reapareceria pela
+  // porta nova. 409 e não 200 porque o estado do MUNDO mudou desde o run
+  // original: a regra não tem mais o que reenviar, e isso é informação, não
+  // erro do chamador.
+  if (callWebhookActions.length === 0) {
+    return fail(
+      "no_actions_to_resend",
+      t("Esta automação não tem mais nenhuma ação de webhook — não há o que reenviar."),
+      409,
+      { requestId },
+    );
+  }
 
   // Admin real no ctx: o executor decifra config.secret_enc via RPC
   // fn_decrypt_oauth (grant só service_role) — client de sessão falharia e o
@@ -87,6 +116,7 @@ export async function POST(_req: NextRequest, ctx: RouteCtx): Promise<Response> 
       admin: adminForActions,
       organizationId: activeOrg.orgId,
       ruleId: rule.id,
+      ruleName: (rule.name as string) ?? "Automação",
       event: typedEvent,
       context,
       requestId,

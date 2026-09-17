@@ -3,6 +3,7 @@
 import { useEffect, useState, useTransition } from "react";
 import Link from "next/link";
 
+import { useT } from "@/hooks/i18n/useT";
 import { TOTPInput } from "@/components/auth/TOTPInput";
 import { Button } from "@/components/ui/button";
 import { verifyMfa } from "@/app/actions/auth/verifyMfa";
@@ -12,6 +13,7 @@ interface MfaFormProps {
 }
 
 export function MfaForm({ next }: MfaFormProps) {
+  const t = useT();
   const [code, setCode] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [locked, setLocked] = useState(false);
@@ -44,11 +46,11 @@ export function MfaForm({ next }: MfaFormProps) {
         setLocked(true);
         setSecondsLeft(res.retry_in_seconds ?? 60);
         setError(
-          `Muitas tentativas. Aguarde ${res.retry_in_seconds ?? 60}s e tente novamente.`,
+          `${t("Muitas tentativas. Aguarde")} ${res.retry_in_seconds ?? 60}s ${t("e tente novamente.")}`,
         );
         setCode("");
       } else {
-        setError("Código inválido. Tente novamente.");
+        setError(t("Código inválido. Tente novamente."));
         setCode("");
       }
     });
@@ -60,6 +62,10 @@ export function MfaForm({ next }: MfaFormProps) {
 
   return (
     <form
+      // Ver a nota nos outros formulários de autenticação: sem JavaScript o
+      // submit nativo é GET, e o código de verificação iria para a query
+      // string — histórico, log do servidor e Referer.
+      method="post"
       onSubmit={(e) => {
         e.preventDefault();
         submit();
@@ -82,7 +88,7 @@ export function MfaForm({ next }: MfaFormProps) {
           className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-center text-sm text-destructive"
         >
           {locked && secondsLeft > 0
-            ? `Muitas tentativas. Tente novamente em ${secondsLeft}s.`
+            ? `${t("Muitas tentativas. Tente novamente em")} ${secondsLeft}s.`
             : error}
         </div>
       )}
@@ -92,12 +98,12 @@ export function MfaForm({ next }: MfaFormProps) {
         className="w-full"
         disabled={isPending || locked || code.length !== 6}
       >
-        {isPending ? "Verificando..." : "Verificar"}
+        {isPending ? t("Verificando...") : t("Verificar")}
       </Button>
 
       <div className="text-center text-sm">
         <Link href={recoveryHref} className="text-muted-foreground underline-offset-4 hover:underline">
-          Perdi acesso ao autenticador
+          {t("Perdi acesso ao autenticador")}
         </Link>
       </div>
     </form>

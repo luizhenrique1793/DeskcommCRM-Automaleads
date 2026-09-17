@@ -6,6 +6,7 @@ import { useRefetchDeSeguranca } from "@/hooks/realtime/useRefetchDeSeguranca";
 import { apiClient } from "@/lib/api/client";
 import { showApiError } from "@/components/feedback/ApiErrorToast";
 import type { Conversation } from "@/lib/types/messaging";
+import type { ComandoDoBanco } from "@/lib/inbox/comando-da-conversa";
 
 export interface ContactSummary {
   id: string;
@@ -57,14 +58,46 @@ export interface ChannelSummary {
 export type ConversationWithContact = Conversation & {
   contacts?: ContactSummary | null;
   channel_sessions?: ChannelSummary | null;
+  /**
+   * O nome de quem atende, resolvido no servidor.
+   *
+   * Opcional e nulável, e as duas coisas significam algo diferente: ausente é
+   * resposta em cache de antes deste campo existir; `null` é um estado DECLARADO
+   * — self-host sem service role, ou lookup que falhou (ver
+   * `lib/users/nome-do-atendente.ts`). Nenhum dos dois quer dizer "sem
+   * responsável": o dono é o `assigned_to_user_id`, o nome é a cortesia.
+   */
+  assigned_to_user_name?: string | null;
 };
 
+/** O vocabulário de LEITURA (7), que inclui os dois estados que só o motor escreve. */
+export type StatusDeConversa =
+  | "open"
+  | "pending"
+  | "resolved"
+  | "claimed"
+  | "ai_handling"
+  | "closed"
+  | "archived";
+
 export interface ConversationsFilters {
-  status?: "open" | "claimed" | "ai_handling" | "closed" | "archived";
+  /** Um status ou vários — a aba Fila precisa de dois (open + pending). */
+  status?: StatusDeConversa | readonly StatusDeConversa[];
   /** Esconde fechadas/arquivadas — ver `exclude_finished` no schema da rota. */
   exclude_finished?: boolean;
   assigned_to?: "me" | "unassigned" | string;
+  /**
+   * QUEM MANDA na conversa — o filtro que as abas Fila e Automático passaram a
+   * usar (migration 0203). Pergunta diferente de `status`: aquele é ciclo de
+   * vida, este é quem responde a próxima mensagem do cliente.
+   */
+  comando?: readonly ComandoDoBanco[];
   search?: string;
+  /**
+   * Só as que têm mensagem não lida para o dono. Vai ao BANCO — migration nenhuma,
+   * a coluna `unread_count_for_assignee` já existe.
+   */
+  unread?: boolean;
   channel_session_id?: string;
   tag?: string;
 }
@@ -86,10 +119,22 @@ export function useConversationsRealtime(
     initialPageParam: undefined as string | undefined,
     queryFn: async ({ pageParam }) => {
       const qs = new URLSearchParams();
-      if (filters.status) qs.set("status", filters.status);
+      // Lista vira `open,pending`; valor único continua saindo como antes.
+      if (filters.status) {
+        const lista: readonly StatusDeConversa[] =
+          typeof filters.status === "string" ? [filters.status] : filters.status;
+        qs.set("status", lista.join(","));
+      }
+      // O `qs.set` é metade do trabalho, e é a metade que o typecheck NÃO pega:
+      // com o campo no tipo e sem esta linha, a aba Fila pediria filtro nenhum e
+      // mostraria a lista inteira — parecendo funcionar.
+      if (filters.comando && filters.comando.length > 0) {
+        qs.set("comando", filters.comando.join(","));
+      }
       if (filters.exclude_finished) qs.set("exclude_finished", "true");
       if (filters.assigned_to) qs.set("assigned_to", filters.assigned_to);
       if (filters.search) qs.set("search", filters.search);
+      if (filters.unread) qs.set("unread", "true");
       if (filters.channel_session_id) qs.set("channel_session_id", filters.channel_session_id);
       if (filters.tag) qs.set("tag", filters.tag);
       if (pageParam) qs.set("cursor", pageParam);
@@ -141,17 +186,21 @@ export function useConversationsRealtime(
     enabled: !!orgId,
   });
 
-  // A REDE DE SEGURANÇA — o MESMO mecanismo que já cura board e dossiê
-  // (`useRefetchDeSeguranca`), nunca reinventado aqui. Sem ela, um canal que
-  // para de entregar em silêncio (`SUBSCRIBED` mas morto — medido em
-  // `tests/prova-raio-do-silencio.ts`) deixa a lista congelada até um F5
-  // manual, porque `refetchOnWindowFocus` só ajuda quem troca de aba — não
-  // quem fica olhando a tela o tempo todo, que foi o caso relatado.
-  //
-  // Assinatura: contagem de conversas + o par (maior `last_message_at`, id do
-  // dono dele) — sensível a exatamente o que o canal deveria ter trazido
-  // (mensagem nova reordena/atualiza a prévia de UMA conversa) e insensível a
-  // metadata que não afeta a lista.
+  /**
+   * A REDE DE SEGURANÇA — o MESMO mecanismo que já cura board e dossiê
+   * (`useRefetchDeSeguranca`), nunca reinventado aqui. Sem ela, um canal que
+   * para de entregar em silêncio (`SUBSCRIBED` mas morto — medido em
+   * `tests/prova-raio-do-silencio.ts`) deixa a lista congelada até um F5
+   * manual, porque `refetchOnWindowFocus` só ajuda quem troca de aba — não
+   * quem fica olhando a tela o tempo todo, que foi o caso relatado.
+   *
+   * Assinatura: contagem de conversas + o par (maior `last_message_at`, id do
+   * dono dele) — sensível a exatamente o que o canal deveria ter trazido
+   * (mensagem nova reordena/atualiza a prévia de UMA conversa) e insensível a
+   * metadata que não afeta a lista. `updated_at` entra como fallback do
+   * carimbo — não sozinho — porque o que muda a ordem da lista é a última
+   * mensagem.
+   */
   const seguranca = useRefetchDeSeguranca<InfiniteData<ListResponse>>({
     queryKey,
     assinatura: (d) => {

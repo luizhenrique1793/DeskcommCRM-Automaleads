@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useId, useRef, useState, type RefObject } from "react";
-import { createClient } from "@/lib/supabase/browser";
+import { createClient, prepareRealtimeAuthentication } from "@/lib/supabase/browser";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 
 export type RealtimeStatus =
@@ -24,100 +24,31 @@ export interface UseRealtimeChannelOpts {
 }
 
 /**
- * Autentica o socket do Realtime com o token da sessão (uma vez por client).
+ * ONDE MORA A AUTENTICAÇÃO DESTE CANAL — não é aqui, e isso é o conserto.
  *
- * `setAuth` é do SOCKET, não do canal: vale para todos os canais criados
- * depois. A promise fica memoizada para N hooks não dispararem N requisições.
+ * Este hook já teve um bloco que buscava o token e chamava
+ * `supabase.realtime.setAuth(token)` antes de cada `subscribe`, com memo,
+ * corrida contra um teto de 4s e remontagem quando o token chegava atrasado.
+ * Tudo isso existia para compensar o cookie httpOnly, que deixa o supabase-js
+ * do browser sem enxergar a sessão.
  *
- * ⚠️ A MEMO SÓ SOBREVIVE AO SUCESSO. Esta é a linha que faltava, e o defeito que
- * ela conserta foi medido em produção-de-desenvolvimento: uma assinatura de
- * `crm_leads` ANÔNIMA (claims.sub nulo) no mesmo socket em que `conversations`
- * estava autenticada. Com RLS por `auth.uid()`, anônimo devolve ZERO linhas: o
- * canal responde SUBSCRIBED e nunca entrega nada — morte silenciosa, a pior
- * forma, porque a tela parece viva.
+ * ⚠️ AQUELE BLOCO PAROU DE FUNCIONAR NUM BUMP DE DEPENDÊNCIA, e ficou verde.
+ * A partir do realtime-js 2.112.x a callback `accessToken` do client vence o
+ * token manual — a própria biblioteca documenta isso — e a callback PADRÃO,
+ * sem sessão visível, devolve a anon key. Medido no socket: o token do usuário
+ * durava ~2ms, e todo canal criado depois joinava anônimo. Anônimo assina,
+ * responde SUBSCRIBED e não recebe nada, porque a RLS filtra do outro lado.
  *
- * A versão anterior tinha TRÊS saídas e só UMA limpava a memo:
- *   catch { realtimeAuth = null }  → exceção se curava sozinha
- *   if (!res.ok) return            → 401/500: memo FICAVA, setAuth nunca corria
- *   if (token) setAuth(token)      → corpo sem token: memo FICAVA, idem
+ * Os testes não pegaram porque exercitavam `authenticateRealtime` contra um
+ * cliente FAKE: provavam que `setAuth` era CHAMADO, e o que quebrou foi o
+ * EFEITO de chamá-lo. Guardar a chamada em vez do comportamento é o que os
+ * deixou verdes enquanto o inbox não atualizava.
  *
- * E havia uma SEGUNDA janela, achada depois pelo tipo de retorno: `setAuth`
- * é assíncrono, e chamá-lo sem `await` fazia a promessa memoizada resolver
- * antes de o token estar no socket. Quem assinasse nesse intervalo assinava
- * anônimo — o mesmo sintoma, por outro caminho.
- *
- * Ou seja: UM ÚNICO 401 transitório — sessão ainda estabelecendo, cookie em
- * renovação — deixava TODOS os canais criados depois anônimos pelo resto
- * daquele carregamento. E a recuperação estava escrita justamente para o
- * caminho BARULHENTO, que era o que menos precisava dela.
- *
- * A REGRA GERAL, que vale para qualquer memoização: o critério não é "deu
- * erro?" — é **o resultado memoizado é o resultado DESEJADO?**. Sucesso parcial
- * memoizado é pior que erro memoizado, porque erro alguém repete.
+ * A fonte do token agora é única e mora em `lib/supabase/browser.ts`, na
+ * callback que o socket chama sozinho — no join, em cada reconexão e a cada
+ * heartbeat. Duas fontes de token eram o defeito; não se conserta somando uma
+ * terceira.
  */
-const AUTH_TIMEOUT_MS = 1_500;
-
-let realtimeAuth: Promise<void> | null = null;
-
-/** Só para teste: zera a memo entre casos (ela é módulo-global de propósito). */
-export function __resetRealtimeAuth(): void {
-  realtimeAuth = null;
-}
-
-export function authenticateRealtime(supabase: ReturnType<typeof createClient>): Promise<void> {
-  realtimeAuth ??= (async () => {
-    // `autenticou` é o ÚNICO critério de guardar a memo. Não "não deu exceção",
-    // não "a resposta chegou": chamou `setAuth` ou não chamou.
-    let autenticou = false;
-    try {
-      const res = await fetch("/api/v1/auth/realtime-token", { credentials: "include" });
-      if (res.ok) {
-        const body = (await res.json()) as { data?: { access_token?: string } };
-        const token = body.data?.access_token;
-        if (token) {
-          // ⚠️ O `await` NÃO É DECORATIVO: `setAuth` devolve `Promise<void>`.
-          //
-          // Sem ele, `autenticou` virava true quando a CHAMADA saía, não quando
-          // o token era APLICADO ao socket — e a promessa memoizada resolvia
-          // antes disso. Como quem assina espera essa promessa, o `subscribe`
-          // podia correr com o socket ainda anônimo, e uma assinatura anônima
-          // com RLS por `auth.uid()` recebe ZERO linhas em silêncio.
-          //
-          // A dúvida era: "o conserto garante que setAuth seja CHAMADO, não que
-          // tenha EFEITO". O tipo de retorno respondeu — havia mesmo uma janela,
-          // e esperar por ela custa uma palavra. É cerca, não medição.
-          await supabase.realtime.setAuth(token);
-          autenticou = true;
-        }
-      }
-    } catch {
-      // engolido de propósito: ver a degradação abaixo
-    }
-    if (!autenticou) {
-      // Sem token o canal segue anônimo e a UI continua funcionando por refetch,
-      // só perde o tempo real — derrubar a tela por causa disso seria pior.
-      // MAS A DEGRADAÇÃO VALE SÓ ATÉ A PRÓXIMA TENTATIVA, e é esta linha que faz
-      // a próxima tentativa existir. Sem ela, "temporário" virava permanente
-      // pelo resto do carregamento.
-      realtimeAuth = null;
-    }
-  })();
-  return realtimeAuth;
-}
-
-/**
- * Espera o token, mas com teto: assinar 1,5s depois é aceitável; NÃO assinar
- * porque a rota está lenta (ou não existe, como no jsdom dos testes) deixaria a
- * tela sem realtime para sempre. Prazo estourado = canal anônimo, que é o
- * comportamento de antes desta correção, não uma regressão nova.
- */
-function esperarAuth(supabase: ReturnType<typeof createClient>): Promise<void> {
-  return Promise.race([
-    authenticateRealtime(supabase),
-    new Promise<void>((resolve) => setTimeout(resolve, AUTH_TIMEOUT_MS)),
-  ]);
-}
-
 export function useRealtimeChannel(opts: UseRealtimeChannelOpts): {
   status: RealtimeStatus;
   /**
@@ -203,7 +134,37 @@ export function useRealtimeChannel(opts: UseRealtimeChannelOpts): {
      * mesmo objeto devolve SUBSCRIBED sem nunca mais entregar. Morte silenciosa,
      * a mesma classe de defeito que a memo de auth já tinha aqui.
      */
-    const montar = () => {
+    const agendarRetomada = () => {
+      if (cancelado) return;
+      const espera = Math.min(30_000, 1_000 * 2 ** tentativas);
+      tentativas++;
+      if (retomada) clearTimeout(retomada);
+      retomada = setTimeout(() => {
+        if (cancelado) return;
+        // `active` é SOLTO antes de remover, e a ordem é o conserto. Num canal
+        // que ainda não entrou, `removeChannel` chama o callback do `subscribe`
+        // com CLOSED ANTES de retornar (medido no realtime-js 2.112.3 instalado:
+        // `joining | cb:CLOSED | depois-da-chamada`). Com `active` ainda
+        // apontando o canal velho, esse CLOSED passava pela guarda
+        // `active !== novo` e armava OUTRA retomada — um timer órfão que, 2^n s
+        // depois, derrubava o canal que já tinha voltado saudável, numa janela
+        // em que eventos se perdem e nenhum "reassinado" é emitido.
+        const velho = active;
+        active = null;
+        if (velho) supabase.removeChannel(velho);
+        montar();
+      }, espera);
+    };
+    const montar = async () => {
+      if (cancelado) return;
+      try {
+        await prepareRealtimeAuthentication();
+      } catch {
+        if (cancelado) return;
+        setStatus("channel_error");
+        agendarRetomada();
+        return;
+      }
       if (cancelado) return;
 
       let novo: RealtimeChannel = supabase.channel(`${channelName}#${tentativas}`);
@@ -222,53 +183,42 @@ export function useRealtimeChannel(opts: UseRealtimeChannelOpts): {
       if (broadcast) novo = novo.on("broadcast", { event: broadcast.event }, handler);
       active = novo;
 
-      // O token tem de chegar ANTES do subscribe: assinar primeiro e autenticar
-      // depois deixa o canal anônimo para sempre — ele responde "Subscribed to
-      // PostgreSQL" e nunca entrega evento, porque a RLS filtra do outro lado.
-      void esperarAuth(supabase).then(() => {
+      // Bootstrap concluído antes do primeiro join; a callback do client mantém
+      // a renovação. Nenhum canal anônimo nasce enquanto o token está em voo.
+      novo.subscribe((s) => {
         if (cancelado || active !== novo) return;
-        novo.subscribe((s) => {
-          if (cancelado || active !== novo) return;
-          // s is one of "SUBSCRIBED" | "CHANNEL_ERROR" | "TIMED_OUT" | "CLOSED"
-          const map: Record<string, RealtimeStatus> = {
-            SUBSCRIBED: "subscribed",
-            CHANNEL_ERROR: "channel_error",
-            TIMED_OUT: "timed_out",
-            CLOSED: "closed",
-          };
-          setStatus(map[s] ?? "connecting");
+        // s is one of "SUBSCRIBED" | "CHANNEL_ERROR" | "TIMED_OUT" | "CLOSED"
+        const map: Record<string, RealtimeStatus> = {
+          SUBSCRIBED: "subscribed",
+          CHANNEL_ERROR: "channel_error",
+          TIMED_OUT: "timed_out",
+          CLOSED: "closed",
+        };
+        setStatus(map[s] ?? "connecting");
 
-          if (s === "SUBSCRIBED") {
-            // Voltou depois de ter caído. O que aconteceu enquanto ele estava
-            // morto NÃO vai chegar — o Realtime não guarda nada para entregar
-            // depois. Uma entrega sintética força quem escuta a buscar de novo,
-            // e é ela que fecha o buraco de verdade: sem isso o canal volta a
-            // funcionar para o PRÓXIMO evento e a tela segue sem o anterior.
-            if (tentativas > 0) {
-              tentativas = 0;
-              handler({ tipo: "reassinado" });
-            }
-            return;
+        if (s === "SUBSCRIBED") {
+          // Voltou depois de ter caído. O que aconteceu enquanto ele estava
+          // morto NÃO vai chegar — o Realtime não guarda nada para entregar
+          // depois. Uma entrega sintética força quem escuta a buscar de novo,
+          // e é ela que fecha o buraco de verdade: sem isso o canal volta a
+          // funcionar para o PRÓXIMO evento e a tela segue sem o anterior.
+          if (tentativas > 0) {
+            tentativas = 0;
+            handler({ tipo: "reassinado" });
           }
+          return;
+        }
 
-          if (s === "CHANNEL_ERROR" || s === "TIMED_OUT" || s === "CLOSED") {
-            // Antes daqui não havia NADA: o estado era anotado e o canal ficava
-            // morto até a pessoa recarregar a página. Foi o sintoma relatado —
-            // "às vezes preciso atualizar para a mensagem aparecer".
-            //
-            // Recuo exponencial com teto de 30s: reconectar em rajada contra um
-            // socket que caiu por sobrecarga piora a sobrecarga, e o teto evita
-            // que uma queda longa deixe a espera em minutos.
-            const espera = Math.min(30_000, 1_000 * 2 ** tentativas);
-            tentativas++;
-            if (retomada) clearTimeout(retomada);
-            retomada = setTimeout(() => {
-              if (cancelado) return;
-              if (active) supabase.removeChannel(active);
-              montar();
-            }, espera);
-          }
-        });
+        if (s === "CHANNEL_ERROR" || s === "TIMED_OUT" || s === "CLOSED") {
+          // Antes daqui não havia NADA: o estado era anotado e o canal ficava
+          // morto até a pessoa recarregar a página. Foi o sintoma relatado —
+          // "às vezes preciso atualizar para a mensagem aparecer".
+          //
+          // Recuo exponencial com teto de 30s: reconectar em rajada contra um
+          // socket que caiu por sobrecarga piora a sobrecarga, e o teto evita
+          // que uma queda longa deixe a espera em minutos.
+          agendarRetomada();
+        }
       });
     };
 

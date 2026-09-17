@@ -1,3 +1,4 @@
+import { requireSupportWrite } from "@/lib/impersonate/support";
 /**
  * GET/PUT /api/v1/ai/guardrail-layers — as duas verificações que custam dinheiro.
  *
@@ -29,10 +30,11 @@ import { z } from "zod";
 
 import { fail, ok } from "@/lib/api/wrappers";
 import { audit } from "@/lib/audit";
-import { requireAuth, resolveActiveOrg } from "@/lib/auth/server";
-import { ROLE_RANK } from "@/lib/auth/types";
+import { requireRole } from "@/lib/auth/require-role";
+import { roleAtLeast } from "@/lib/auth/types";
 import { CAMADAS_SEMANTICAS } from "@/lib/agent-engine/guardrails/camadas-da-org";
 import { createClient } from "@/lib/supabase/server";
+import { traduzir } from "@/lib/i18n/dicionario";
 
 export const dynamic = "force-dynamic";
 
@@ -53,12 +55,9 @@ function padraoDoAmbiente(): Record<string, boolean> {
 }
 
 export async function GET(): Promise<Response> {
-  const user = await requireAuth();
-  const org = await resolveActiveOrg(user);
-  if (!org) return fail("no_active_org", "nenhuma organização ativa", 400);
-  if (ROLE_RANK[org.role] < ROLE_RANK.manager) {
-    return fail("forbidden", "requer papel de gerente ou superior", 403);
-  }
+  const authz = await requireRole("manager", { resource: "ai_guardrail_layers" });
+  if (!authz.ok) return authz.response;
+  const { org } = authz;
 
   const db = await createClient();
   const { data, error } = await db
@@ -79,7 +78,7 @@ export async function GET(): Promise<Response> {
       padraoDoAmbiente: padrao[layer] ?? false,
       efetivo: escolhido.get(layer) ?? padrao[layer] ?? false,
     })),
-    podeEditar: ROLE_RANK[org.role] >= ROLE_RANK.admin,
+    podeEditar: roleAtLeast(org.role, "admin"),
   });
 }
 
@@ -91,16 +90,17 @@ const corpoDoPut = z.object({
 });
 
 export async function PUT(req: NextRequest): Promise<Response> {
-  const user = await requireAuth();
-  const org = await resolveActiveOrg(user);
-  if (!org) return fail("no_active_org", "nenhuma organização ativa", 400);
-  if (ROLE_RANK[org.role] < ROLE_RANK.admin) {
-    return fail("forbidden", "requer papel de administrador", 403);
-  }
+  const supportDenied = await requireSupportWrite();
+  if (supportDenied) return supportDenied;
+
+  const authz = await requireRole("admin", { resource: "ai_guardrail_layers" });
+  if (!authz.ok) return authz.response;
+  const t = (texto: string) => traduzir(texto, authz.user.idioma);
+  const { user, org } = authz;
 
   const parsed = corpoDoPut.safeParse(await req.json().catch(() => null));
   if (!parsed.success) {
-    return fail("invalid_body", "corpo inválido", 422, { details: parsed.error.issues });
+    return fail("invalid_body", t("corpo inválido"), 422, { details: parsed.error.issues });
   }
   const corpo = parsed.data;
 
@@ -123,7 +123,7 @@ export async function PUT(req: NextRequest): Promise<Response> {
   if (!gravado) {
     // Upsert que casa zero linhas devolve sucesso no PostgREST — a tela diria
     // "salvo" sem nada ter sido gravado. Mesmo cuidado da rota de provedores.
-    return fail("save_failed", "nada foi gravado — verifique as permissões da organização", 500);
+    return fail("save_failed", t("nada foi gravado — verifique as permissões da organização"), 500);
   }
 
   void audit({

@@ -8,7 +8,8 @@
  *   4. a linha em `platform_admins` (super-admin de plataforma)
  *
  * Depois disso o dono faz login e o onboarding do app cuida do resto
- * (WhatsApp, IA, time). MFA TOTP é forçado no 1º login do admin.
+ * (WhatsApp, IA, time). A verificação em duas etapas é OPCIONAL e se liga em
+ * Configurações › Segurança — ver `lib/auth/politica-mfa.ts`.
  *
  * Uso (o install.sh exporta as vars; localmente lê .env/.env.local):
  *   OWNER_EMAIL=dono@empresa.com OWNER_PASSWORD='senha-forte' \
@@ -40,6 +41,25 @@ const SERVICE_ROLE = env.SUPABASE_SERVICE_ROLE_KEY;
 const OWNER_EMAIL = env.OWNER_EMAIL;
 const OWNER_PASSWORD = env.OWNER_PASSWORD;
 const ORG_NAME = env.OWNER_ORG_NAME || "Minha Empresa";
+/**
+ * O idioma que quem instalou escolheu, gravado na ORGANIZAÇÃO.
+ *
+ * Na organização, e não só no usuário dono, porque é ela que responde por quem
+ * ainda não existe: o segundo, o terceiro e o décimo convidado entram sem
+ * preferência própria e caem no idioma da empresa
+ * (`AuthUser.idioma`, resolvido em `lib/auth/server.ts`). Gravar apenas no dono
+ * faria uma instalação inteira em espanhol entregar o sistema em português para
+ * todo mundo que o dono convidasse.
+ *
+ * Fecha para o padrão diante de qualquer valor desconhecido: um `.env` com
+ * `APP_LOCALE=en` não pode derrubar a instalação nem escrever lixo no banco.
+ */
+const IDIOMAS_SERVIDOS = ["pt-BR", "es"] as const;
+const APP_LOCALE = (IDIOMAS_SERVIDOS as readonly string[]).includes(
+  (env.APP_LOCALE ?? "").trim(),
+)
+  ? (env.APP_LOCALE as string).trim()
+  : "pt-BR";
 
 if (!SUPABASE_URL || !SERVICE_ROLE) {
   throw new Error("Faltam NEXT_PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY.");
@@ -75,7 +95,9 @@ async function ensureOwnerUser(): Promise<string> {
     email: OWNER_EMAIL,
     password: OWNER_PASSWORD,
     email_confirm: true,
-    user_metadata: { full_name: "Dono" },
+    // O dono também nasce com a preferência: ele é o único que entra antes de
+    // existir organização resolvida na sessão, no primeiro login.
+    user_metadata: { full_name: "Dono", locale: APP_LOCALE },
   });
   if (error || !data?.user) throw new Error(`criar dono: ${error?.message}`);
   console.log(`[bootstrap] dono criado: ${data.user.id}`);
@@ -99,6 +121,7 @@ async function ensureOrg(ownerId: string): Promise<string> {
       slug,
       display_name: ORG_NAME,
       legal_name: ORG_NAME,
+      locale: APP_LOCALE,
       created_by: ownerId,
     } as never)
     .select("id")
@@ -195,12 +218,23 @@ async function ensurePlatformAdmin(userId: string): Promise<void> {
     console.log("[bootstrap] super-admin já existia");
     return;
   }
-  // granted_by = o próprio dono (auto-concessão no bootstrap). mfa_required
-  // fica no default (true) — TOTP é forçado no login.
+  // granted_by = o próprio dono (auto-concessão no bootstrap).
+  //
+  // ⚠️ `mfa_required: false` EXPLÍCITO, contra o default `true` da coluna. A
+  // coluna nunca era lida pelo gate — ele olhava só `is_platform_admin` —, então
+  // o default nunca teve efeito e ninguém percebeu. Agora ela decide, e deixá-la
+  // em `true` significaria o oposto do que se pediu: TODA instalação nova
+  // voltaria a receber o bloqueador de tela cheia logo depois do onboarding,
+  // porque o `install.sh` cria o dono como platform admin.
+  //
+  // Instalações que JÁ EXISTEM ficam como estão — mudar o default não reescreve
+  // linha, e ninguém tem a proteção desligada pelas nossas costas. Quem quiser
+  // exigir liga em Configurações › Segurança.
   const { error } = await admin.from("platform_admins").insert({
     user_id: userId,
     granted_by: userId,
     scope: "full",
+    mfa_required: false,
     reason: "Bootstrap inicial do self-host (dono da instância)",
   } as never);
   if (error) throw new Error(`platform_admin: ${error.message}`);

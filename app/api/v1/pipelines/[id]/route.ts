@@ -1,3 +1,4 @@
+import { requireSupportWrite } from "@/lib/impersonate/support";
 /**
  * PATCH/DELETE /api/v1/pipelines/[id] — renomear, descrever, reordenar, eleger
  * padrão, arquivar e (só no caso limpo) excluir um funil.
@@ -25,6 +26,7 @@ import { requireRole } from "@/lib/auth/require-role";
 import {
   podeExcluirDeVez,
   posicaoEntre,
+  updatesDeMarcaExclusiva,
   updatesDePadrao,
   validarArquivamento,
   validarNomeDeFunil,
@@ -33,6 +35,7 @@ import {
 import { createClient } from "@/lib/supabase/server";
 
 import { conflitoDoBanco, corpo, lerDependencias, lerFunis } from "../_funis";
+import { traduzir } from "@/lib/i18n/dicionario";
 
 export const dynamic = "force-dynamic";
 
@@ -51,17 +54,36 @@ const bodySchema = z
     name: z.string().min(1).max(80).optional(),
     description: z.string().max(280).nullable().optional(),
     is_default: z.boolean().optional(),
+    /**
+     * ⚠️ `false` É ACEITO AQUI, ao contrário de `is_default: false` — e a
+     * assimetria é deliberada, não descuido. Toda organização PRECISA de um
+     * funil padrão (sem ele, lead criado sem funil escolhido fica sem destino);
+     * nenhuma precisa de um funil de clientes, e não ter é o estado de fábrica.
+     * Recusar o desligamento prenderia o operador numa escolha que ele fez para
+     * experimentar. Quem "consertar" esta assimetria quebra o desfazer.
+     */
+    is_client_pipeline: z.boolean().optional(),
     depois_de: z.string().min(1).nullable().optional(),
   })
   .strict()
   .refine((b) => Object.keys(b).length > 0, { message: "Nada para alterar." });
 
-type PatchDoFunil = { name?: string; description?: string | null; position?: number; is_default?: boolean };
+type PatchDoFunil = {
+  name?: string;
+  description?: string | null;
+  position?: number;
+  is_default?: boolean;
+  is_client_pipeline?: boolean;
+};
 
 export async function PATCH(req: NextRequest, ctx: RouteCtx): Promise<Response> {
+  const supportDenied = await requireSupportWrite();
+  if (supportDenied) return supportDenied;
+
   const requestId = randomUUID();
   const authz = await requireRole("manager", { requestId, resource: "crm_pipelines" });
   if (!authz.ok) return authz.response;
+  const t = (texto: string) => traduzir(texto, authz.user.idioma);
   const orgId = authz.org.orgId;
 
   const { id: pipelineId } = await ctx.params;
@@ -70,12 +92,12 @@ export async function PATCH(req: NextRequest, ctx: RouteCtx): Promise<Response> 
   try {
     json = await req.json();
   } catch {
-    return fail("invalid_request", "Corpo não é JSON válido.", 400, { requestId });
+    return fail("invalid_request", t("Corpo não é JSON válido."), 400, { requestId });
   }
 
   const parsed = bodySchema.safeParse(json);
   if (!parsed.success) {
-    return fail("unprocessable_entity", "Não entendi o que mudar neste funil.", 422, {
+    return fail("unprocessable_entity", t("Não entendi o que mudar neste funil."), 422, {
       requestId,
       details: parsed.error.flatten(),
     });
@@ -96,13 +118,18 @@ export async function PATCH(req: NextRequest, ctx: RouteCtx): Promise<Response> 
   // resposta é a mesma de um funil inexistente (dizer "existe, mas não é seu" já
   // vaza a existência).
   const alvo = funis.find((f) => f.id === pipelineId);
-  if (!alvo) return fail("not_found", "Funil não encontrado.", 404, { requestId });
+  if (!alvo) return fail("not_found", t("Funil não encontrado."), 404, { requestId });
 
-  // ⚠️ ARQUIVADO NÃO SE EDITA. `uniq_crm_pipelines_org_default` é PARCIAL
-  // (`where is_archived = false`): marcar um funil arquivado como padrão passa
-  // pelo índice, libera o padrão de verdade e deixa a organização com o padrão
-  // numa linha que sumiu da lista. Alcançável sem má-fé: uma aba aberta antes de
-  // o funil ser arquivado.
+  // ⚠️ ARQUIVADO NÃO SE EDITA — e a guarda fica, mas o MOTIVO escrito aqui era
+  // falso. Dizia que `uniq_crm_pipelines_org_default` é parcial em
+  // `is_archived`, e que por isso marcar um arquivado como padrão "passa pelo
+  // índice". Medido em `supabase/baseline.sql`: ele é `where (is_default = true)`
+  // e mais nada, então essa marcação bate em 23505, não passa.
+  //
+  // O que a guarda evita de verdade é pior de explicar ao usuário: editar nome,
+  // posição ou marca de um funil que sumiu da lista dele. Alcançável sem má-fé —
+  // uma aba aberta antes de o funil ser arquivado — e o erro do banco, quando
+  // vem, fala de índice, não do que a pessoa fez.
   if (alvo.is_archived) {
     return fail(
       "state_conflict",
@@ -143,7 +170,7 @@ export async function PATCH(req: NextRequest, ctx: RouteCtx): Promise<Response> 
     if (pedido.depois_de !== null && i < 0) {
       return fail(
         "unprocessable_entity",
-        "O funil que você escolheu como vizinho não está mais na lista. Recarregue a página.",
+        t("O funil que você escolheu como vizinho não está mais na lista. Recarregue a página."),
         422,
         { requestId },
       );
@@ -156,7 +183,7 @@ export async function PATCH(req: NextRequest, ctx: RouteCtx): Promise<Response> 
     if (!Number.isFinite(posicao)) {
       return fail(
         "state_conflict",
-        "Os funis desta lista estão empatados na ordenação. Recarregue a página e mova o funil para outro lugar.",
+        t("Os funis desta lista estão empatados na ordenação. Recarregue a página e mova o funil para outro lugar."),
         409,
         { requestId },
       );
@@ -170,7 +197,15 @@ export async function PATCH(req: NextRequest, ctx: RouteCtx): Promise<Response> 
   // cabe aqui dentro, e declarar assim evita o cast que esconderia um erro real
   // se o formato do patch de padrão mudasse.
   const updates: Array<{ pipelineId: string; patch: PatchDoFunil }> =
-    pedido.is_default === true ? updatesDePadrao(funis, pipelineId) : [];
+    pedido.is_default === true
+      ? updatesDePadrao(funis, pipelineId)
+      : pedido.is_client_pipeline === true
+        ? updatesDeMarcaExclusiva(funis, pipelineId, "is_client_pipeline")
+        : [];
+
+  // Desligar é update SIMPLES: não há anterior a liberar, e nenhum índice a
+  // disputar. Entra pelo patch do alvo como nome e descrição entram.
+  if (pedido.is_client_pipeline === false) patchDoAlvo.is_client_pipeline = false;
   if (Object.keys(patchDoAlvo).length > 0) {
     const i = updates.findIndex((u) => u.pipelineId === pipelineId);
     if (i >= 0) updates[i] = { pipelineId, patch: { ...updates[i]!.patch, ...patchDoAlvo } };
@@ -215,9 +250,13 @@ export async function PATCH(req: NextRequest, ctx: RouteCtx): Promise<Response> 
 }
 
 export async function DELETE(req: NextRequest, ctx: RouteCtx): Promise<Response> {
+  const supportDenied = await requireSupportWrite();
+  if (supportDenied) return supportDenied;
+
   const requestId = randomUUID();
   const authz = await requireRole("manager", { requestId, resource: "crm_pipelines" });
   if (!authz.ok) return authz.response;
+  const t = (texto: string) => traduzir(texto, authz.user.idioma);
   const orgId = authz.org.orgId;
 
   const { id: pipelineId } = await ctx.params;
@@ -232,7 +271,7 @@ export async function DELETE(req: NextRequest, ctx: RouteCtx): Promise<Response>
     return fail("internal_error", (err as Error).message, 500, { requestId });
   }
   const alvo = funis.find((f) => f.id === pipelineId);
-  if (!alvo) return fail("not_found", "Funil não encontrado.", 404, { requestId });
+  if (!alvo) return fail("not_found", t("Funil não encontrado."), 404, { requestId });
 
   let deps;
   try {

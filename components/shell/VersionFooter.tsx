@@ -2,15 +2,25 @@
 import Link from "next/link";
 
 import { ArrowCircleUp } from "@/lib/ui/icons";
+import { useT } from "@/hooks/i18n/useT";
 import { useSystemVersion } from "@/hooks/system/useSystemVersion";
 import { cn } from "@/lib/utils";
 
 /**
+ * Controle essencial da instalação: não é removível pela interface do vínculo.
  * Versão instalada no rodapé da sidebar. Vira um aviso clicável só para quem
  * é dono do servidor E tem versão nova — quem não pode atualizar não é
  * alertado sobre algo que não pode resolver.
  */
-export function VersionFooter({ collapsed }: { collapsed: boolean }) {
+export function VersionFooter({
+  collapsed,
+  onNavigate,
+}: {
+  collapsed: boolean;
+  /** Fecha a gaveta do mobile — é o único Link do drawer que não a recebia. */
+  onNavigate?: () => void;
+}) {
+  const t = useT();
   const { data } = useSystemVersion();
   if (!data?.current_version) return null;
 
@@ -24,10 +34,13 @@ export function VersionFooter({ collapsed }: { collapsed: boolean }) {
   if (!alerta) {
     return (
       <p
-        className={cn("px-3 py-1 text-[11px] text-muted-foreground/70", collapsed && "px-0 text-center")}
-        title={`Versão ${label}`}
+        className={cn(
+          "px-3 py-1 text-[11px] text-muted-foreground",
+          collapsed && "px-0 text-center",
+        )}
+        title={`${t("Versão")} ${label}`}
       >
-        {collapsed ? label.split(".").slice(0, 2).join(".") : `versão ${label}`}
+        {collapsed ? label.split(".").slice(0, 2).join(".") : `${t("versão")} ${label}`}
       </p>
     );
   }
@@ -36,7 +49,8 @@ export function VersionFooter({ collapsed }: { collapsed: boolean }) {
   return (
     <Link
       href="/app/settings/atualizacao"
-      title={`Nova versão ${novo} disponível`}
+      onClick={onNavigate}
+      title={`${t("Nova versão")} ${novo} ${t("disponível")}`}
       className={cn(
         "flex items-center gap-2 rounded-md px-3 py-2 text-xs text-foreground hover:bg-accent/50",
         collapsed && "justify-center px-2",
@@ -48,7 +62,8 @@ export function VersionFooter({ collapsed }: { collapsed: boolean }) {
       </span>
       {!collapsed && (
         <span className="truncate">
-          Nova versão{novo ? ` · ${novo}` : ""}
+          {t("Nova versão")}
+          {novo ? ` · ${novo}` : ""}
         </span>
       )}
       {collapsed && <ArrowCircleUp size={16} aria-hidden />}

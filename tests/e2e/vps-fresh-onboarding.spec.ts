@@ -29,6 +29,25 @@ const svc = createClient(
   { auth: { persistSession: false } },
 );
 
+/**
+ * A ORGANIZACAO DO DONO — resolvida por QUEM ELA E, nunca por "a primeira".
+ *
+ * Este seletor era `.limit(1).single()` sem filtro nenhum: pegava a primeira
+ * organizacao que o Postgres devolvesse. Num banco recem-semeado isso funciona
+ * por acidente — a unica org existente e a do teste. Num banco que ja tem uso,
+ * a primeira e OUTRA, e o `beforeAll` desta suite entao zerava `onboarded_at`,
+ * apagava `ai_agents` e apagava `channel_sessions` DELA.
+ *
+ * Medido em 2026-09-03, numa instalacao de trabalho: a organizacao real perdeu
+ * o onboarding e caiu no wizard, e a sessao de WhatsApp conectada foi apagada.
+ * O sintoma que apareceu primeiro foi outro e nao apontava para ca — duas specs
+ * de webhooks falhando porque o link sumia da barra lateral, que e o que o
+ * layout faz quando a org nao esta onboarded.
+ *
+ * A correcao amarra a org ao DONO do bootstrap (`OWNER_EMAIL`), que e de quem
+ * esta suite fala. Se ele nao existir, falha alto: um teste destrutivo que nao
+ * sabe em quem esta mexendo deve parar, nunca escolher alguem.
+ */
 async function orgRow(): Promise<{
   id: string;
   display_name: string;
@@ -36,10 +55,30 @@ async function orgRow(): Promise<{
   onboarded_at: string | null;
   onboarding_state: Record<string, unknown> | null;
 }> {
+  const { data: users, error: erroUsuarios } = await svc.auth.admin.listUsers();
+  if (erroUsuarios) throw erroUsuarios;
+  const dono = users?.users.find((u) => u.email === OWNER_EMAIL);
+  if (!dono) {
+    throw new Error(
+      `esta suite APAGA dados da organizacao que resolver aqui, e nao achou o dono ` +
+        `(${OWNER_EMAIL}). Sem saber em quem mexer, ela para — escolher "a primeira" ` +
+        `ja custou o onboarding e a sessao de WhatsApp de uma instalacao real.`,
+    );
+  }
+
+  const { data: vinculo, error: erroVinculo } = await svc
+    .from("user_organizations")
+    .select("organization_id")
+    .eq("user_id", dono.id)
+    .is("revoked_at", null)
+    .limit(1)
+    .single();
+  if (erroVinculo) throw erroVinculo;
+
   const { data, error } = await svc
     .from("organizations")
     .select("id, display_name, timezone, onboarded_at, onboarding_state")
-    .limit(1)
+    .eq("id", (vinculo as { organization_id: string }).organization_id)
     .single();
   if (error) throw error;
   return data as never;
@@ -150,8 +189,16 @@ test.describe("J1 — onboarding do dono numa instalação fresca", () => {
     await login(page);
     await page.waitForURL(/\/onboarding\/connect-whatsapp/);
 
+    // O passo agora ABRE PERGUNTANDO como a pessoa já usa o número — o código
+    // deixou de ser suposição. Escolher "leio um código com o celular" é o que
+    // sobe a sessão; antes ela subia sozinha na montagem da tela, e quem tinha
+    // conta oficial entrava pelo caminho errado sem ter sido perguntado.
+    await page.getByTestId("forma-qr").locator("input").click();
+
     // sem banner de "WAHA não está configurado"
-    await expect(page.getByText(/waha não está configurado/i)).toHaveCount(0);
+    // O nome do transporte saiu da tela: o aviso agora fala do "WhatsApp desta
+    // instalação", que é como o dono chama a coisa.
+    await expect(page.getByText(/ainda não subiu/i)).toHaveCount(0);
 
     // QR do proxy (poll de 3s até SCAN_QR_CODE) — imagem carregada de fato
     const qr = page.locator('img[src*="/whatsapp/qr"]');
@@ -183,12 +230,84 @@ test.describe("J1 — onboarding do dono numa instalação fresca", () => {
 
     await page.locator("#name").fill("Tomik QA");
     await page.getByRole("button", { name: /criar e continuar/i }).click();
-    await page.waitForURL(/\/onboarding\/invite-team/, { timeout: 20_000 });
-    await snap(page, "j1.7-invite-team");
+    // O wizard ganhou um passo entre treinar e chamar o time: ver o
+    // funcionário atender. Terminar sem nunca tê-lo visto fazer nada era como
+    // o onboarding entregava a pessoa num inbox vazio.
+    await page.waitForURL(/\/onboarding\/testar/, { timeout: 20_000 });
+    await snap(page, "j1.7-testar");
 
-    const { data: agents } = await svc.from("ai_agents").select("name, is_active, is_default");
+    // `eq(organization_id)` pela MESMA razão de `orgRow()` acima: sem ele, este
+    // `select` lê os agentes de TODAS as organizações do banco, e o
+    // `expect(length).toBe(1)` deixa de medir "o wizard criou um agente" e passa
+    // a medir "o banco inteiro tem um agente" — que é falso em qualquer
+    // instalação com uso, e vermelho por motivo que não é o desta jornada.
+    const orgDoDono = await orgRow();
+    const { data: agents } = await svc
+      .from("ai_agents")
+      .select("id, name, is_active, is_default, published_version_id")
+      .eq("organization_id", orgDoDono.id);
     expect(agents?.length).toBe(1);
     expect(agents?.[0]).toMatchObject({ name: "Tomik QA", is_active: true, is_default: true });
+
+    // A VERSÃO, e não só o agente. Este caso olhava apenas `ai_agents` — e foi
+    // por isso que a regressão do provedor nasceu invisível: o agente ficava
+    // bonito na tabela enquanto a versão publicada apontava para uma empresa de
+    // IA que a instalação não contratou, morrendo em toda mensagem.
+    const { data: versoes } = await svc
+      .from("ai_agent_versions")
+      .select("provider, model, status, channel_session_id")
+      .eq("agent_id", agents?.[0]?.id ?? "");
+    expect(versoes?.length).toBe(1);
+    expect(versoes?.[0]?.status).toBe("published");
+
+    // E o provedor da versão é o MESMO que a instalação escolheu. Comparar com
+    // uma string fixa aqui não provaria nada: o teste passaria justamente na
+    // instalação Anthropic, que é a única em que o defeito não aparecia.
+    // A SEGUNDA instância de "a primeira organização" neste mesmo arquivo. Aqui
+    // ela não apaga nada — faz pior de um jeito silencioso: `escolhido` vira o
+    // provedor de OUTRA organização, e a asserção abaixo passa ou reprova sem
+    // relação com a instalação que o wizard acabou de configurar.
+    const { data: org } = await svc
+      .from("organizations")
+      .select("settings")
+      .eq("id", orgDoDono.id)
+      .maybeSingle();
+    const escolhido =
+      (org?.settings as { llm?: { provider?: string } } | null)?.llm?.provider ?? "anthropic";
+    expect(versoes?.[0]?.provider).toBe(escolhido);
+
+    // O modelo veio do catálogo DAQUELE provedor — nunca um id emprestado.
+    const { data: curado } = await svc
+      .from("ai_models")
+      .select("model_id")
+      .eq("provider", escolhido)
+      .eq("is_default_for_provider", true)
+      .is("deprecated_at", null)
+      .limit(1)
+      .maybeSingle();
+    expect(versoes?.[0]?.model).toBe(curado?.model_id);
+  });
+
+  test("J1.24 ver ele atender: o wizard não termina sem mostrar o funcionário", async ({ page }) => {
+    // O passo que faltava. O onboarding entregava a pessoa num inbox vazio
+    // ("Sem conversas por aqui") logo depois de ela montar um funcionário que
+    // nunca tinha visto fazer nada — e um erro de chave ou de saldo só
+    // apareceria quando um cliente de verdade escrevesse.
+    await login(page);
+    await page.waitForURL(/\/onboarding\/testar/, { timeout: 20_000 });
+    await expect(page.getByRole("heading", { name: /veja ele atender/i })).toBeVisible();
+
+    // O agente desta jornada nasceu SEM canal (o WhatsApp foi pulado em J1.6),
+    // então ficou rascunho — e rascunho não responde. A tela tem de dizer isso
+    // em vez de oferecer um ensaio que nunca funcionaria.
+    await expect(page.getByText(/rascunho/i)).toBeVisible();
+    await snap(page, "j1.24-testar-rascunho");
+
+    await page.getByRole("button", { name: /^continuar$/i }).click();
+    await page.waitForURL(/\/onboarding\/invite-team/, { timeout: 20_000 });
+
+    const org = await orgRow();
+    expect((org.onboarding_state as { teste?: unknown })?.teste).toBeTruthy();
   });
 
   test("J1.8 convite SEM Resend: a UI não pode mentir que enviou email", async ({ page }) => {
@@ -223,22 +342,34 @@ test.describe("J1 — onboarding do dono numa instalação fresca", () => {
     await page.waitForURL(/\/onboarding\/done/);
     await snap(page, "j1.9-done-recap");
 
-    await page.getByRole("button", { name: /ir para o inbox/i }).click();
+    await page.getByRole("button", { name: /começar a usar/i }).click();
     await page.waitForURL(/\/app\/inbox/, { timeout: 30_000 });
 
     const org = await orgRow();
     expect(org.onboarded_at).not.toBeNull();
   });
 
-  test("J1.10 gate MFA: enrola TOTP e VÊ os códigos de recuperação (regressão do bug do gate)", async ({ page }) => {
+  test("J1.10 verificação em duas etapas: ativa pela tela e VÊ os códigos de recuperação", async ({ page }) => {
     await login(page);
     await page.waitForURL(/\/app\//, { timeout: 30_000 });
 
-    // blocker não-dismissível
+    // ⚠️ ESTE CASO MUDOU DE PORTA, e a mudança é o ponto. Ele testava o
+    // BLOQUEADOR não-dismissível que aparecia sozinho para todo admin — e era
+    // exatamente o que fazia a instalação fresca receber um sétimo passo logo
+    // depois do wizard, sem aviso. A verificação virou opcional; o cadastro
+    // agora começa em Configurações › Segurança, por escolha de quem entra.
+    //
+    // O que este caso continua guardando é o que importava nele: o fluxo de
+    // enroll leva até os CÓDIGOS DE RECUPERAÇÃO (a regressão que o nome antigo
+    // citava). Perder isso seria trocar uma tela por nenhuma.
+    await page.goto("/app/settings/security");
+    await expect(page.getByText("Desativada")).toBeVisible({ timeout: 20_000 });
+    await page.getByRole("button", { name: /^ativar$/i }).click();
+
     await expect(
       page.getByRole("heading", { name: /verificação em duas etapas/i }),
     ).toBeVisible({ timeout: 20_000 });
-    await snap(page, "j1.10-mfa-gate");
+    await snap(page, "j1.10-mfa-ativar");
 
     await page.getByRole("button", { name: /iniciar configuração/i }).click();
     await expect(

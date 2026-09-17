@@ -113,7 +113,15 @@ supabase login
 # Conecte ao seu projeto (project-ref está na URL do dashboard)
 supabase link --project-ref <seu-project-ref>
 
-# Aplica o SCHEMA — o baseline, não a cadeia de migrations
+# Num projeto Supabase NOVO, habilite antes as extensões que o schema usa —
+# sem elas o baseline para em `type public.vector does not exist`.
+psql "$SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -c \
+  'create extension if not exists vector with schema public;
+   create extension if not exists citext with schema public;
+   create extension if not exists pg_trgm with schema public;'
+
+# Aplica o SCHEMA — o baseline, não a cadeia de migrations.
+# Re-aplicar é seguro e não erra: o arquivo é idempotente (issue #184).
 psql "$SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f supabase/baseline.sql
 ```
 
@@ -163,7 +171,7 @@ No menu lateral → **Storage** → **New bucket**:
 
 ## 3. WAHA — WhatsApp
 
-**O que é:** Servidor que se conecta ao WhatsApp e expõe API HTTP. Roda em Docker. Em dev, sobe local; em prod, num VPS. **Custo:** WAHA Plus = $19/mês ([devlikeapro.com](https://waha.devlikeapro.com/)). Tem trial grátis. **Não use a versão Core** — não suporta multi-tenant nem retry.
+**O que é:** Servidor que se conecta ao WhatsApp e expõe API HTTP. O default fixo é `devlikeapro/waha:latest-2026.7.2`, engine NOWEB. A prova local desta versão criou duas sessões CORE simultâneas até `SCAN_QR_CODE`; não houve pairing nem envio real. Versão/engine e pós-condição da operação determinam a compatibilidade; o tier sozinho não bloqueia um segundo número.
 
 ### Passo 1 — gerar a API key (plaintext + hash)
 
@@ -246,7 +254,7 @@ WAHA_WEBHOOK_BASE_URL=https://abc-123-456.ngrok-free.app
 docker compose up -d
 ```
 
-Confira em <http://localhost:3030/dashboard/> que o WAHA está respondendo (UI do WAHA Plus). Pra criar sessão e escanear QR, veja a doc oficial: <https://waha.devlikeapro.com/docs/overview/quick-start/>.
+Confira em <http://localhost:3030/dashboard/> que o WAHA está respondendo (painel do WAHA). Pra criar sessão e escanear QR, veja a doc oficial: <https://waha.devlikeapro.com/docs/overview/quick-start/>.
 
 ---
 
@@ -423,8 +431,13 @@ LGPD_EXPORT_EXPIRES_HOURS=72
 NEXT_PUBLIC_APP_URL=http://localhost:3000
 NEXT_PUBLIC_ADMIN_URL=http://localhost:3000
 
-# Workers — opt-in pra rodar consumers de event_log. Default false em dev.
-EVENT_LOG_WORKER_ENABLED=false
+# Workers — ritmo com que o worker roda os handlers do event_log. Vazio = os
+# defaults (2s com trabalho, 10s ocioso, 50 por lote). Não há mais opt-in: o
+# `EVENT_LOG_WORKER_ENABLED` que ficava aqui nunca teve leitor e saiu em
+# 2026-08-25, junto com a chegada do laço de verdade no worker.
+EVENT_LOG_DRAIN_INTERVAL_MS=2000
+EVENT_LOG_DRAIN_IDLE_INTERVAL_MS=10000
+EVENT_LOG_DRAIN_BATCH_SIZE=50
 ```
 
 ---

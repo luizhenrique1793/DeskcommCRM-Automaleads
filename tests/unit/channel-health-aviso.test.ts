@@ -21,6 +21,7 @@ import { beforeEach, describe, expect, it } from "vitest";
  * filtrar por organização parece certo até haver dois números ligados.
  */
 import {
+  DETALHE_CREDENCIAL_RECUSADA,
   STATUS_QUE_AVISAM,
   avisoDaConexao,
   sincronizarSaudeDaConexao,
@@ -72,6 +73,31 @@ describe("quando avisar", () => {
     expect(a?.title).not.toMatch(/QR/);
     expect(a?.body).toBe("ECONNREFUSED");
     expect(a?.episodio).toBe("UNREACHABLE");
+  });
+
+  it("credencial RECUSADA é crítica, e diz que o QR não resolve", () => {
+    // O irmão do caso acima, e o que ele custou: os dois entram por
+    // `reachable: false`, mas pedem ações opostas. Numa VPS real a chave do
+    // WAHA foi trocada por uma segunda cópia do repo; tudo parou; e por TRÊS
+    // DIAS a Central mostrou só o `warn` de "não foi possível verificar" — a
+    // frase de uma oscilação passageira. Quem lê "conexão caída" corre atrás do
+    // QR, e o QR não conserta chave errada.
+    const a = avisoDaConexao(
+      { reachable: false, status: null, detail: DETALHE_CREDENCIAL_RECUSADA },
+      "Vendas",
+    );
+    expect(a?.severity).toBe("critical");
+    expect(a?.episodio).toBe("CREDENCIAL_RECUSADA");
+    expect(a?.title).toContain("Vendas");
+    expect(a?.body).toMatch(/QR não resolve/i);
+    // Episódio PRÓPRIO: se dividisse "UNREACHABLE" com o caso acima, a troca de
+    // um pelo outro não abriria aviso nenhum — o dedup por episódio veria o
+    // mesmo valor e ficaria calado justamente na piora.
+    const oscilacao = avisoDaConexao(
+      { reachable: false, status: null, detail: "ECONNREFUSED" },
+      "Vendas",
+    );
+    expect(a?.episodio).not.toBe(oscilacao?.episodio);
   });
 
   it("estado desconhecido não vira aviso — o vocabulário é do transporte", () => {
@@ -223,12 +249,19 @@ describe("os elos que somem sem barulho", () => {
     // A CHAMADA, não a menção: a primeira versão deste caso aceitava o arquivo
     // que só testava `if (!adapter.checkHealth)` e nunca perguntava nada —
     // sobreviveu ao sabote de trocar a pergunta por um literal.
-    expect(cron).toMatch(/await adapter\.checkHealth\(\{\s*sessionRef\s*\}\)/);
+    expect(cron).toMatch(
+      /await adapter\.checkHealth\(\{[\s\S]{0,120}?\bsessionRef\b[\s\S]{0,40}?\}\)/,
+    );
+    // E COM a organização: desde a issue #236 o seam de canal exige o escopo de
+    // tenant, e o vigia é quem tem a linha na mão (`s.organization_id`).
+    expect(cron).toMatch(/checkHealth\(\{[\s\S]{0,120}?organizationId: s\.organization_id/);
     expect(cron).toMatch(/await sincronizarSaudeDaConexao\(/);
   });
 
   it("o vigia está AGENDADO — rota sem cron nunca roda", () => {
-    const compose = readFileSync("docker-compose.prod.yml", "utf8");
+    // O crontab mora no entrypoint da imagem do scheduler desde que ele deixou
+    // de rodar `apk add` a cada start (docs/doctrine/packaging.md, invariante 1).
+    const compose = readFileSync("docker/scheduler/entrypoint.sh", "utf8");
     // Com o fim ancorado: `channel-healthXX` CONTÉM `channel-health`, e a
     // primeira versão deste caso passou verde com a rota apontando para o nada.
     expect(compose, "o cron não foi agendado no scheduler").toMatch(
@@ -236,17 +269,26 @@ describe("os elos que somem sem barulho", () => {
     );
   });
 
-  it("a faixa usa a MESMA lista de estados que o aviso", () => {
+  it("a tela não monta o select de canais à mão", () => {
     // Duas listas divergem com o tempo, e uma faixa que não aparece para um
     // estado que a Central considera grave ensina que a tela está tranquila
-    // quando não está.
-    // A tela chama a função do seam; é ela que carrega a lista. Uma tela que
-    // montasse o select à mão divergiria — e o invariante `canais-selecionaveis`
-    // reprova, porque foi assim que três seletores passaram a oferecer canal
-    // arquivado.
+    // quando não está. Quem impede a divergência é a tela PERGUNTAR ao seam.
+    //
+    // Que ela pergunta, e que entrega o retorno à faixa, quem prova é
+    // `tests/unit/faixa-de-conexao-caida-vem-do-seam.test.tsx`, EXECUTANDO o
+    // layout. Aqui ficou só a metade que não tem como ser executada: a AUSÊNCIA
+    // de uma segunda consulta. Até 2026-09-14 este caso também afirmava
+    // `toMatch(/await listarConexoesCaidas\(/)` sobre o texto-fonte — e uma
+    // asserção de texto não vigia comportamento, ela cimenta uma
+    // implementação: ficou vermelha quando a chamada entrou num `Promise.all`
+    // (PR #762), com o mesmo seam, o mesmo retorno e a mesma faixa; e ficaria
+    // verde com a chamada dentro de um `if (false)`.
+    //
+    // A negativa continua aqui porque é sobre o que NÃO existe no arquivo:
+    // nenhuma execução prova ausência, e foi uma consulta montada à mão que
+    // deixou três seletores oferecendo canal arquivado (invariante
+    // `canais-selecionaveis`).
     const layout = readFileSync("app/app/layout.tsx", "utf8");
-    expect(layout).toMatch(/await listarConexoesCaidas\(/);
-    expect(layout).toMatch(/<ConexaoCaidaBanner/);
     expect(layout, "tela montando o select de canais à mão").not.toMatch(
       /from\(\s*["'`]channel_sessions/,
     );

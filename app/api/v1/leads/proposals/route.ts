@@ -29,6 +29,8 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isServiceRoleConfigured } from "@/lib/audit";
 import { requireAuth, resolveActiveOrg } from "@/lib/auth/server";
+import { nomeDoContato } from "@/lib/contacts/rotulo-do-contato";
+import { traduzir } from "@/lib/i18n/dicionario";
 
 export const dynamic = "force-dynamic";
 
@@ -63,7 +65,7 @@ export async function GET(req: NextRequest): Promise<Response> {
   const user = await requireAuth();
   const activeOrg = await resolveActiveOrg(user);
   if (!activeOrg) {
-    return fail("forbidden", "sem organização ativa", 403, { requestId });
+    return fail("forbidden", traduzir("sem organização ativa", user.idioma), 403, { requestId });
   }
   const orgId = activeOrg.orgId;
   const supabase = await createClient();
@@ -102,7 +104,7 @@ export async function GET(req: NextRequest): Promise<Response> {
   if (leadIds.length > 0) {
     const { data: leads, error: leadsErr } = await supabase
       .from("crm_leads")
-      .select("id, title, contact_id, crm_stages(name), contacts(display_name)")
+      .select("id, title, contact_id, crm_stages(name), contacts(name, display_name)")
       .eq("organization_id", orgId)
       .in("id", leadIds);
     if (leadsErr) return fail("internal", leadsErr.message, 500, { requestId });
@@ -111,15 +113,15 @@ export async function GET(req: NextRequest): Promise<Response> {
       id: string;
       title: string | null;
       crm_stages: { name: string | null } | null;
-      contacts: { display_name: string | null } | null;
+      contacts: { name: string | null; display_name: string | null } | null;
     }>) {
       const proposta = porLead.get(l.id);
       if (!proposta) continue;
       pendentes.push({
         lead_id: l.id,
-        lead_title: l.title ?? "(sem título)",
+        lead_title: l.title ?? traduzir("(sem título)", user.idioma),
         stage_name: l.crm_stages?.name ?? null,
-        contact_name: l.contacts?.display_name ?? null,
+        contact_name: nomeDoContato(l.contacts),
         next_action: proposta.label,
         seq: proposta.seq,
         proposed_at: proposta.proposed_at,
@@ -180,7 +182,7 @@ export async function GET(req: NextRequest): Promise<Response> {
   const historico: DecisaoPassada[] = linhas.map((d) => ({
     activity_id: d.id,
     lead_id: d.lead_id ?? "",
-    lead_title: d.crm_leads?.title ?? "(negócio removido)",
+    lead_title: d.crm_leads?.title ?? traduzir("(negócio removido)", user.idioma),
     decision: d.type === "next_action_approved" ? "approve" : "dismiss",
     next_action: d.payload?.next_action ?? "",
     decided_by: d.performed_by_user_id ? (nomes.get(d.performed_by_user_id) ?? null) : null,

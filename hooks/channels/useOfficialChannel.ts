@@ -5,6 +5,7 @@ import { showApiError } from "@/components/feedback/ApiErrorToast";
 import { apiClient } from "@/lib/api/client";
 
 export interface OfficialChannelState {
+  channel_session_id?: string | null;
   connected: boolean;
   /** Existe token gravado? O token em si NUNCA volta — ver a rota. */
   hasToken: boolean;
@@ -16,6 +17,14 @@ export interface OfficialChannelState {
   webhook: {
     callbackUrl: string;
     verifyToken: string | null;
+    /**
+     * De onde vem o token que vale. `instalacao` = cadastrado na tela de
+     * administração: existe, mas não volta num GET (foi mostrado uma vez, lá).
+     * Opcional: ausente é lido como desconhecido, e a tela cai no aviso genérico.
+     */
+    verifyTokenOrigem?: "ambiente" | "instalacao" | null;
+    /** Onde se cadastra o App da Meta — só para quem pode abrir a tela da instalação. */
+    configurarEm?: string | null;
     fields: string[];
   } | null;
 }

@@ -1,10 +1,12 @@
+import { guardServiceEffect } from "@/lib/atendimento/fronteira-server";
 /**
  * Handoff humano como cidadão de 1ª classe (F4-06; blueprint 5.5 — escalação humana
  * clara e imediata é EXIGÊNCIA fiscalizada da Meta, não fallback). Dois gatilhos, uma
  * ação idempotente:
  *   1. DETERMINÍSTICO — regex PT-BR na última mensagem do lead ("falar com atendente",
- *      "quero falar com uma pessoa"…). Roda no runtime ANTES do modelo: o turno vira
- *      NO-OP (o bot silencia, não gasta LLM nem envia).
+ *      "quero falar com uma pessoa"…). Roda no runtime ANTES do modelo: o turno não gasta
+ *      LLM. Ele AVISA o lead (texto de código, `avisarLeadDaEscalacao`) e só então silencia
+ *      — nesta ordem, porque `force_human` arma o `stopGate` e mata todo envio posterior.
  *   2. TOOL request_human_handoff — o modelo aciona quando percebe o limite da automação.
  *
  * A ação (performHumanHandoff), idempotente e at-least-once — TUDO no mesmo banco agora
@@ -22,6 +24,7 @@ import { z } from 'zod';
 import type pg from 'pg';
 
 import { expectativaDeAtendimento } from '@/lib/escalacao/disponibilidade';
+import { ehOptOutProvavel } from '@/lib/opt-out/deteccao';
 import { emitAgentActivityForContact } from '@/lib/leads/agent-activity';
 
 import type { Logger } from '../obs/logger';
@@ -62,57 +65,19 @@ export function detectHumanHandoffRequest(message: string): boolean {
   return HUMAN_HANDOFF_PATTERNS.some((re) => re.test(normalized));
 }
 
-/**
- * Palavra-chave de opt-out enviada SOZINHA (mensagem inteira = a palavra) — a convenção
- * universal de descadastro em canais de mensagem. Comparação sobre o texto normalizado
- * e trimado (sem acento/pontuação de borda) para não vetar frases que só CONTÊM a palavra
- * ("vou parar por aqui, valeu" não casa; "PARAR" sozinho casa).
- */
-const OPTOUT_KEYWORDS: ReadonlySet<string> = new Set([
-  'stop',
-  'parar',
-  'pare',
-  'sair',
-  'cancelar',
-  'descadastrar',
-  'remover',
-  'unsubscribe',
-]);
 
 /**
- * Frases PT-BR de opt-out AMBÍGUO ("para de me mandar isso", "não quero mais receber",
- * "me tira da lista"): não são bloqueio formal no CRM, mas na dúvida tratamos como STOP
- * (F4-07). CONSERVADORAS o bastante para não silenciar um lead vivo por engano, mas a
- * política é "na dúvida, PARA e escala" — o humano confirma o is_blocked real no CRM.
- * Rodam sobre o texto normalizado (sem acento).
- */
-const AMBIGUOUS_OPTOUT_PATTERNS: readonly RegExp[] = [
-  /\bpar(?:a|e|em)\s+de\s+me\s+(?:mandar|manda|mande|enviar|envia|envie|perturbar|encher)\b/,
-  // "receber" seguido de um CANAL (ligação/chamada/telefonema) é troca-de-canal, não opt-out:
-  // "não quero receber ligação, só whatsapp" QUER continuar no WhatsApp — não silenciar.
-  /\bnao\s+(?:quero|desejo|gostaria)\s+(?:de\s+)?(?:mais\s+)?receber\b(?!\s+(?:ligacao|ligacoes|chamada|chamadas|telefonema|telefonemas|telefone)\b)/,
-  /\bnao\s+quero\s+receber\s+mais\b/,
-  /\bnao\s+me\s+(?:mande|manda|mandem|envie|envia|enviem)\s+mais\b/,
-  /\bme\s+(?:tira|tire|tirem|remove|remova|removam|retira|retire|exclui|exclua)\s+(?:da|dessa|desta|de\s+sua|da\s+sua)\s+lista\b/,
-  /\bsair\s+da\s+lista\b/,
-  /\bcancelar?\s+(?:a\s+)?inscricao\b/,
-  /\bme\s+descadastr\w*\b/,
-];
-
-/**
- * True se a última mensagem do lead SUGERE opt-out (palavra-chave sozinha OU frase
- * ambígua). Sinal CONSERVADOR: na dúvida vira STOP + escala à inbox (F4-07). NÃO é a
- * fonte da verdade (o CRM/is_blocked é); serve para PARAR de responder já e alertar o
- * humano, que confirma o bloqueio real.
+ * True se a última mensagem do lead SUGERE opt-out. A regra mora em
+ * `lib/opt-out/deteccao.ts` — a MESMA que a ingestão usa para gravar o bloqueio,
+ * e é o ponto: enquanto eram duas, o runtime era o lado calibrado e a ingestão
+ * bloqueava paciente que só perguntou como parar a dor.
+ *
+ * Aqui vale o nível PROVÁVEL (inequívoco + ambíguo), e não o inequívoco: este
+ * sinal só para de responder e escala à inbox — não silencia ninguém para
+ * sempre. Quem tem esse poder é a pessoa que confirma o bloqueio no CRM.
  */
 export function detectAmbiguousOptOut(message: string): boolean {
-  const trimmed = message.trim();
-  if (trimmed === '') return false;
-  const normalized = normalize(trimmed);
-  // palavra-chave isolada: só letras (remove pontuação de borda como "STOP." / "SAIR!")
-  const bareWord = normalized.replace(/[^a-z]/gu, '');
-  if (OPTOUT_KEYWORDS.has(bareWord)) return true;
-  return AMBIGUOUS_OPTOUT_PATTERNS.some((re) => re.test(normalized));
+  return ehOptOutProvavel(message);
 }
 
 /**
@@ -153,9 +118,27 @@ export interface HandoffIds {
 export async function performHumanHandoff(
   db: pg.Pool,
   ids: HandoffIds,
-  opts: { reason: string; conversationSummary: string; inboxTitle?: string; log: Logger },
+  opts: {
+    reason: string;
+    conversationSummary: string;
+    inboxTitle?: string;
+    /**
+     * O desfecho do aviso que o chamador mandou ao lead ANTES desta passagem
+     * (`avisarLeadDaEscalacao`). Opcional porque nem todo chamador é o motor de
+     * conversa — o "Assumir eu" de um caso é acionado por uma pessoa que já está
+     * na conversa e fala por si.
+     *
+     * Quando presente, ele vira LINHA no aviso da Central. A pergunta que o
+     * atendente faz ao abrir a conversa é "essa pessoa sabe que estou vindo?", e
+     * a resposta muda a primeira frase que ele digita. Falhar fechado na ação,
+     * aberto na informação.
+     */
+    avisoAoLead?: { avisado: boolean; porque?: string };
+    log: Logger;
+  },
 ): Promise<void> {
   // (a) FONTE DA VERDADE: force_human no contato — irrevogável pelo agente (regra dura 2).
+  await guardServiceEffect();
   await db.query(`update contacts set force_human = true where organization_id = $1 and id = $2`, [
     ids.tenantId,
     ids.leadId,
@@ -166,6 +149,7 @@ export async function performHumanHandoff(
   // está (nunca rouba do humano nem reabre encerrada). Fase 3: junto, zera a aderência
   // ao agente do router — se o bot for reativado, o router decide de novo (não reassume
   // o mesmo agente por inércia).
+  await guardServiceEffect();
   await db.query(
     `update conversations
         set status = case when status = 'ai_handling' then 'pending' else status end,
@@ -181,10 +165,12 @@ export async function performHumanHandoff(
 
   // (c) Cancela os crons PENDENTES do lead (follow-ups agendados — F3-01/02). Idempotente,
   // via o cancel compartilhado (mesma garantia que o opt-out irrevogável usa — F4-07).
+  await guardServiceEffect();
   await cancelPendingCronsForLead(db, ids.tenantId, ids.leadId);
 
   // (d) inbox de escalação com o resumo da conversa. Dedup por episódio ABERTO (mesmo padrão
   // do escalateJailbreakPromise): 2× no mesmo handoff aberto → 1 item.
+  await guardServiceEffect();
   await db.query(
     `insert into agent_inbox_items (organization_id, kind, severity, title, body, ref_kind, ref_id)
      select $1, 'handoff', 'critical', $2, $3, 'contact', $4
@@ -195,7 +181,7 @@ export async function performHumanHandoff(
     [
       ids.tenantId,
       opts.inboxTitle ?? 'Handoff humano solicitado — assumir a conversa',
-      `Motivo: ${opts.reason}. Resumo da conversa até aqui:\n${opts.conversationSummary}`,
+      `Motivo: ${opts.reason}. ${linhaDoAviso(opts.avisoAoLead)}Resumo da conversa até aqui:\n${opts.conversationSummary}`,
       ids.leadId,
     ],
   );
@@ -237,6 +223,19 @@ export async function performHumanHandoff(
   });
 }
 
+/**
+ * A linha do aviso da Central que responde "essa pessoa sabe que estou vindo?".
+ *
+ * Ausente = o chamador não mandou aviso nenhum (caminho acionado por uma pessoa),
+ * e aí o silêncio é honesto: nada a afirmar. Presente e falso = o cliente está
+ * esperando SEM SABER, e o atendente precisa abrir a conversa se apresentando.
+ */
+function linhaDoAviso(aviso: { avisado: boolean; porque?: string } | undefined): string {
+  if (aviso === undefined) return '';
+  if (aviso.avisado) return 'O cliente JÁ FOI avisado de que uma pessoa vai assumir. ';
+  return `⚠️ O cliente NÃO foi avisado (${aviso.porque ?? 'motivo desconhecido'}) — ele está esperando sem saber. `;
+}
+
 /** Whitelist EXATA do payload da tool (mesmo padrão .strict() da F2-10/F3-02). */
 export const requestHumanHandoffInputSchema = z.strictObject({
   reason: z.string().min(1).max(500).optional(),
@@ -258,7 +257,12 @@ export type RequestHumanHandoffResult =
 export async function applyRequestHumanHandoff(
   db: pg.Pool,
   ids: HandoffIds,
-  opts: { conversationSummary: string; log: Logger },
+  opts: {
+    conversationSummary: string;
+    /** Ver `performHumanHandoff` — o desfecho do aviso vira linha no aviso da Central. */
+    avisoAoLead?: { avisado: boolean; porque?: string };
+    log: Logger;
+  },
   rawInput: unknown,
 ): Promise<RequestHumanHandoffResult> {
   const forbidden = findForbiddenKey(rawInput);
@@ -273,6 +277,7 @@ export async function applyRequestHumanHandoff(
   await performHumanHandoff(db, ids, {
     reason: parsed.data.reason ?? 'requested_human',
     conversationSummary: opts.conversationSummary,
+    ...(opts.avisoAoLead !== undefined ? { avisoAoLead: opts.avisoAoLead } : {}),
     log: opts.log,
   });
 
@@ -282,12 +287,24 @@ export async function applyRequestHumanHandoff(
   // carrega o estado real da equipe, e o modelo não precisa lembrar de perguntar.
   const { frase } = await expectativaDeAtendimento(db, ids.tenantId, new Date());
 
+  // ⚠️ A frase anterior era "encerre o turno AGORA, sem enviar mais mensagens ao
+  // lead além do aviso" — e prometia uma saída que a PRIMEIRA linha de
+  // `performHumanHandoff` acabou de fechar: `force_human = true` arma o
+  // `stopGate`, que veta todo envio seguinte. O modelo que obedecesse ao "além
+  // do aviso" mandaria uma mensagem que morre no gate, e o lead ficaria mudo.
+  // Agora a mensagem AFIRMA o que é verdade: o aviso ou já foi dele, antes da
+  // chamada, ou foi do sistema — em nenhum dos casos há uma fala a mais.
+  const jaAvisado =
+    opts.avisoAoLead === undefined || opts.avisoAoLead.avisado
+      ? 'O lead JÁ foi avisado de que uma pessoa vai assumir.'
+      : 'ATENÇÃO: não foi possível avisar o lead (o canal recusou a mensagem); a equipe foi alertada disso.';
+
   return {
     ok: true,
     status: 'handoff_solicitado',
     message:
-      `Handoff humano acionado; a conversa saiu do atendimento automático. ${frase} ` +
-      'Encerre o turno AGORA, sem enviar mais mensagens ao lead além do aviso.',
+      `Handoff humano acionado; a conversa saiu do atendimento automático. ${jaAvisado} ${frase} ` +
+      'Encerre o turno AGORA — você não consegue mais enviar mensagens a este lead.',
   };
 }
 

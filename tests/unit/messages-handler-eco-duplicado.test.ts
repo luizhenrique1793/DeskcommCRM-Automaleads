@@ -76,10 +76,26 @@ function makeSupabase(preexistentes: Row[] = []) {
 
   const from = (table: string) => {
     if (table === 'conversations') {
+      // Encadeável sem limite: ver o comentário irmão em `contacts` logo abaixo.
+      // A consulta da conversa filtra por id E por `organization_id`.
+      const cadeiaConv: Record<string, unknown> = {
+        eq: () => cadeiaConv,
+        maybeSingle: async () => ({ data: conversationRow(), error: null }),
+      };
       return {
-        select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: conversationRow(), error: null }) }) }),
+        select: () => cadeiaConv,
         update: () => ({ eq: async () => ({ error: null }) }),
       };
+    }
+    if (table === 'contacts') {
+      // Ver o comentário irmão em `messages-handler-desfechos`: encadeável sem
+      // limite, porque a consulta filtra por id E por organização.
+      const cadeiaContacts: Record<string, unknown> = {
+        eq: () => cadeiaContacts,
+        then: (resolve: (v: { error: null }) => unknown) =>
+          Promise.resolve({ error: null }).then(resolve),
+      };
+      return { update: () => cadeiaContacts } as never;
     }
     if (table !== 'messages') throw new Error(`fake: tabela inesperada '${table}'`);
 

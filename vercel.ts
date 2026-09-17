@@ -1,39 +1,50 @@
 /**
- * Vercel project config (canonical TS form).
+ * Configuração do projeto na Vercel.
  *
- * Crons placeholder; lista final virá da Spec 08 (Operações & Workers).
- * Os 7 crons abaixo refletem os jobs derivados das specs herdadas:
- *  - recover-stuck-messages (WAHA)
- *  - sync-sessions (WAHA)
- *  - process-pending-webhooks (event_log)
- *  - dispatch-webhooks (deliveries / outbound webhooks)
- *  - lgpd-data-request-worker (D+7 SLA)
- *  - nuvemshop-sync-incremental
- *  - audit-log-archive (cold storage)
+ * Os crons abaixo são a MESMA cadência de `docker/scheduler/entrypoint.sh`.
+ * Plano Pro: minuto a minuto vale. Hobby: expressões mais frequentes que
+ * 1×/dia derrubam o deploy — nesse caso deixe só o `lgpd-sla-watcher` e use
+ * o relógio HTTP (`docs/runbooks/vercel-hobby-relogio.md`).
  *
- * Auth de cron: header `Authorization: Bearer ${INTERNAL_SECRET}` validado em cada handler.
+ * Auth: Vercel Cron manda Bearer CRON_SECRET; em produção `lib/env.ts` copia
+ * isso para INTERNAL_CRON_SECRET. INTERNAL_SECRET continua valendo nas rotas.
  */
 
 import type { VercelConfig } from "@vercel/config/v1";
 
 const config: VercelConfig = {
   crons: [
+    { path: "/api/v1/cron/agent-dispatcher", schedule: "* * * * *" },
+    { path: "/api/v1/cron/followup-flow-worker", schedule: "* * * * *" },
+    { path: "/api/v1/cron/event-log-drain", schedule: "* * * * *" },
+    { path: "/api/v1/cron/routing-worker", schedule: "* * * * *" },
+    { path: "/api/v1/cron/recover-stuck-messages", schedule: "* * * * *" },
+    { path: "/api/v1/cron/storage-redaction", schedule: "*/5 * * * *" },
+    { path: "/api/v1/cron/snooze-watcher", schedule: "*/5 * * * *" },
+    { path: "/api/v1/cron/webhook-log-retention", schedule: "*/5 * * * *" },
+    { path: "/api/v1/cron/channel-health", schedule: "*/5 * * * *" },
+    { path: "/api/v1/cron/agenda-google-push", schedule: "*/5 * * * *" },
+    { path: "/api/v1/cron/agenda-reminder", schedule: "*/5 * * * *" },
+    // Entraram na `main` depois que este PR foi escrito (lotes 3 e 4+5 da
+    // triagem de 14/set). O gate `cron-routes-scheduled` compara este
+    // inventário com o do scheduler e reprova quando eles divergem.
+    { path: "/api/v1/cron/agenda-expira-pendentes", schedule: "*/15 * * * *" },
+    { path: "/api/v1/cron/case-stale-watcher", schedule: "7 * * * *" },
+    { path: "/api/v1/cron/contact-birthdays", schedule: "7 * * * *" },
+    { path: "/api/v1/cron/contact-avatars", schedule: "*/10 * * * *" },
+    { path: "/api/v1/cron/agenda-google-refresh", schedule: "*/10 * * * *" },
+    { path: "/api/v1/cron/agenda-google-sync", schedule: "*/15 * * * *" },
+    { path: "/api/v1/cron/risk-watcher", schedule: "*/15 * * * *" },
+    { path: "/api/v1/cron/contact-phones", schedule: "*/30 * * * *" },
+    { path: "/api/v1/cron/contact-proposals-watcher", schedule: "17 * * * *" },
     { path: "/api/v1/cron/lgpd-sla-watcher", schedule: "0 12 * * *" },
-    // EPIC-13 S-13.07: drains ai_agent.dispatch_requested events. Vercel cron
-    // cannot go sub-minute; per-minute batch of 100 events is sized for the
-    // MVP target tenant (~300 inbound/day, headroom ~6k/hour).
-    { path: "/api/v1/cron/agent-dispatcher", schedule: "*/1 * * * *" },
-    // EPIC-13 G5-02 (AT-03): drena conversation.routing_requested e distribui
-    // conversas sem dono por org (round_robin). Per-minute (cap do Vercel) —
-    // no-eligible reenfileira com backoff da config (settings.routing).
-    { path: "/api/v1/cron/routing-worker", schedule: "*/1 * * * *" },
-    // Webhooks/automação: drain genérico do event_log (spec 2026-07-17).
-    { path: "/api/v1/cron/event-log-drain", schedule: "*/1 * * * *" },
+    { path: "/api/v1/cron/kb-conversations-batch", schedule: "30 3 * * *" },
+    { path: "/api/v1/cron/sync-model-catalog", schedule: "15 4 * * *" },
+    { path: "/api/v1/cron/data-retention", schedule: "40 4 * * *" },
   ],
   functions: {
-    // EPIC-13 S-13.08: ToolLoopAgent runtime can issue multiple tool calls per
-    // step. 300s max keeps Fluid Compute within bounds; the runtime's own
-    // step/token/cost guards usually finish much earlier.
+    "app/api/v1/cron/**/route.ts": { maxDuration: 120 },
+    "app/api/v1/system/relogio/tick/route.ts": { maxDuration: 60 },
     "app/api/internal/agents/run/route.ts": { maxDuration: 300 },
   },
 };

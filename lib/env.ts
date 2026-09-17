@@ -34,6 +34,33 @@ const required = (name: string) =>
 
 const requiredAlways = (name: string) => z.string().min(1, `${name} é obrigatória`);
 
+/**
+ * Knob de retenção em dias: NUNCA derruba o app.
+ *
+ * `z.coerce.number().int().positive()` lança para `=0`, que é justamente o que
+ * o operador da VPS escreve quando quer desligar a poda — e `lib/env.ts` roda
+ * no import do Next, então o throw vira 500 em TODAS as telas, com o contêiner
+ * `healthy` e nada dizendo o porquê. Falha fechada na AÇÃO (o valor inválido
+ * não vale) e aberta na INFORMAÇÃO (o app sobe e diz alto o que ignorou).
+ *
+ * Desligar a poda não é isto: se tiver de existir, é decisão de produto e vem
+ * com nome próprio, não com um zero que o schema recusa.
+ */
+const diasDeRetencao = (nome: string, padrao: number) =>
+  z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(padrao)
+    .catch(({ error }) => {
+      console.warn(
+        `[env] ${nome} inválida (${JSON.stringify(process.env[nome])}) — usando o padrão ${padrao} dias. ` +
+          `Só número inteiro maior que zero vale aqui; "0" não desliga a poda. ` +
+          `(${error.issues[0]?.message ?? "valor recusado"})`,
+      );
+      return padrao;
+    });
+
 const schema = z.object({
   // Node
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -47,6 +74,40 @@ const schema = z.object({
   INTERNAL_SECRET: required("INTERNAL_SECRET"),
   /** Optional dedicated secret for cron endpoints (S-06.07 onwards). */
   INTERNAL_CRON_SECRET: z.string().optional().default(""),
+
+  /**
+   * Retenção do arquivo do corpo cru dos webhooks (`webhook_events_log`).
+   *
+   * O default de 7 dias não é gosto: numa instalação real esse arquivo era 86%
+   * do banco (468 MB de 545 MB) e crescia ~23 MB/dia, contra os 500 MB do plano
+   * gratuito do Supabase — onde a maioria dos clones vive. Com 7 dias o regime
+   * estável fica em ~160 MB de corpo mais ~11 MB de índice forense; com 14 já
+   * não cabe. Quem tem plano pago sobe o número e fica com mais corpo à mão.
+   */
+  WEBHOOK_LOG_BODY_RETENTION_DAYS: diasDeRetencao("WEBHOOK_LOG_BODY_RETENTION_DAYS", 7),
+  /**
+   * Quando a LINHA some, e não só o corpo. Horizonte longo de propósito: até
+   * aqui a linha custa ~200 B e ainda responde "quantos eventos de que tipo
+   * chegaram, quando, e a assinatura conferia?", que é a pergunta de depois do
+   * incidente.
+   */
+  WEBHOOK_LOG_ROW_RETENTION_DAYS: diasDeRetencao("WEBHOOK_LOG_ROW_RETENTION_DAYS", 90),
+  /**
+   * Retenção do HISTÓRICO de leads captados (`webhook_lead_captures`).
+   *
+   * Horizonte muito mais longo que o do arquivo forense acima, e a diferença é
+   * de natureza: lá a linha é despejo de depuração, aqui ela É o produto — é o
+   * que a aba "Leads recebidos" mostra quando alguém pergunta de qual campanha
+   * vieram os clientes que fecharam. Uma linha custa ~1 kB, então 300
+   * leads/dia por um ano dão ~110 MB; o ano fiscal cabe.
+   *
+   * Entra como `z.string()` — e não pelo `diasDeRetencao` acima — porque quem
+   * a interpreta é `lib/retencao/politica.ts`, o mesmo módulo da poda da fila e
+   * do expurgo da auditoria. Ele resolve lixo para o lado seguro E devolve a
+   * frase de aviso, que é o que faz o operador saber que o número dele foi
+   * elevado ao piso de 30 dias, em vez de descobrir pela ausência de efeito.
+   */
+  LEAD_CAPTURE_RETENTION_DAYS: z.string().optional().default(""),
 
   // Encryption keys (pgcrypto)
   CPF_ENCRYPTION_KEY: required("CPF_ENCRYPTION_KEY"),
@@ -63,6 +124,17 @@ const schema = z.object({
   // Postgres direto do Supabase (Settings → Database) — só as rotas de skills
   // instaláveis (import/install) usam `pg` cru (mesmo pool do agent-engine).
   SUPABASE_DB_URL: required("SUPABASE_DB_URL"),
+  /**
+   * A conexão de DDL do KIT (install.sh/update.sh/backup.sh), não do app —
+   * declarada aqui só porque o `docker-compose.prod.yml` entrega o `.env`
+   * inteiro ao app e ao worker (`env_file`), e uma chave que chega ao processo
+   * merece estar no contrato em vez de ser um desconhecido tolerado.
+   *
+   * NENHUM código de app pode lê-la: ela é o DONO do banco quando a instalação
+   * é num Supabase próprio, e `SUPABASE_DB_URL` é a role menor de propósito
+   * (issue #192). Vigiado por `tests/unit/env-ddl-fora-do-app.test.ts`.
+   */
+  SUPABASE_DB_ADMIN_URL: z.string().optional().default(""),
 
   // WAHA
   WAHA_API_BASE_URL: required("WAHA_API_BASE_URL"),
@@ -79,6 +151,21 @@ const schema = z.object({
   // assine — aí a verificação passa a ser obrigatória.
   WAHA_WEBHOOK_REQUIRE_SIGNATURE: z.string().optional().default("false"),
 
+  // ─── Chamada de voz WhatsApp (WaCalls, spec 18) ───
+  //
+  // NUNCA `required()`: o serviço `wacalls` vive num profile do compose que
+  // nasce DESLIGADO, então a instalação normal não o tem. Exigir aqui
+  // derrubaria o boot de todo self-host que não usa a feature.
+  //
+  // Vazio = a instalação não oferece a chamada de voz. É essa string vazia que
+  // `instalacaoOfereceVoz()` lê para dizer à tela que nenhum clique resolve.
+  WACALLS_API_BASE_URL: z.string().optional().default(""),
+  // O upstream autenticado NÃO tem modo aberto: sem este Bearer, a API só é
+  // alcançável pelo cookie de login do navegador, e um processo
+  // server-to-server não tem cookie. URL sem token dá um cliente que constrói e
+  // devolve 401 em toda chamada — por isso `getWacallsClient()` exige os dois.
+  WACALLS_API_TOKEN: z.string().optional().default(""),
+
   // Upstash Redis
   UPSTASH_REDIS_REST_URL: required("UPSTASH_REDIS_REST_URL"),
   UPSTASH_REDIS_REST_TOKEN: required("UPSTASH_REDIS_REST_TOKEN"),
@@ -92,9 +179,25 @@ const schema = z.object({
   // por lá. Ver resolveLanguageModel() em lib/ai/gateway.ts.
   OPENROUTER_API_KEY: z.string().optional().default(""),
   OPENROUTER_BASE_URL: z.string().optional().default(""),
+  // Atribuição OPCIONAL da OpenRouter (`HTTP-Referer` / `X-Title`): identifica a
+  // instalação no painel e no ranking público DELES. A doc da OpenRouter chama
+  // os dois de opcionais e a chamada funciona sem — por isso default vazio e
+  // nenhum header enviado quando não preenchidos. Quem lê é
+  // `cabecalhosDeAtribuicaoOpenRouter()`, em edge/llm/providers.ts.
+  OPENROUTER_APP_URL: z.string().optional().default(""),
+  OPENROUTER_APP_TITLE: z.string().optional().default(""),
   VERCEL_AI_GATEWAY_URL: z.string().optional().default(""),
   ANTHROPIC_API_KEY: z.string().optional().default(""),
   OPENAI_API_KEY: z.string().optional().default(""),
+  // Transcrição de áudio num serviço COMPATÍVEL com o da OpenAI (Groq, um
+  // Whisper próprio): a chave vale só para `/audio/transcriptions` — a conversa
+  // com o cliente e a leitura de imagem continuam no provedor do ponto.
+  // Vazio é ausente, como no resto do arquivo: sem `TRANSCRIPTION_API_KEY` a
+  // transcrição usa a `OPENAI_API_KEY` acima, que é o comportamento de sempre.
+  // Quem lê é o worker de derivação de mídia (`workers/media-derive-worker.ts`).
+  TRANSCRIPTION_API_KEY: z.string().optional().default(""),
+  TRANSCRIPTION_BASE_URL: z.string().optional().default(""),
+  TRANSCRIPTION_MODEL: z.string().optional().default(""),
 
   // Fusão (Fase 4): DONO ÚNICO dos eventos ai_agent.dispatch_requested.
   // 'engine' (default) = o worker agent-engine é o único consumidor (o cron
@@ -103,12 +206,38 @@ const schema = z.object({
   // duplicado ou perdido (bug real da fusão).
   AGENT_DISPATCH_CONSUMER: z.enum(["engine", "native"]).optional().default("engine"),
 
-  // Workers — opt-in via env so dev doesn't run loops. Production cron sets it.
-  EVENT_LOG_WORKER_ENABLED: z
-    .enum(["true", "false"])
-    .optional()
-    .default("false")
-    .transform((v) => v === "true"),
+  /**
+   * Kill switch do teto de gasto de IA — a alavanca que o operador da VPS puxa
+   * às 2h da manhã quando a IA parou e ele não sabe SQL.
+   *
+   * `on` (default) NÃO LIGA NADA: significa "respeite o que cada organização
+   * escolheu na tela". A chave só sabe AFROUXAR — `avisar` rebaixa qualquer
+   * bloqueio a aviso, e `off|false|0|no|nao|não|disabled` cala a proteção
+   * inteira. É essa monotonicidade que a torna um kill switch de verdade.
+   *
+   * ⚠️ `z.string()` E JAMAIS `z.enum`, e o motivo é o modo de falha deste
+   * arquivo: `safeParse` abaixo LANÇA quando o schema recusa, e no Next isso
+   * acontece na primeira requisição — com healthcheck TCP puro, o contêiner
+   * fica `healthy` com 100% das requisições em 500. Um `z.enum` transformaria a
+   * alavanca de EMERGÊNCIA no derrubador do app inteiro no dia em que o
+   * operador escrevesse `false`. A normalização (que aceita as grafias falsas
+   * comuns como desligado, e resolve lixo para o lado seguro) mora em
+   * `normalizarChaveDeOrcamento`, em lib/agent-engine/edge/llm/orcamento.ts.
+   * Mesmo raciocínio de APP_ACCENT_HEX, algumas linhas abaixo.
+   */
+  AI_BUDGET_ENFORCEMENT: z.string().optional().default("on"),
+
+  // `EVENT_LOG_WORKER_ENABLED` viveu aqui até 2026-08-25 e NUNCA teve leitor: o
+  // campo era declarado, documentado no `.env.example` com `false` e lido por
+  // ninguém (medido: zero ocorrências fora da própria declaração). Saiu junto
+  // com a chegada do laço de verdade (`lib/event-log/drain-loop.ts`), e o ritmo
+  // dele agora mora nos `EVENT_LOG_DRAIN_*` de `lib/agent-engine/env.ts` — o
+  // schema do processo que roda o laço, e não o do app.
+  //
+  // Não virou o liga/desliga do laço novo de propósito: o default publicado era
+  // `false`, então respeitá-lo faria o conserto não chegar a NENHUMA instalação
+  // já existente — que é o item 15 do Definition of Done ("a mudança chega a
+  // quem já instalou"). O worker existe para rodar laços; este liga sempre.
 
   // O endpoint :test devolve um trace fake quando esta flag = 'true'.
   // Default 'false' desde que a S-13.08 landou: `callInternalRuntime` executa
@@ -123,15 +252,70 @@ const schema = z.object({
   // Sentry
   SENTRY_DSN: z.string().optional().default(""),
 
+  /**
+   * Resend — o transporte de TODO e-mail transacional (convite, LGPD, alarme).
+   *
+   * Estavam lidas de `process.env` CRU dentro de `lib/email/resend.ts`, fora do
+   * Zod e fora do `.env.example` (medido: `grep -n RESEND lib/env.ts` → nada;
+   * `grep -c -i resend .env.example` → 0). Duas consequências que só apareciam
+   * na VPS: o `env-example-sync` nunca cobrou a documentação da chave, e o
+   * `install.sh` não a gravava — como o `.env` é escrito com truncamento
+   * (`} > .env`), a chave posta à mão era DESCARTADA na instalação seguinte,
+   * num script que o README vende como idempotente.
+   *
+   * `RESEND_FROM_EMAIL` vazio NÃO cai num domínio nosso: ver `fromAddress()`.
+   */
+  RESEND_API_KEY: z.string().optional().default(""),
+  RESEND_FROM_EMAIL: z.string().optional().default(""),
+
+  /**
+   * E-mail de suporte que a instalação mostra ao CLIENTE FINAL (tela de conta
+   * suspensa, tela de cobrança).
+   *
+   * Vazio = a tela não mostra endereço nenhum. É deliberado: cair no nosso
+   * endereço numa tela de suspensão manda o cliente do revendedor escrever
+   * para quem não suspendeu a conta dele e não tem como resolvê-la.
+   */
+  SUPPORT_EMAIL: z.string().optional().default(""),
+
   // EPIC-11 Impersonate cookie HMAC secret. Optional at boot (route returns
   // 503 at runtime if missing/short); required in prod for the feature to
   // function. Min 32 chars when present is enforced at use site.
   IMPERSONATE_COOKIE_SECRET: z.string().optional().default(""),
 
+  /**
+   * Retenção do histórico que o cron `data-retention` poda (issue #261).
+   *
+   * As DUAS entram como `z.string()` e nunca como `z.coerce.number()`, pelo
+   * mesmo motivo de `AI_BUDGET_ENFORCEMENT` algumas linhas acima: o `safeParse`
+   * deste arquivo LANÇA quando o schema recusa, e no Next isso derruba toda
+   * requisição com 500 num contêiner que segue `healthy` (o healthcheck é probe
+   * TCP). Quem digita `noventa` às 2h da manhã tentando liberar espaço não pode
+   * derrubar o produto. A interpretação — com padrão, piso e AVISO quando o
+   * valor não vale como escrito — mora em `lib/retencao/politica.ts`.
+   *
+   * Ausentes = o comportamento default (90 dias de fila, 5 anos de auditoria).
+   * Nenhuma instalação precisa editar `.env` para a poda funcionar.
+   */
+  JOB_QUEUE_RETENTION_DAYS: z.string().optional().default(""),
+  AUDIT_LOG_RETENTION_DAYS: z.string().optional().default(""),
+
   // LGPD export (S-08.04)
   LGPD_SIGNING_KEY: z.string().optional().default(""),
   LGPD_EXPORT_EXPIRES_HOURS: z.string().optional().default("72"),
   LGPD_DPO_EMAIL: z.string().optional().default(""),
+
+  // Google Agenda — opcional, e é a DECISÃO 3.1 em forma de schema. Sem as
+  // duas, o módulo de agenda funciona INTEIRO: some o botão "Conectar Google" e
+  // a tela explica em uma linha o que falta e onde obter. É o estado real de um
+  // primeiro deploy, e é onde moram os piores bugs de primeira impressão.
+  //
+  // NÃO há flag de "enabled" de propósito. Estar configurado É ter as duas
+  // chaves; uma flag seria um terceiro estado para o operador errar — e
+  // `z.enum` sobre valor que ele digita transforma a alavanca em derrubador do
+  // app inteiro no dia em que alguém escrever `TRUE`.
+  GOOGLE_CALENDAR_CLIENT_ID: z.string().optional().default(""),
+  GOOGLE_CALENDAR_CLIENT_SECRET: z.string().optional().default(""),
 
   // Nuvemshop — opcional (template genérico open-source). Só exigidas quando
   // NUVEMSHOP_ENABLED=true; o runtime já degrada via getConfig()==null.
@@ -165,6 +349,45 @@ const schema = z.object({
   // O <PublicEnvScript/> injeta os valores em runtime.
   APP_NAME: z.string().optional().default(""),
   APP_LOGO_URL: z.string().optional().default(""),
+  /**
+   * Cor da marca — um hex (`#506d48`), do qual `lib/branding/` deriva a rampa
+   * inteira. Vazio = o produto se pinta com a cor dele.
+   *
+   * `optional().default("")` e NUNCA `required()`, e o motivo é o modo de falha,
+   * não a preguiça: `lib/env.ts` lança no import do módulo, que no Next
+   * acontece na PRIMEIRA REQUISIÇÃO, não no boot. E o healthcheck do contêiner é
+   * um probe TCP puro (`docker-compose.prod.yml:44`, deliberadamente — /health
+   * derrubaria o app quando o WAHA cai). Somando os dois: o Docker mostraria
+   * `healthy` com 100% das requisições em 500. Uma var de COR não pode ter esse
+   * poder; a validação do valor é do resolvedor, que degrada e diz o motivo.
+   */
+  APP_ACCENT_HEX: z.string().optional().default(""),
+
+  /**
+   * Com o que a instalação NASCE quanto a cadastro: `aberto` (padrão) ou
+   * `so_convite`. Vazio = `aberto`, que é como o produto sempre funcionou.
+   *
+   * O BANCO ESTÁ ACIMA DISTO. Havendo linha em `platform_settings` — o que
+   * acontece assim que alguém usa a tela em `/admin/cadastro` —, é ela que
+   * manda. Esta variável responde nas duas situações em que o banco não tem o
+   * que dizer: instalação que nunca abriu a tela, e app que subiu e ainda não
+   * conseguiu ler o banco. A segunda é o motivo de ela existir: sem um piso
+   * declarado, uma instalação deliberadamente fechada abriria nessa janela.
+   *
+   * `z.string()` e NÃO `z.enum`, pelo mesmo motivo escrito ao lado de
+   * `APP_ACCENT_HEX`: um enum lançaria no import do módulo, que no Next é a
+   * PRIMEIRA REQUISIÇÃO — e com healthcheck de probe TCP o Docker mostraria
+   * `healthy` com 100% das requisições em 500. Valor irreconhecível degrada em
+   * `lib/auth/politica-de-cadastro.ts`, com erro no log.
+   */
+  SIGNUP_MODE: z.string().optional().default(""),
+
+  /**
+   * Par VAPID do Web Push. Opcionais: sem elas a bandeja só funciona com a aba
+   * viva (Notification API + SW local). Gerar: `npx web-push generate-vapid-keys`.
+   */
+  VAPID_PUBLIC_KEY: z.string().optional().default(""),
+  VAPID_PRIVATE_KEY: z.string().optional().default(""),
 });
 
 let parsed = schema.safeParse(process.env);
@@ -192,6 +415,17 @@ if (!parsed.success) {
 
 export const env = parsed.data;
 
+if (env.NODE_ENV === "production") {
+  const vercelCron = process.env.CRON_SECRET?.trim();
+  if (vercelCron) {
+    // ponytail: Vercel Cron só manda Bearer CRON_SECRET. Sem copiar, o Pro
+    // agenda e a rota responde 403. Teto: se os dois segredos precisarem ser
+    // distintos, as rotas passam a aceitar os dois numa lista — INTERNAL_SECRET
+    // continua valendo como fallback nas rotas.
+    env.INTERNAL_CRON_SECRET = vercelCron;
+  }
+}
+
 // Soft warning for env-gated AI keys (worker degrades gracefully but operators
 // should know when the bot is silent for config reasons).
 // `OPENROUTER_API_KEY` entra na condição porque `isAiGatewayConfigured()`
@@ -208,10 +442,26 @@ if (!env.AI_GATEWAY_API_KEY && !env.ANTHROPIC_API_KEY && !env.OPENROUTER_API_KEY
       "o agente vai pular toda resposta com reason='ai_gateway_key_missing'.",
   );
 }
+// Este aviso ANUNCIAVA UM DESFECHO que o boot não tem como saber, e a correção
+// aqui é a mesma que o bloco de cima já pagou uma vez. Ele dizia "RAG embedding
+// unavailable" e "voice-note transcription is off" — as duas afirmações são
+// falsas numa instalação onde a organização cadastrou a chave PELA TELA:
+// o preparo de material resolve a chave por uma escada (ponto de IA →
+// credencial da organização → gateway → este env — `lib/ai/embeddings/chave.ts`),
+// e a transcrição já caía na credencial da org antes disso
+// (`workers/media-derive-worker.ts`).
+//
+// Quem lê um aviso de boot não consegue conferir o desfecho; ele acredita. E
+// acreditar em "está desligado" quando está ligado faz a pessoa ir cadastrar
+// uma chave que ela já tem — ou, pior, desistir do recurso. Então o aviso passou
+// a dizer só o que ESTE processo sabe: o que a variável é, e o que fazer se não
+// houver chave em lugar nenhum.
 if (!env.OPENAI_API_KEY) {
   console.warn(
-    "[env] No OPENAI_API_KEY set — RAG embedding unavailable (bot answers without retrieved context) " +
-      "AND voice-note transcription is off (the agent will ask leads to resend audio as text).",
+    "[env] OPENAI_API_KEY ausente — ela é o ÚLTIMO degrau da escada de chave da OpenAI " +
+      "(preparo de material do acervo e transcrição de áudio). Se alguma organização já " +
+      "cadastrou a chave em IA › Credenciais, os dois seguem funcionando por ela; se não " +
+      "cadastrou nenhuma, ambos ficam parados até que alguém cadastre — pela tela ou aqui.",
   );
 }
 if (!env.IMPERSONATE_COOKIE_SECRET || env.IMPERSONATE_COOKIE_SECRET.length < 32) {

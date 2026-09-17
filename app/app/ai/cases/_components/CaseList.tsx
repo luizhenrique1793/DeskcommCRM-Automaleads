@@ -1,20 +1,33 @@
 "use client";
+
+import { useLocaleDeData } from "@/hooks/i18n/useLocaleDeData";
 import { useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { formatDistanceToNowStrict } from "date-fns";
-import { ptBR } from "date-fns/locale";
 
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useCases, type CaseListItem } from "@/hooks/ai/useCases";
-import { STATUS_BADGE_VARIANT, STATUS_LABEL } from "@/lib/ai/case-copy";
+import { STATUS_BADGE_VARIANT, STATUS_LABEL, tipoDeCasoLabel } from "@/lib/ai/case-copy";
 import { Robot } from "@/lib/ui/icons";
 import { cn } from "@/lib/utils";
+import { useT } from "@/hooks/i18n/useT";
 import { CaseDetail } from "./CaseDetail";
 
 export function CaseList() {
+  const t = useT();
   const [tab, setTab] = useState<"open" | "resolved">("open");
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Deep link: o aviso "um atendimento espera decisão" na Central manda para cá
+  // com o id do caso. Sem isto ele abriria a LISTA, e quem clicou teria que
+  // caçar de qual caso o aviso falava — um aviso que não leva ao seu assunto é
+  // meio aviso. Só o valor INICIAL: clicar na lista continua mandando, e a URL
+  // não vira estado a sincronizar.
+  // `?.` porque o hook devolve null fora de um contexto de navegação (o que
+  // acontece em teste e em render estático). Sem a guarda, a tela inteira
+  // quebra com "Cannot read properties of null".
+  const idDaUrl = useSearchParams()?.get("caso") ?? null;
+  const [selectedId, setSelectedId] = useState<string | null>(idDaUrl);
   const { data, isLoading } = useCases(tab);
 
   return (
@@ -22,8 +35,8 @@ export function CaseList() {
       <div className="flex w-full max-w-xs shrink-0 flex-col gap-4">
         <Tabs value={tab} onValueChange={(v) => setTab(v as "open" | "resolved")}>
           <TabsList>
-            <TabsTrigger value="open">Abertos{data ? ` (${data.open_count})` : ""}</TabsTrigger>
-            <TabsTrigger value="resolved">Concluídos</TabsTrigger>
+            <TabsTrigger value="open">{t("Abertos")}{data ? ` (${data.open_count})` : ""}</TabsTrigger>
+            <TabsTrigger value="resolved">{t("Concluídos")}</TabsTrigger>
           </TabsList>
         </Tabs>
 
@@ -34,14 +47,14 @@ export function CaseList() {
           </div>
         ) : !data || data.cases.length === 0 ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-2 py-16 text-center">
-            <Robot size={28} className="text-muted-foreground/60" aria-hidden />
+            <Robot size={28} className="text-muted-foreground" aria-hidden />
             <p className="text-sm font-medium">
-              {tab === "open" ? "Nenhum caso aberto" : "Nenhum caso concluído"}
+              {tab === "open" ? t("Nenhum caso aberto") : t("Nenhum caso concluído")}
             </p>
             <p className="text-xs text-muted-foreground">
               {tab === "open"
-                ? "Quando a IA precisar de você, aparece aqui."
-                : "Casos concluídos, cancelados ou repassados ficam aqui."}
+                ? t("Quando a IA precisar de você, aparece aqui.")
+                : t("Casos concluídos, cancelados ou repassados ficam aqui.")}
             </p>
           </div>
         ) : (
@@ -74,7 +87,9 @@ function CaseRow({
   selected: boolean;
   onSelect: () => void;
 }) {
-  const when = formatDistanceToNowStrict(new Date(item.opened_at), { addSuffix: true, locale: ptBR });
+  const localeDaData = useLocaleDeData();
+  const t = useT();
+  const when = formatDistanceToNowStrict(new Date(item.opened_at), { addSuffix: true, locale: localeDaData });
   return (
     <li>
       <button
@@ -90,11 +105,13 @@ function CaseRow({
         <div className="flex w-full items-center justify-between gap-2">
           <p className="truncate text-sm font-medium">{item.title}</p>
           <Badge variant={STATUS_BADGE_VARIANT[item.status]} className="shrink-0">
-            {STATUS_LABEL[item.status]}
+            {t(STATUS_LABEL[item.status])}
           </Badge>
         </div>
         <p className="text-xs text-muted-foreground">
-          {item.contact_name ?? "Contato sem nome"} · {when}
+          {/* O assunto vem ANTES do nome: quem tria a fila decide por ele, e o
+              nome só importa depois de escolher o caso. */}
+          {t(tipoDeCasoLabel(item.kind))} · {item.contact_name ?? t("Contato sem nome")} · {when}
         </p>
       </button>
     </li>

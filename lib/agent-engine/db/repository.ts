@@ -12,6 +12,9 @@
  */
 import type pg from 'pg';
 
+// Vocabulário compartilhado de referências navegáveis; linhas legadas seguem defensivas.
+export type { InboxRefKind } from '@/lib/ai/inbox-destino';
+
 /**
  * O vocabulário dos avisos do runtime. Espelha o CHECK de
  * `agent_inbox_items.kind` — e o espelho é MECÂNICO: o invariante
@@ -23,7 +26,11 @@ import type pg from 'pg';
  * kind numa migration adiciona aqui na mesma mudança.
  */
 export type InboxKind =
+  | 'case_stale'
+  | 'appointment_outcome_required'
+  | 'appointment_recovery_review'
   | 'qr_rescan'
+  | 'routing_unassigned'
   | 'job_dead'
   | 'event_dead'
   | 'budget_exceeded'
@@ -50,6 +57,21 @@ export type InboxKind =
   | 'midia_nao_lida'
   | 'promise_unfulfilled'
   | 'contact_proposal_expired'
+  // (migration 0159) O degrau de AVISO do teto de gasto de IA — o que a
+  // organização vê antes de qualquer parada. Existe separado de
+  // `budget_exceeded` porque diz coisa diferente: um relata que algo
+  // ACONTECEU e a IA segue; o outro, que ela parou. Severity 'warn'.
+  | 'budget_warning'
+  // (migration 0181) O material que a pessoa enviou não entrou na base de
+  // conhecimento: falta chave de embedding, a extração do arquivo falhou, ou
+  // nenhum trecho foi gravado. UM kind e não dois, porque quem lê a Central
+  // quer saber que o material não entrou — o porquê é o corpo do aviso.
+  | 'conhecimento_nao_indexado'
+  // (migration 0232) Chamada de voz que TOCOU e ninguém atendeu — inbound
+  // encerrada sem nunca ter passado por `connected`. O `end_reason` do upstream
+  // não distingue "tocou e ninguém pegou" de "o operador recusou", e para quem
+  // lê a Central os dois pedem a mesma coisa: alguém precisa ligar de volta.
+  | 'voice_call_missed'
   | 'other';
 
 export interface InboxItemRow {
@@ -82,8 +104,21 @@ function one<T>(rows: T[], what: string): T {
  * `kind_e_ref` — um por (kind, ref). Serve para aviso que fala de UMA conversa
  * ou de UM lead. Dedupar esses por `kind` sozinho engoliria o aviso de outro
  * cliente, que é pior que repetir: some sinal em vez de sobrar ruído.
+ *
+ * `kind_e_titulo` — um por (kind, título). Serve quando o mesmo `kind` carrega
+ * problemas de natureza diferente, distinguidos por um título FIXO: o
+ * `event_dead` da IA que deixou de responder não pode sumir atrás do
+ * `event_dead` de uma mídia (`lib/event-log/aviso-de-evento-morto.ts`).
+ *
+ * `kind_ref_e_titulo` — um por (kind, ref, título). É a soma dos dois de cima, e
+ * existe porque UM `kind` genérico (`other`) carrega problemas diferentes DE UM
+ * MESMO lead: o espelho do funil recusa por escopo e recusa por perda sem motivo
+ * (`lib/agent-engine/edge/crm/move-lead-stage.ts`), com textos opostos e o mesmo
+ * `ref`. Por `kind_e_ref`, o segundo sumiria atrás do primeiro — o defeito que o
+ * dedupe existe para evitar, invertido. Por `kind_e_titulo`, o aviso de um lead
+ * calaria o do lead seguinte.
  */
-export type InboxDedupe = 'kind' | 'kind_e_ref';
+export type InboxDedupe = 'kind' | 'kind_e_ref' | 'kind_e_titulo' | 'kind_ref_e_titulo';
 
 /**
  * Abre um aviso na Central.
@@ -110,7 +145,7 @@ export type InboxDedupe = 'kind' | 'kind_e_ref';
  * desfecho normal, não erro.
  */
 export async function insertInboxItem(
-  db: pg.Pool,
+  db: Pick<pg.Pool, "query">,
   tenantId: string | null, // null = plataforma (ex.: infra)
   input: { kind: InboxKind; title: string; severity?: InboxItemRow['severity']; body?: string; refKind?: string; refId?: string },
   dedupe?: InboxDedupe,
@@ -146,9 +181,14 @@ export async function insertInboxItem(
            and kind = $2
            and status = 'open'
            and ($8 = false or (ref_kind is not distinct from $6 and ref_id is not distinct from $7))
+           and ($9 = false or title = $4)
       )
      returning *`,
-    [...valores, dedupe === 'kind_e_ref'],
+    [
+      ...valores,
+      dedupe === 'kind_e_ref' || dedupe === 'kind_ref_e_titulo',
+      dedupe === 'kind_e_titulo' || dedupe === 'kind_ref_e_titulo',
+    ],
   );
   return rows[0] ?? null;
 }

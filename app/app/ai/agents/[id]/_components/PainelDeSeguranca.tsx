@@ -38,6 +38,7 @@ import * as React from "react";
 
 import { Card } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
+import { useT } from "@/hooks/i18n/useT";
 
 import {
   useGuardrailLayers,
@@ -64,8 +65,10 @@ function Conferencia({
   estado: CamadaDeSeguranca | undefined;
   podeEditar: boolean;
   salvando: boolean;
-  onToggle: (layer: string, v: boolean) => void;
+  /** Só o valor: QUAL camada gravar é decisão de quem monta o item, não do item. */
+  onToggle: (v: boolean) => void;
 }) {
+  const t = useT();
   // Prefixo próprio para o ITEM: os controles dentro dele têm testid começando em
   // `conferencia-`, e contar por esse prefixo misturava os dois — a contagem
   // mudava a cada elemento novo. O teste de tela pegou isso quando o interruptor
@@ -79,12 +82,12 @@ function Conferencia({
         {ordem ?? "•"}
       </span>
       <div className="space-y-1">
-        <p className="text-sm font-medium">{c.rotulo}</p>
-        <p className="text-xs text-muted-foreground">{c.oQueProtege}</p>
+        <p className="text-sm font-medium">{t(c.rotulo)}</p>
+        <p className="text-xs text-muted-foreground">{t(c.oQueProtege)}</p>
         {c.escolha === null ? (
           <p data-testid={`conferencia-${c.nome}-fixa`} className="text-xs text-muted-foreground">
-            <span className="font-medium text-foreground">Isto não se desliga.</span>{" "}
-            {c.porQueNaoSeDesliga}
+            <span className="font-medium text-foreground">{t("Isto não se desliga.")}</span>{" "}
+            {t(c.porQueNaoSeDesliga)}
           </p>
         ) : (
           <div data-testid={`conferencia-${c.nome}-escolha`} className="space-y-1">
@@ -93,23 +96,24 @@ function Conferencia({
                 data-testid={`conferencia-${c.nome}-liga`}
                 checked={estado?.efetivo ?? false}
                 disabled={!podeEditar || salvando}
-                onCheckedChange={(v) => onToggle(c.nome, v)}
-                aria-label={c.rotulo}
+                onCheckedChange={(v) => onToggle(v)}
+                aria-label={t(c.rotulo)}
               />
               <span className="text-xs text-muted-foreground">
                 {estado === undefined
-                  ? "carregando…"
+                  ? t("carregando…")
                   : estado.escolha === null
-                    ? `${estado.efetivo ? "Ligada" : "Desligada"} — vem da configuração do servidor`
+                    ? `${estado.efetivo ? t("Ligada") : t("Desligada")} ${t("— vem da configuração do servidor")}`
                     : estado.escolha
-                      ? "Ligada por você"
-                      : "Desligada por você"}
+                      ? t("Ligada por você")
+                      : t("Desligada por você")}
               </span>
             </div>
             <p className="text-xs text-muted-foreground">
-              Custa {c.escolha.custo}. O modelo usado se escolhe em{" "}
+              {t("Custa")} {t(c.escolha.custo)}
+              {t(". O modelo usado se escolhe em")}{" "}
               <a className="underline underline-offset-2" href="/app/ai/providers">
-                Provedores de IA
+                {t("Provedores de IA")}
               </a>
               .
             </p>
@@ -121,27 +125,35 @@ function Conferencia({
 }
 
 export function PainelDeSeguranca() {
+  const t = useT();
   const camadas = useGuardrailLayers();
   const gravar = useSetGuardrailLayer();
 
   const porNome = new Map((camadas.data?.camadas ?? []).map((c) => [c.layer as string, c]));
   const podeEditar = camadas.data?.podeEditar ?? false;
-  const props = (camada: string | null) => ({
+  // `camada` — a chave de `org_guardrail_layers` — e NÃO `nome`, que é o
+  // identificador de tela. O interruptor mandava `c.nome` ("jailbreak_detect"),
+  // a rota valida contra o enum de camadas ("jailbreak"), e ligar qualquer uma
+  // das duas devolvia 422 em toda instalação. O `as` de antes escondia isso do
+  // typecheck; sem ele, trocar de campo vira erro de compilação.
+  const props = (camada: ConferenciaDeSaida["camada"]) => ({
     estado: camada === null ? undefined : porNome.get(camada),
     podeEditar,
     salvando: gravar.isPending,
-    onToggle: (layer: string, v: boolean) =>
-      gravar.mutate({ layer: layer as CamadaDeSeguranca["layer"], enabled: v }),
+    onToggle: (v: boolean) => {
+      if (camada !== null) gravar.mutate({ layer: camada, enabled: v });
+    },
   });
 
   return (
     <div className="space-y-4" data-testid="painel-de-seguranca">
       <Card className="space-y-2 p-4">
-        <h3 className="text-sm font-medium">Antes de cada mensagem sair</h3>
+        <h3 className="text-sm font-medium">{t("Antes de cada mensagem sair")}</h3>
         <p className="text-xs text-muted-foreground">
-          O assistente escreve, e o sistema confere. São {CONFERENCIAS_DE_SAIDA.length} verificações,
-          nesta ordem — a primeira que barra interrompe as seguintes, e o assistente recebe de volta
-          o motivo para reescrever.
+          {t("O assistente escreve, e o sistema confere. São")} {CONFERENCIAS_DE_SAIDA.length}{" "}
+          {t(
+            "verificações, nesta ordem — a primeira que barra interrompe as seguintes, e o assistente recebe de volta o motivo para reescrever.",
+          )}
         </p>
         <ul className="divide-y">
           {CONFERENCIAS_DE_SAIDA.map((c, i) => (
@@ -151,9 +163,9 @@ export function PainelDeSeguranca() {
       </Card>
 
       <Card className="space-y-2 p-4">
-        <h3 className="text-sm font-medium">Antes de o assistente ler</h3>
+        <h3 className="text-sm font-medium">{t("Antes de o assistente ler")}</h3>
         <p className="text-xs text-muted-foreground">
-          Esta roda sobre a mensagem que chega, antes das outras — por isso aparece separada.
+          {t("Esta roda sobre a mensagem que chega, antes das outras — por isso aparece separada.")}
         </p>
         <ul className="divide-y">
           <Conferencia c={CONFERENCIA_DE_ENTRADA} ordem={null} {...props(CONFERENCIA_DE_ENTRADA.camada)} />

@@ -1,3 +1,4 @@
+import { requireSupportWrite } from "@/lib/impersonate/support";
 /**
  * POST /api/v1/conversations/[id]/transfer — reatribui a conversa a outro
  * atendente. Decisão G1-06d (spec 13 §5): transferência é IMEDIATA, sem etapa
@@ -12,6 +13,7 @@ import { randomUUID } from "node:crypto";
 import { type NextRequest } from "next/server";
 
 import { audit, isServiceRoleConfigured } from "@/lib/audit";
+import { registrarTrocaDeComando } from "@/lib/inbox/atividade-de-comando";
 import { ApiError } from "@/lib/api/types";
 import { ok, fail } from "@/lib/api/wrappers";
 import { requireRole } from "@/lib/auth/require-role";
@@ -19,6 +21,7 @@ import { transferConversationSchema, validateRequest } from "@/lib/schemas";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Conversation } from "@/lib/types/messaging";
+import { traduzir } from "@/lib/i18n/dicionario";
 
 export const dynamic = "force-dynamic";
 
@@ -27,6 +30,9 @@ interface RouteCtx {
 }
 
 export async function POST(req: NextRequest, ctx: RouteCtx): Promise<Response> {
+  const supportDenied = await requireSupportWrite();
+  if (supportDenied) return supportDenied;
+
   const requestId = randomUUID();
   const { id } = await ctx.params;
   const supabase = await createClient();
@@ -34,6 +40,7 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<Response> {
   // spec 13 §4: escrita é agent+ (viewer é read-only).
   const authz = await requireRole("agent", { requestId, resource: "conversations" });
   if (!authz.ok) return authz.response;
+  const t = (texto: string) => traduzir(texto, authz.user.idioma);
   const user = authz.user;
   const orgId = authz.org.orgId; // fonte confiável (cookie validado), nunca o body
 
@@ -66,7 +73,7 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<Response> {
       return fail("internal_error", memberErr.message, 500, { requestId });
     }
     if (!member || member.role === "viewer") {
-      return fail("unprocessable_entity", "Destino não é um atendente desta organização.", 422, {
+      return fail("unprocessable_entity", t("Destino não é um atendente desta organização."), 422, {
         requestId,
       });
     }
@@ -86,7 +93,7 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<Response> {
   }
   const row = data?.[0];
   if (!row) {
-    return fail("not_found", "Conversa não encontrada.", 404, { requestId });
+    return fail("not_found", t("Conversa não encontrada."), 404, { requestId });
   }
 
   const conv = row as unknown as Conversation;
@@ -117,6 +124,26 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<Response> {
     .then(({ error: emitErr }) => {
       if (emitErr) console.error("[conversation.transfer] emit_event failed", emitErr.message);
     });
+
+  // O motivo que a pessoa escreveu ao transferir chega à TELA por aqui. Antes ele
+  // ia só para `metadata` do audit log, cuja policy exige `admin` — ou seja,
+  // sumia justamente para quem vai continuar o atendimento. O `reason` da
+  // atividade é coberto pela cascata de anonimização da LGPD, que é o que
+  // permite texto escrito por humano sobre um cliente morar ali.
+  await registrarTrocaDeComando({
+    supabase,
+    organizationId: conv.organization_id,
+    conversationId: conv.id,
+    contactId: conv.contact_id,
+    tipo: "conversation_transferred",
+    actor: { type: "user", id: user.id, role: authz.org.role },
+    // Canônico em português: quem traduz é a LEITURA (`t(item.reason)`). Ver o
+    // bloco "vocabulario de dominio persistido" em `lib/i18n/dicionario.ts`.
+    motivo: input.reason?.trim()
+      ? `Transferiu a conversa: ${input.reason.trim()}`
+      : "Transferiu a conversa para outro atendente",
+    payload: { to_user_id: input.to_user_id },
+  });
 
   return ok(conv, { requestId });
 }

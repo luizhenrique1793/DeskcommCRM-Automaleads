@@ -7,16 +7,43 @@
 import { redirect } from "next/navigation";
 import { z } from "zod";
 
+import { publishFirstVersion } from "@/lib/ai/agents/first-publication";
 import { audit } from "@/lib/audit";
-import { listSelectableChannels, type SelectableChannel } from "@/lib/channels/selectable";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { aiAgentDefaultSchema, type PromptTemplate } from "@/lib/schemas/onboarding";
-import { requireOnboardingCtx, patchOnboardingState, OnboardingError } from "./_shared";
+import { publicarMemoriaDaOrg } from "@/lib/ai/memoria-da-org";
+import {
+  requireOnboardingCtx,
+  patchOnboardingState,
+  loadOnboardingState,
+  OnboardingError,
+} from "./_shared";
 
-const PROMPT_BODIES: Record<PromptTemplate, string> = {
-  ecommerce_friendly: `Você é um(a) atendente virtual amigável de uma loja online. Cumprimente, entenda a dúvida do cliente, ofereça opções claras e use linguagem calorosa. Confirme detalhes do pedido antes de agir.`,
-  ecommerce_professional: `Você é um(a) atendente virtual profissional de e-commerce. Comunicação objetiva, formal e empática. Sempre cite o número do pedido quando relevante e ofereça próximos passos práticos.`,
-  support_minimal: `Você é um(a) agente de suporte minimalista. Responda em frases curtas, peça apenas o necessário e direcione para um humano quando a confiança for baixa.`,
+/**
+ * O jeito de falar do funcionário.
+ *
+ * Os corpos diziam "loja online" e "e-commerce" em dois dos três — num produto
+ * que se declara multi-nicho por escrito, e cuja maioria de adopters roda em
+ * clínica, imobiliária e infoproduto. Uma clínica terminava o onboarding com um
+ * atendente que se apresentava como sendo de uma loja virtual.
+ *
+ * Recebem o nome do negócio E o ramo: um funcionário que sabe onde trabalha é o
+ * mínimo que se espera de alguém contratado, e saber o QUE o lugar faz é a
+ * diferença entre "Olá, como posso ajudar?" e uma primeira frase que já mostra
+ * que ele entendeu onde está. O ramo é o que o dono respondeu no primeiro passo;
+ * quem não respondeu recebe a versão sem ele, e não uma inventada.
+ */
+function ondeTrabalha(negocio: string, oQueFaz: string | undefined): string {
+  return oQueFaz ? `${negocio}, que é: ${oQueFaz}` : negocio;
+}
+
+const PROMPT_BODIES: Record<PromptTemplate, (onde: string) => string> = {
+  ecommerce_friendly: (n) =>
+    `Você atende os clientes de ${n}. Fale de forma calorosa e próxima, como alguém que gosta de ajudar. Cumprimente, entenda o que a pessoa precisa e ofereça opções claras. Confirme os detalhes antes de agir.`,
+  ecommerce_professional: (n) =>
+    `Você atende os clientes de ${n}. Fale de forma objetiva, cordial e profissional. Vá direto ao ponto, sem parecer frio, e sempre termine indicando o próximo passo.`,
+  support_minimal: (n) =>
+    `Você atende os clientes de ${n}. Responda em frases curtas, peça apenas o que for necessário e chame uma pessoa do time assim que a dúvida sair do seu alcance.`,
 };
 
 /** O agente padrão desta organização, do jeito que este passo precisa vê-lo. */
@@ -36,117 +63,6 @@ interface AgenteDoOnboarding {
  * Colapsar os dois no mesmo `return` seria engolir erro — e engolir erro aqui
  * significa terminar o onboarding com um agente mudo sem ninguém saber por quê.
  */
-type PublishOutcome =
-  | { published: true }
-  | { published: false; reason: "no_channel" }
-  | { published: false; reason: "failed"; message: string };
-
-function mensagemDoErro(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
-
-/**
- * Publica a 1ª versão do agente criado no onboarding. **Nunca lança**: devolve
- * o desfecho para quem chama decidir o que a tela mostra.
- *
- * Sem isso, o passo "Configurar IA" gravava só a linha em `ai_agents` — formato
- * do `rag_bot` legado. Só que os dois runtimes atuais (o dispatcher do CRM e o
- * agent-engine) resolvem o agente por
- * `join ai_agent_versions on v.id = a.published_version_id`, então um agente
- * sem versão publicada é invisível para ambos: a pessoa terminava o onboarding
- * com um "Atendente IA" que nunca responderia uma única mensagem.
- */
-async function publishFirstVersion(
-  admin: ReturnType<typeof createAdminClient>,
-  orgId: string,
-  agent: AgenteDoOnboarding,
-  systemPrompt: string,
-  userId: string,
-): Promise<PublishOutcome> {
-  // Já publicado numa passagem anterior: republicar colidiria com
-  // `ai_agent_versions_unique_number` sem ganhar nada.
-  if (agent.published_version_id) return { published: true };
-
-  // Mesma lista que os seletores das telas de IA: canal arquivado não é destino
-  // válido de agente, e publicar uma versão apontando para um deixaria o
-  // onboarding terminar com um agente que nunca receberia uma mensagem.
-  //
-  // Ela LANÇA em erro de banco, e isso é correto lá: um seletor que devolve
-  // lista vazia quando a consulta falhou é indistinguível de "esta organização
-  // não tem número", e convida a parear de novo um aparelho que já está no ar.
-  // Aqui não é um seletor — é a decisão "publica ou fica rascunho", tomada
-  // DEPOIS de a linha em `ai_agents` já existir. Deixar o throw subir furava o
-  // `CreateAgentResult` (que trata todos os outros pontos de falha) e o passo
-  // terminava sem gravar estado, sem audit, sem evento e sem dizer nada na tela.
-  let canais: SelectableChannel[];
-  try {
-    canais = await listSelectableChannels(admin, orgId);
-  } catch (err) {
-    return { published: false, reason: "failed", message: mensagemDoErro(err) };
-  }
-  const [canal] = canais;
-  if (!canal) return { published: false, reason: "no_channel" };
-
-  const { data: model } = await admin
-    .from("ai_models")
-    .select("model_id")
-    .eq("provider", "anthropic")
-    .eq("is_default_for_provider", true)
-    .limit(1)
-    .maybeSingle();
-
-  const { data: version, error: versionErr } = await admin
-    .from("ai_agent_versions")
-    .insert({
-      organization_id: orgId,
-      agent_id: agent.id,
-      version_number: 1,
-      system_prompt: systemPrompt,
-      provider: "anthropic",
-      // Fallback do modelo vem da main (catálogo do 0104); o canal vem daqui
-      // (listagem que exclui arquivado). O hunk pedia as DUAS metades: ficar com
-      // um lado só perderia o modelo atual ou o filtro de canal excluído.
-      model: (model?.model_id as string) ?? "claude-sonnet-5",
-      channel_session_id: canal.id,
-      status: "published",
-      published_at: new Date().toISOString(),
-      created_by: userId,
-    })
-    .select("id")
-    .single();
-
-  let versionId = version?.id ?? null;
-  if (!versionId && versionErr?.code === "23505") {
-    // A v1 já existe: uma passagem anterior gravou a versão e caiu antes de
-    // apontar o agente para ela. Repetir o passo passou a ser o que o usuário
-    // faz quando a tela pede — então ele não pode bater em "duplicate key"
-    // para sempre. Repontar é o conserto, não um novo INSERT.
-    const { data: existente } = await admin
-      .from("ai_agent_versions")
-      .select("id")
-      .eq("organization_id", orgId)
-      .eq("agent_id", agent.id)
-      .eq("version_number", 1)
-      .maybeSingle();
-    versionId = existente?.id ?? null;
-  }
-  if (!versionId) {
-    return {
-      published: false,
-      reason: "failed",
-      message: versionErr?.message ?? "ai_agent_versions_insert_sem_id",
-    };
-  }
-
-  const { error: pointErr } = await admin
-    .from("ai_agents")
-    .update({ published_version_id: versionId })
-    .eq("id", agent.id)
-    .eq("organization_id", orgId);
-  if (pointErr) return { published: false, reason: "failed", message: pointErr.message };
-
-  return { published: true };
-}
 
 export type CreateAgentResult =
   /**
@@ -158,8 +74,28 @@ export type CreateAgentResult =
    * a parte que podia falhar falhou (`sendOnboardingInvites` → `undelivered`):
    * avançar calado seria a UI mentindo sobre o que o servidor conseguiu fazer.
    */
-  | { ok: true; agent_id: string; publish_error?: string }
-  | { ok: false; error: "auth_required" | "no_active_org" | "invalid_input" | "db_error"; details?: unknown };
+  /**
+   * `publish_blocked_by` diz à tela QUAL causa explicar. Sem ele, o alerta
+   * afirmava sempre a causa do canal ("não consegui ler os números de
+   * WhatsApp") — e afirmar a causa errada é pior que não afirmar nenhuma:
+   * manda a pessoa consertar o que não está quebrado.
+   */
+  | {
+      ok: true;
+      agent_id: string;
+      publish_error?: string;
+      publish_blocked_by?: "canal" | "modelo" | "chave";
+      provider?: string;
+      /** Catálogo vazio e catálogo sem modelo que sirva pedem conselhos opostos. */
+      motivo_do_modelo?: "catalogo_vazio" | "nenhum_com_ferramentas";
+      /** As regras da casa não foram gravadas — o agente existe assim mesmo. */
+      regras_nao_salvas?: string;
+    }
+  | {
+      ok: false;
+      error: "auth_required" | "no_active_org" | "invalid_input" | "db_error";
+      details?: unknown;
+    };
 
 export async function createDefaultAgent(formData: FormData): Promise<CreateAgentResult> {
   let ctx;
@@ -173,6 +109,7 @@ export async function createDefaultAgent(formData: FormData): Promise<CreateAgen
   const raw = {
     name: String(formData.get("name") ?? "Atendente IA").trim(),
     prompt_template: String(formData.get("prompt_template") ?? "ecommerce_friendly"),
+    regras_da_casa: String(formData.get("regras_da_casa") ?? "").trim() || undefined,
   };
 
   let input;
@@ -186,7 +123,19 @@ export async function createDefaultAgent(formData: FormData): Promise<CreateAgen
   }
 
   const admin = createAdminClient();
-  const systemPrompt = PROMPT_BODIES[input.prompt_template];
+
+  // O ramo que o dono escreveu no primeiro passo. Falha de leitura NÃO derruba o
+  // passo: o funcionário nasce sem essa frase, que é degradação honesta — o
+  // contrário seria travar a contratação por causa de um adjetivo.
+  let oQueFaz: string | undefined;
+  try {
+    const { state } = await loadOnboardingState(ctx.orgId);
+    oQueFaz = state.welcome?.o_que_faz;
+  } catch {
+    oQueFaz = undefined;
+  }
+
+  const systemPrompt = PROMPT_BODIES[input.prompt_template](ondeTrabalha(ctx.orgName, oQueFaz));
 
   // O agente padrão do onboarding é UM por organização, e o banco já garante
   // isso: `ai_agents_one_default_per_org` é índice único parcial em
@@ -220,6 +169,21 @@ export async function createDefaultAgent(formData: FormData): Promise<CreateAgen
         organization_id: ctx.orgId,
         name: input.name,
         system_prompt: systemPrompt,
+        // `mcp_agent`, e não o `rag_bot` que o banco tem como padrão.
+        //
+        // O default do banco é de quando o produto só tinha o formato antigo, e o
+        // onboarding nunca escrevia este campo. O resultado: o funcionário que a
+        // pessoa acabava de montar abria no EDITOR LEGADO — "Temperature",
+        // "Top K", "Similarity threshold" — e as capacidades que ele recebeu
+        // ligadas (mexer no contato, no negócio, no funil) ficavam invisíveis
+        // para o dono. Funcionavam no runtime e não tinham superfície de
+        // configuração, que é o invariante 6 do Sistema Vivo quebrado.
+        //
+        // O que travava a virada era o editor novo exigir `credential_id`, e
+        // instalação pelo kit não ter nenhuma linha em `ai_provider_credentials`.
+        // Isso foi resolvido: a versão aceita `credential_id: null` (= a chave da
+        // instalação) e o seletor oferece essa opção.
+        kind: "mcp_agent",
         is_default: true,
         is_active: true,
         created_by: ctx.userId,
@@ -233,6 +197,19 @@ export async function createDefaultAgent(formData: FormData): Promise<CreateAgen
     agent = data;
   }
 
+  // As regras da casa valem para QUALQUER agente da organização, então vão para
+  // a memória da org — o mesmo lugar que a tela de Memória edita depois — e não
+  // para o prompt deste agente. Enfiá-las no prompt faria a segunda contratação
+  // nascer sem elas.
+  //
+  // Falha aqui NÃO derruba o passo: o agente já existe e o treinamento
+  // principal aconteceu. Some do caminho crítico e vira aviso.
+  let regrasNaoSalvas: string | null = null;
+  if (input.regras_da_casa) {
+    const pub = await publicarMemoriaDaOrg(admin, ctx.orgId, ctx.userId, input.regras_da_casa);
+    if (!pub.ok) regrasNaoSalvas = pub.mensagem;
+  }
+
   const publicacao = await publishFirstVersion(admin, ctx.orgId, agent, systemPrompt, ctx.userId);
 
   // Estado, audit e evento saem em QUALQUER desfecho da publicação: o agente
@@ -244,7 +221,8 @@ export async function createDefaultAgent(formData: FormData): Promise<CreateAgen
       ai: { agent_id: agent.id, prompt_template: input.prompt_template },
     });
   } catch (err) {
-    if (err instanceof OnboardingError) return { ok: false, error: "db_error", details: err.message };
+    if (err instanceof OnboardingError)
+      return { ok: false, error: "db_error", details: err.message };
     throw err;
   }
 
@@ -266,6 +244,8 @@ export async function createDefaultAgent(formData: FormData): Promise<CreateAgen
   await admin.from("event_log").insert({
     organization_id: ctx.orgId,
     event_type: "ai_agent.created",
+    // NOT NULL sem default — ver `tests/unit/evento-de-publicacao-tem-dono.test.ts`.
+    entity_kind: "ai_agent",
     payload: { agent_id: agent.id, source: "onboarding", published: publicacao.published },
   });
 
@@ -274,10 +254,50 @@ export async function createDefaultAgent(formData: FormData): Promise<CreateAgen
   // redirect aqui deixaria como única pista um badge "Rascunho" numa tela que a
   // pessoa ainda não viu.
   if (!publicacao.published && publicacao.reason === "failed") {
-    return { ok: true, agent_id: agent.id, publish_error: publicacao.message };
+    return {
+      ok: true,
+      agent_id: agent.id,
+      publish_error: publicacao.message,
+      publish_blocked_by: "canal",
+      ...(regrasNaoSalvas ? { regras_nao_salvas: regrasNaoSalvas } : {}),
+    };
   }
 
-  redirect("/onboarding/invite-team");
+  // Mesma postura, outra causa: o provedor escolhido na instalação ainda não
+  // tem modelo no catálogo desta instalação (o da OpenRouter só chega no cron
+  // diário). Avançar calado deixaria a pessoa achar que o funcionário está no
+  // ar — e ele não responde uma única mensagem.
+  // Sem chave utilizável: o agente fica rascunho e a tela explica. Avançar
+  // calado deixaria a pessoa achar que o funcionário está no ar.
+  if (!publicacao.published && publicacao.reason === "sem_chave") {
+    return {
+      ok: true,
+      agent_id: agent.id,
+      publish_blocked_by: "chave",
+      provider: publicacao.provider,
+      ...(regrasNaoSalvas ? { regras_nao_salvas: regrasNaoSalvas } : {}),
+    };
+  }
+
+  if (!publicacao.published && publicacao.reason === "no_model") {
+    return {
+      ok: true,
+      agent_id: agent.id,
+      publish_blocked_by: "modelo",
+      provider: publicacao.provider,
+      motivo_do_modelo: publicacao.motivo,
+      ...(regrasNaoSalvas ? { regras_nao_salvas: regrasNaoSalvas } : {}),
+    };
+  }
+
+  // Publicou o agente, mas as regras da casa não foram gravadas. O passo
+  // aconteceu; o que a pessoa escreveu, não. Redirecionar calado apagaria da
+  // tela o único lugar onde esse texto existia.
+  if (regrasNaoSalvas) {
+    return { ok: true, agent_id: agent.id, regras_nao_salvas: regrasNaoSalvas };
+  }
+
+  redirect("/onboarding");
 }
 
 export async function skipAi(): Promise<void> {
@@ -285,5 +305,5 @@ export async function skipAi(): Promise<void> {
   await patchOnboardingState(ctx.orgId, {
     ai: { agent_id: "", prompt_template: "skipped", skipped: true },
   });
-  redirect("/onboarding/invite-team");
+  redirect("/onboarding");
 }

@@ -81,6 +81,28 @@ describe("contactCreateSchema", () => {
     const r = contactCreateSchema.safeParse({ birthdate: "01/01/1990" });
     expect(r.success).toBe(false);
   });
+
+  it("aceita campos personalizados como objeto JSON", () => {
+    const r = contactCreateSchema.safeParse({
+      custom_fields: { segmento: "vip", score: 10, consentiu: true },
+    });
+    expect(r.success).toBe(true);
+  });
+
+  it("recusa campos personalizados acima de 32 KB", () => {
+    // O CHECK do banco só garante que é OBJETO. Sem teto de tamanho, um cliente
+    // da API escreveria megabytes numa coluna que a listagem de contatos traz
+    // inteira — e o custo apareceria como "a tela ficou lenta", longe da causa.
+    const r = contactCreateSchema.safeParse({
+      custom_fields: { observacao: "x".repeat(33_000) },
+    });
+    expect(r.success).toBe(false);
+  });
+
+  it("recusa chave vazia em campos personalizados", () => {
+    const r = contactCreateSchema.safeParse({ custom_fields: { "": "valor" } });
+    expect(r.success).toBe(false);
+  });
 });
 
 describe("contactPatchSchema", () => {
@@ -106,6 +128,18 @@ describe("contactListQuerySchema", () => {
   it("rejects limit > 100", () => {
     const r = contactListQuerySchema.safeParse({ limit: "500" });
     expect(r.success).toBe(false);
+  });
+
+  it("defaults order_by and order_dir", () => {
+    const r = contactListQuerySchema.parse({});
+    expect(r.order_by).toBe("last_activity_at");
+    expect(r.order_dir).toBe("desc");
+  });
+
+  it("accepts valid order_by", () => {
+    const r = contactListQuerySchema.parse({ order_by: "display_name", order_dir: "asc" });
+    expect(r.order_by).toBe("display_name");
+    expect(r.order_dir).toBe("asc");
   });
 });
 

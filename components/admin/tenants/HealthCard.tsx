@@ -2,6 +2,7 @@
 
 import type { ReactNode } from "react";
 import type { HealthStatus } from "@/app/api/v1/admin/tenants/[id]/health/route";
+import { useT } from "@/hooks/i18n/useT";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -61,6 +62,7 @@ export function HealthCard({
   details,
   lastUpdated,
 }: HealthCardProps) {
+  const t = useT();
   const isCritical = status === "critical";
 
   return (
@@ -73,7 +75,7 @@ export function HealthCard({
       {/* Header row */}
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2 text-muted-foreground">
-          <span className="w-5 h-5 flex-shrink-0" aria-hidden>
+          <span className="w-5 h-5 shrink-0" aria-hidden>
             {icon}
           </span>
           <span className="text-xs font-semibold uppercase tracking-wider leading-none">
@@ -105,7 +107,7 @@ export function HealthCard({
               STATUS_BADGE_BG[status],
             ].join(" ")}
           >
-            {STATUS_LABEL[status]}
+            {t(STATUS_LABEL[status])}
           </span>
         </div>
       </div>
@@ -134,7 +136,7 @@ export function HealthCard({
 
       {/* Last updated */}
       {lastUpdated && (
-        <p className="text-[11px] text-muted-foreground/60 mt-auto">
+        <p className="text-[11px] text-muted-foreground mt-auto">
           {lastUpdated}
         </p>
       )}

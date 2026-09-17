@@ -7,18 +7,21 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
-import { ArrowRight } from "@/lib/ui/icons";
+import { ArrowRight, Trash } from "@/lib/ui/icons";
 import { conditionKey } from "@/lib/followup/edge-condition-options";
 import { branchIdForCondition, nodeBranches } from "@/lib/followup/graph-schema";
 import type { FlowEdge, FlowNode } from "@/lib/followup/graph-schema";
 import { rotuloDoRamo } from "@/lib/followup/rotulo-do-ramo";
+import { useT } from "@/hooks/i18n/useT";
 
 interface Props {
   sourceNode: FlowNode | undefined;
   targetNode: FlowNode | undefined;
   condition: FlowEdge["condition"];
   onChange: (condition: FlowEdge["condition"]) => void;
+  onDelete: () => void;
 }
 
 /**
@@ -31,12 +34,13 @@ interface Props {
  * Um controle que a tela oferece e o motor ignora é pior que um ausente — o
  * ausente o usuário contorna, o decorativo ele acredita.
  */
-export function EdgeConfigPanel({ sourceNode, targetNode, condition, onChange }: Props) {
+export function EdgeConfigPanel({ sourceNode, targetNode, condition, onChange, onDelete }: Props) {
+  const t = useT();
   const options = nodeBranches(
     sourceNode ?? { type: "trigger", config: {} },
   ).map((branch) => ({
     key: conditionKey(branch.condition),
-    label: rotuloDoRamo(branch),
+    label: t(rotuloDoRamo(branch)),
     condition: branch.condition,
   }));
   // Aresta apontando para um ramo que não existe mais (a regra foi apagada):
@@ -48,7 +52,7 @@ export function EdgeConfigPanel({ sourceNode, targetNode, condition, onChange }:
   return (
     <div className="flex h-full flex-col gap-5 overflow-y-auto" data-testid="edge-config-panel">
       <div className="space-y-1">
-        <h2 className="text-base font-semibold text-text">Condição da aresta</h2>
+        <h2 className="text-base font-semibold text-text">{t("Condição da aresta")}</h2>
         <p className="flex items-center gap-1.5 text-sm text-text-muted">
           <span className="truncate">{sourceNode?.label ?? "?"}</span>
           <ArrowRight size={12} aria-hidden className="shrink-0" />
@@ -57,7 +61,7 @@ export function EdgeConfigPanel({ sourceNode, targetNode, condition, onChange }:
       </div>
 
       <div className="space-y-2 border-t border-border pt-4">
-        <Label htmlFor="edge-condition">Quando seguir por esta aresta</Label>
+        <Label htmlFor="edge-condition">{t("Quando seguir por esta aresta")}</Label>
         <Select
           value={currentKey}
           onValueChange={(v) => {
@@ -78,9 +82,23 @@ export function EdgeConfigPanel({ sourceNode, targetNode, condition, onChange }:
         </Select>
         {sourceNode && nodeBranches(sourceNode).length > 1 && (
           <p className="text-xs text-text-muted">
-            São as saídas do nó &quot;{sourceNode.label}&quot; — as mesmas que aparecem no card.
+            {t("São as saídas do nó")} &quot;{sourceNode.label}&quot; — {t("as mesmas que aparecem no card.")}
           </p>
         )}
+      </div>
+
+      <div className="mt-auto border-t border-border pt-4">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="w-full text-destructive"
+          data-testid="delete-edge"
+          onClick={onDelete}
+        >
+          <Trash size={14} aria-hidden className="mr-1" />
+          {t("Excluir aresta")}
+        </Button>
       </div>
     </div>
   );

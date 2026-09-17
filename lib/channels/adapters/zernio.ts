@@ -41,7 +41,13 @@ import { zernioTemplateOps } from "../zernio/templates";
 import { assertDestinoResolvidoSeguro } from "@/lib/automation/outbound-ip";
 import { assertSafeOutboundUrl } from "@/lib/automation/outbound-url";
 import { zernioMediaFetchInit } from "../zernio/webhook";
-import type { ChannelAdapter, ChannelHealth, OutboundEnvelope, RecipientInput } from "../types";
+import type {
+  ChannelAdapter,
+  ChannelHealth,
+  ChannelTenantScope,
+  OutboundEnvelope,
+  RecipientInput,
+} from "../types";
 
 /** Só dígitos. `+595 (99) 173-3685` → `595991733685`. */
 function toE164Digits(raw: string): string {
@@ -156,8 +162,14 @@ export const zernioAdapter: ChannelAdapter = {
   },
 
   async send(envelope: OutboundEnvelope): Promise<{ externalId: string | null }> {
+    if (envelope.kind === "contact") {
+      throw new Error("zernio_contact_not_supported: envio de cartão de contato não suportado neste canal.");
+    }
     const admin = createAdminClient();
-    const creds = await resolveZernioCreds(admin, envelope.sessionRef);
+    const creds = await resolveZernioCreds(admin, {
+      organizationId: envelope.organizationId,
+      accountId: envelope.sessionRef,
+    });
     // LANÇA, não devolve null: com `isConfigured` sempre true, quem desiste é
     // este ponto — e `{externalId: null}` faria o handler gravar `sent` sem id,
     // dizendo "enviado" para algo que nunca saiu.
@@ -184,8 +196,14 @@ export const zernioAdapter: ChannelAdapter = {
     const body: Record<string, unknown> = {
       accountId: creds.accountId,
       ...(envelope.media ? attachmentFields(envelope) : { message: envelope.body ?? "" }),
+      // ─── A CITAÇÃO ──────────────────────────────────────────────────────
+      // `replyTo` recebe o id que a PLATAFORMA conhece — para WhatsApp, o
+      // `wamid`. É o `external_id` da linha citada, nunca o `id` da nossa
+      // tabela: o provider nunca viu o nosso. Só entra quando existe.
+      ...(envelope.replyToExternalId ? { replyTo: envelope.replyToExternalId } : {}),
     };
 
+    await envelope.beforeSend?.();
     const res = await fetch(url, {
       method: "POST",
       headers: {
@@ -229,7 +247,8 @@ export const zernioAdapter: ChannelAdapter = {
    * que a plataforma numera os valores, e mandar um mapa faria o segundo
    * parâmetro virar o primeiro na hora em que alguém renomeasse uma chave.
    */
-  async sendTemplate(input: {
+  async sendTemplate(input: ChannelTenantScope & {
+    beforeSend?: () => Promise<void>;
     sessionRef: string;
     to: string;
     name: string;
@@ -237,7 +256,10 @@ export const zernioAdapter: ChannelAdapter = {
     values: Record<string, string>;
   }): Promise<{ externalId: string | null }> {
     const admin = createAdminClient();
-    const creds = await resolveZernioCreds(admin, input.sessionRef);
+    const creds = await resolveZernioCreds(admin, {
+      organizationId: input.organizationId,
+      accountId: input.sessionRef,
+    });
     if (!creds) {
       throw new Error(
         "zernio_not_configured: nenhuma credencial para esta conta (nem na sessão, nem no ambiente).",
@@ -252,6 +274,7 @@ export const zernioAdapter: ChannelAdapter = {
       .sort((a, b) => Number(a) - Number(b))
       .map((k) => input.values[k] ?? "");
 
+    await input.beforeSend?.();
     const res = await fetch(`${creds.baseUrl}/v1/inbox/conversations`, {
       method: "POST",
       headers: {
@@ -291,13 +314,16 @@ export const zernioAdapter: ChannelAdapter = {
    * que o canal entrou — e ficou sem um único chamador de produção, que é
    * exatamente por que a mídia recebida aqui nunca virou bytes.
    */
-  async fetchInboundMedia(input: {
+  async fetchInboundMedia(input: ChannelTenantScope & {
     sessionRef: string;
     url: string;
     hintMime?: string | null;
   }): Promise<FetchedMedia> {
     const admin = createAdminClient();
-    const creds = await resolveZernioCreds(admin, input.sessionRef);
+    const creds = await resolveZernioCreds(admin, {
+      organizationId: input.organizationId,
+      accountId: input.sessionRef,
+    });
     if (!creds) throw new Error("zernio_not_configured: sem credencial para baixar a mídia.");
 
     // A URL do anexo vem do PAYLOAD do webhook, e este fetch leva a API key do
@@ -343,35 +369,71 @@ export const zernioAdapter: ChannelAdapter = {
    * (`account.disconnected`, `number.suspended`); cego mesmo ele era para a
    * falha CALADA, que é justamente a que ninguém percebe.
    *
-   * Reusa a MESMA chamada da validação de credencial (`GET /v1/accounts`), com
-   * o mesmo casamento de conta (`_id ?? id`) — medido contra a API, não lido da
-   * doc: o endpoint por id aceita só `PUT` e responde 405 ao GET.
+   * ─── Perguntar pela CONTA não responde pela LINHA ──────────────────────────
    *
-   * ─── Os quatro desfechos, e por que a diferença importa ────────────────────
+   * A primeira versão varria `GET /v1/accounts` e dava WORKING quando a conta
+   * aparecia na lista. Isso responde "a chave presta e a conta existe" — e a
+   * pergunta do cron é outra: "dá para enviar por este número AGORA?". As duas
+   * divergem no caso que mais importa, e a própria doc do provedor o nomeia:
+   * *"The OAuth token can be perfectly valid while Meta refuses to serve the
+   * phone-number object (for example after a phone-side coexistence
+   * disconnect), so `tokenStatus` alone is not a liveness signal for
+   * WhatsApp."* Alguém desliga o aparelho do lado de lá, a conta segue na
+   * lista, e o CRM diz "conectado" para um número que não entrega mais nada.
    *
-   *   401/403      → a chave foi recusada. É FAILED: a credencial existe e não
-   *                  vale mais, que é exatamente a falha calada que se procura.
-   *   conta ausente→ a chave presta mas não alcança mais esta conta. STOPPED:
-   *                  a sessão não existe mais do lado de lá.
-   *   respondeu ok → WORKING.
-   *   qualquer erro→ NÃO sabemos. `reachable: false`, sem status. Inventar um
-   *                  faria uma oscilação de rede virar "canal caído", e o
-   *                  operador aprenderia a ignorar o aviso — que é pior que não
-   *                  ter aviso nenhum.
+   * `GET /v1/accounts/{id}/health` sonda o elo com a Meta na hora do pedido
+   * (`checkedAt` é sempre o agora, nunca cache). MEDIDO contra a API desta
+   * instalação, não lido da doc — que é a regra que o comentário anterior já
+   * seguia, e o motivo de ele registrar que o endpoint por id respondia 405 ao
+   * GET quando foi escrito. Hoje responde 200:
+   *
+   *   status: "healthy"
+   *   platformConnection: {"status":"connected","phoneStatus":"CONNECTED","metaError":null}
+   *
+   * ─── Os desfechos, e por que `unknown` não vira queda ──────────────────────
+   *
+   *   401/403        → a chave foi recusada. FAILED: a credencial existe e não
+   *                    vale mais — a falha calada que se procura.
+   *   404            → a conta sumiu do lado de lá. STOPPED. (O caminho existe:
+   *                    foi medido respondendo 200, então 404 aqui é sobre a
+   *                    CONTA, não sobre a rota.)
+   *   `disconnected` → a Meta recusou servir o objeto do número (Graph 100/33).
+   *                    FAILED, com o código dela no detalhe: é o que distingue
+   *                    "desligaram o aparelho" de "a chave venceu", e sem isso
+   *                    o operador lê "falhou" e não sabe o que fazer.
+   *   `unknown`      → a sonda não concluiu (timeout, erro transitório da Meta).
+   *                    A doc é explícita: *"not evidence either way"*. Então
+   *                    `reachable: false` e status NENHUM — o mesmo tratamento
+   *                    de uma oscilação de rede, que `julgarQueda` já absorve
+   *                    exigindo DUAS observações ruins seguidas. Traduzir
+   *                    "não sei" para "caiu" faria um soluço da Meta abrir aviso
+   *                    crítico, e aviso que grita à toa ensina a ignorar aviso.
+   *   sem o campo    → conta que não é WhatsApp, ou provedor que ainda não
+   *                    publicou a sonda. Cai no `status` geral em vez de falhar:
+   *                    campo ausente é ausência de informação, não más notícias.
+   *   qualquer outro → NÃO sabemos. `reachable: false`, sem status.
    */
-  async checkHealth(input: { sessionRef: string }): Promise<ChannelHealth> {
+  async checkHealth(
+    input: ChannelTenantScope & { sessionRef: string },
+  ): Promise<ChannelHealth> {
     const admin = createAdminClient();
-    const creds = await resolveZernioCreds(admin, input.sessionRef);
+    const creds = await resolveZernioCreds(admin, {
+      organizationId: input.organizationId,
+      accountId: input.sessionRef,
+    });
     if (!creds) return { reachable: false, status: null, detail: "sem_credencial_para_a_sessao" };
 
     let res: Response;
     try {
       // Teto de espera: sem ele, um provedor que pendura a conexão pendura o
       // cron junto, e a varredura de saúde deixa de rodar para TODAS as sessões.
-      res = await fetch(`${creds.baseUrl}/v1/accounts`, {
-        headers: { Authorization: `Bearer ${creds.apiKey}` },
-        signal: AbortSignal.timeout(15_000),
-      });
+      res = await fetch(
+        `${creds.baseUrl}/v1/accounts/${encodeURIComponent(creds.accountId)}/health`,
+        {
+          headers: { Authorization: `Bearer ${creds.apiKey}` },
+          signal: AbortSignal.timeout(15_000),
+        },
+      );
     } catch (err) {
       const detail = err instanceof Error ? err.message : "erro_desconhecido";
       return { reachable: false, status: null, detail: detail.slice(0, 200) };
@@ -380,19 +442,42 @@ export const zernioAdapter: ChannelAdapter = {
     if (res.status === 401 || res.status === 403) {
       return { reachable: true, status: "FAILED", detail: null };
     }
+    if (res.status === 404) {
+      return { reachable: true, status: "STOPPED", detail: null };
+    }
     if (!res.ok) {
       return { reachable: false, status: null, detail: `provedor_respondeu_${res.status}` };
     }
 
     const json = (await res.json().catch(() => null)) as {
-      accounts?: Record<string, unknown>[];
+      status?: string;
+      platformConnection?: {
+        status?: string;
+        phoneStatus?: string | null;
+        metaError?: { code?: number; subcode?: number; message?: string } | null;
+      } | null;
     } | null;
-    const contas = Array.isArray(json?.accounts) ? json.accounts : [];
-    const conta = contas.find((c) => String(c._id ?? c.id) === creds.accountId) ?? null;
 
-    return conta
-      ? { reachable: true, status: "WORKING", detail: null }
-      : { reachable: true, status: "STOPPED", detail: null };
+    const elo = json?.platformConnection;
+
+    if (elo?.status === "disconnected") {
+      const e = elo.metaError;
+      // O código da Meta no detalhe, NUNCA a mensagem crua inteira: ela é longa
+      // e às vezes carrega identificadores que não têm por que entrar num aviso.
+      const detail = e?.code ? `meta_${e.code}${e.subcode ? `_${e.subcode}` : ""}` : "meta_recusou_o_numero";
+      return { reachable: true, status: "FAILED", detail };
+    }
+    if (elo?.status === "unknown") {
+      return { reachable: false, status: null, detail: "sonda_do_elo_meta_inconclusiva" };
+    }
+    if (elo?.status === "connected") {
+      return { reachable: true, status: "WORKING", detail: null };
+    }
+
+    // Sem `platformConnection`: decide pelo veredito geral da conta.
+    return json?.status === "error"
+      ? { reachable: true, status: "FAILED", detail: "conta_em_erro" }
+      : { reachable: true, status: "WORKING", detail: null };
   },
 
   /** Gestão das definições aprovadas — ver `../zernio/templates.ts`. */

@@ -9,7 +9,24 @@ import type { OutboundMedia } from "@/lib/waha/media-send";
 
 export type { OutboundMedia };
 
-export type ChannelProvider = "waha" | "meta_cloud" | "zernio" | "uazapi";
+export type ChannelProvider = "waha" | "meta_cloud" | "zernio" | "uazapi" | "wacalls";
+
+/**
+ * Os providers que transportam MENSAGEM — o subconjunto sobre o qual a matriz
+ * de capabilities, os adapters e as fontes de template fazem sentido.
+ *
+ * `wacalls` (spec 18) mora em `channel_sessions` porque o que ele tem é
+ * exatamente o que aquela tabela modela — pareamento por QR, `status`,
+ * `archived_at`, jid, uma linha por organização — e porque `voice_calls` já
+ * aponta para ela. O que ele NÃO é: um canal por onde texto entra ou sai.
+ *
+ * Distinguir os dois no TIPO, e não numa condicional espalhada, é o que faz o
+ * compilador cobrar a decisão em cada lugar que perguntava "qual canal é este?"
+ * presumindo que a resposta sempre sabe mandar recado. Antes disto o CHECK do
+ * banco já aceitava `'wacalls'` enquanto este union não — e uma organização que
+ * pareasse voz derrubava `getAdapter` com `unknown_channel_provider`.
+ */
+export type ProviderDeMensagem = Exclude<ChannelProvider, "wacalls">;
 
 export interface ChannelCapabilities {
   /** Pode enviar texto livre a qualquer momento? false = exige template fora da janela. */
@@ -93,7 +110,40 @@ export interface RecipientInput {
   waLid?: string | null | undefined;
 }
 
-export interface OutboundEnvelope {
+/** Contato compartilhado (vcard) — só `kind: "contact"`. */
+export interface OutboundContact {
+  fullName: string;
+  phoneNumber: string;
+  whatsappId: string;
+  vcard: string;
+}
+
+/**
+ * A organização em nome de quem a operação de canal acontece.
+ *
+ * Existe porque `sessionRef` sozinho NÃO identifica uma linha: ele é um
+ * identificador do PROVIDER (número da Cloud API, conta do intermediado), e nada
+ * impedia duas organizações de terem o mesmo. Quem resolvia credencial por ele
+ * fazia `.eq("<ref>", ...)` num client de service role — que bypassa RLS — e o
+ * `maybeSingle()` com duas linhas devolve `data: null` **com erro**
+ * (`PGRST116`), não a linha errada. Como o erro era descartado, o desfecho era o
+ * fallback do env: a mensagem saía pela conta do `.env`, não pela da organização
+ * (issue #236).
+ *
+ * O campo é OBRIGATÓRIO de propósito. Opcional deixaria o chamador esquecê-lo em
+ * silêncio, que é exatamente a classe de defeito que ele fecha — assim o
+ * typecheck cobra em todo call site.
+ *
+ * O valor vem de FONTE CONFIÁVEL (sessão do cookie, linha já escopada, token do
+ * webhook), **nunca do corpo** de um payload externo.
+ */
+export interface ChannelTenantScope {
+  organizationId: string;
+}
+
+export interface OutboundEnvelope extends ChannelTenantScope {
+  /** Callback interno: revalida a origem depois do preparo assíncrono e antes do transporte. */
+  beforeSend?: () => Promise<void>;
   /** Identificador da sessão/número no provider (WAHA: nome da sessão). */
   sessionRef: string;
   /** Endereço já resolvido por `resolveRecipient`. */
@@ -101,6 +151,8 @@ export interface OutboundEnvelope {
   kind: OutboundKind;
   body?: string;
   media?: OutboundMedia;
+  /** Cartão de contato — preenchido quando `kind === "contact"`. */
+  contact?: OutboundContact;
   /**
    * Id que o PROVIDER dá a esta thread, quando ele endereça por thread própria
    * em vez de por telefone (`conversations.provider_conversation_id`).
@@ -120,6 +172,20 @@ export interface OutboundEnvelope {
    * fazer (tipicamente, abrir a conversa com template).
    */
   providerConversationId?: string | null;
+  /**
+   * A mensagem que ESTA responde, pelo id que o PROVIDER conhece.
+   *
+   * É o `external_id` da linha citada (para WhatsApp, o `wamid`) — não o `id`
+   * da nossa tabela, que o provider nunca viu. Quem monta o envelope resolve
+   * essa tradução; o adapter só repassa.
+   *
+   * OPCIONAL, e canal que não sabe citar simplesmente ignora: a citação é
+   * enfeite da conversa, nunca condição de envio. Um canal recusar a mensagem
+   * inteira porque não sabe citar seria trocar a mensagem pelo enfeite.
+   *
+   * `undefined` = envio solto, que é o caso comum.
+   */
+  replyToExternalId?: string | null;
 }
 
 /**
@@ -160,7 +226,7 @@ export interface ChannelAdapter {
    * A URL devolvida costuma ser ASSINADA E TEMPORÁRIA (no WhatsApp, ~9 dias
    * medidos). Quem chama deve BAIXAR e persistir, nunca guardar a URL.
    */
-  fetchProfilePictureUrl?(input: {
+  fetchProfilePictureUrl?(input: ChannelTenantScope & {
     sessionRef: string;
     recipient: string;
   }): Promise<string | null>;
@@ -192,7 +258,26 @@ export interface ChannelAdapter {
    * tela, e o atendente não sabe para quem está falando. Quem pergunta não
    * precisa saber QUAL canal traduz: testa a presença do método.
    */
-  resolvePhoneForIdentity?(input: { sessionRef: string; identity: string }): Promise<string | null>;
+  resolvePhoneForIdentity?(
+    input: ChannelTenantScope & { sessionRef: string; identity: string },
+  ): Promise<string | null>;
+
+  /**
+   * O número, em dígitos, pelo qual este canal REGISTRA um telefone — `null`
+   * quando não souber, quando o número não existir ou quando só houver
+   * identidade opaca.
+   *
+   * Existe porque o cadastro guarda o celular brasileiro COM o nono dígito e o
+   * WhatsApp registra muito deles SEM. Quem precisa do endereço exato fora do
+   * envio de mensagem — a chamada de voz, que disca por dígitos e não pergunta
+   * nada a ninguém — pede aqui, testando a presença do método em vez de
+   * perguntar QUAL provider é.
+   *
+   * OPCIONAL: só implementa quem consegue perguntar à plataforma.
+   */
+  resolveRegisteredPhone?(
+    input: ChannelTenantScope & { sessionRef: string; phone: string },
+  ): Promise<string | null>;
 
   /**
    * Gestão das definições aprovadas — criar, editar, apagar.
@@ -208,6 +293,29 @@ export interface ChannelAdapter {
    * conhece `contract_hash` — isso é de quem sincroniza.
    */
   templates?: ChannelTemplateOps;
+
+  /**
+   * Acende o "digitando…" na conversa do cliente.
+   *
+   * Existe porque o agente de IA responde no instante em que o modelo termina,
+   * e isso é inconfundivelmente robótico do lado de quem recebe. O conserto tem
+   * duas metades — esperar um tempo proporcional ao texto (que é de quem envia,
+   * e vale em qualquer canal) e MOSTRAR que está digitando (que é do canal, e é
+   * esta). Ver `lib/agent-engine/agent/atraso-humano.ts`.
+   *
+   * OPCIONAL como os demais: canal que não sabe sinalizar presença não
+   * implementa, e quem chama testa a presença do método em vez de perguntar
+   * QUAL provider é. Sem ele o cliente ainda ganha a espera — que é a parte do
+   * conserto que carrega o valor.
+   *
+   * LANÇA quando o transporte recusa, e é de propósito: a decisão de engolir é
+   * de quem chama (o indicador é decoração; a mensagem é o produto), e engolir
+   * aqui esconderia de todo chamador futuro que a chamada nem chega.
+   */
+  signalTyping?(input: ChannelTenantScope & {
+    sessionRef: string;
+    recipient: string;
+  }): Promise<void>;
 
   /**
    * A conexão está de pé AGORA? Pergunta feita ao transporte, não ao banco.
@@ -227,7 +335,7 @@ export interface ChannelAdapter {
    * OPCIONAL como os demais: canal sem sessão para consultar não implementa, e
    * quem chama testa a presença em vez de perguntar QUAL provider é.
    */
-  checkHealth?(input: { sessionRef: string }): Promise<ChannelHealth>;
+  checkHealth?(input: ChannelTenantScope & { sessionRef: string }): Promise<ChannelHealth>;
 
   /**
    * Envia uma DEFINIÇÃO APROVADA — o único caminho de volta quando a janela de
@@ -265,7 +373,7 @@ export interface ChannelAdapter {
    * OPCIONAL: canal sem mídia de entrada não implementa, e quem chama testa a
    * presença em vez de perguntar quem é.
    */
-  fetchInboundMedia?(input: {
+  fetchInboundMedia?(input: ChannelTenantScope & {
     sessionRef: string;
     /** A URL como o provider a anunciou. Cada canal sabe o que fazer com ela. */
     url: string;
@@ -339,7 +447,8 @@ export interface ChannelAdapter {
     footerText?: string;
   }): Promise<boolean>;
 
-  sendTemplate?(input: {
+  sendTemplate?(input: ChannelTenantScope & {
+    beforeSend?: () => Promise<void>;
     sessionRef: string;
     to: string;
     providerConversationId?: string | null;
@@ -389,18 +498,22 @@ export interface ChannelTemplateDraft {
 }
 
 export interface ChannelTemplateOps {
-  list(input: { sessionRef: string }): Promise<ChannelTemplate[]>;
-  create(input: { sessionRef: string; draft: ChannelTemplateDraft }): Promise<ChannelTemplate>;
+  list(input: ChannelTenantScope & { sessionRef: string }): Promise<ChannelTemplate[]>;
+  create(
+    input: ChannelTenantScope & { sessionRef: string; draft: ChannelTemplateDraft },
+  ): Promise<ChannelTemplate>;
   /**
    * Edição é PARCIAL e limitada pela plataforma: nome, idioma e categoria de um
    * template já aprovado normalmente não mudam — o que se edita é o corpo, e a
    * edição joga o template de volta para revisão. Quem chama não precisa saber
    * disso; a plataforma recusa e o erro sobe com o código dela.
    */
-  update(input: {
+  update(input: ChannelTenantScope & {
     sessionRef: string;
     name: string;
     patch: Partial<Pick<ChannelTemplateDraft, "components" | "category">>;
   }): Promise<ChannelTemplate>;
-  remove(input: { sessionRef: string; name: string; language?: string }): Promise<void>;
+  remove(
+    input: ChannelTenantScope & { sessionRef: string; name: string; language?: string },
+  ): Promise<void>;
 }

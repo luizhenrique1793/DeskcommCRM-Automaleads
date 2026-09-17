@@ -9,6 +9,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render, screen, within } from "@testing-library/react";
 
 import { NavHub } from "@/components/shell/NavHub";
+import { DICIONARIO } from "@/lib/i18n/dicionario";
+import { hubSections } from "@/lib/navigation/registry";
 
 afterEach(cleanup);
 
@@ -50,5 +52,39 @@ describe("NavHub", () => {
     const ensinar = screen.getByRole("region", { name: "Ensinar o agente" });
     expect(within(ensinar).getByRole("link", { name: /Memória/ })).toBeTruthy();
     expect(within(ensinar).queryByRole("link", { name: /Credenciais/ })).toBeNull();
+  });
+
+  it("traduz o conteúdo do hub quando a página entrega o idioma", () => {
+    render(
+      <NavHub
+        group="ia"
+        isPlatformAdmin
+        role={null}
+        title="Agente de IA"
+        subtitle="Tudo que define quem atende por você — e como acompanhar o que ele faz."
+        locale="es"
+      />,
+    );
+
+    expect(
+      screen.getByText("Todo lo que define quién atiende por ti — y cómo seguir lo que hace."),
+    ).toBeTruthy();
+    expect(screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent?.trim())).toEqual([
+      "Configurar el agente",
+      "Enseñar al agente",
+      "Acompañar al agente",
+    ]);
+    expect(
+      screen.getByRole("link", { name: /Credenciales.*La clave del proveedor de IA/ }),
+    ).toBeTruthy();
+  });
+
+  it("todo texto registrado no hub de IA tem tradução em espanhol", () => {
+    const textos = hubSections("ia", true, "admin").flatMap(({ section, items }) => [
+      section,
+      ...items.flatMap((item) => [item.label, item.description]),
+    ]);
+
+    expect(textos.filter((texto) => !DICIONARIO[texto]?.es)).toEqual([]);
   });
 });

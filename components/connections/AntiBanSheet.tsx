@@ -6,6 +6,7 @@
  * mostra o valor); preenchido = override desta conexão.
  */
 import { useEffect, useMemo, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { FUSOS_OFERECIDOS } from "@/lib/tempo/fusos";
 import { toast } from "sonner";
 
@@ -21,7 +22,10 @@ import {
 } from "@/components/ui/sheet";
 import { Switch } from "@/components/ui/switch";
 import { useUpdatePacingKnobs, type PacingKnobsItem } from "@/hooks/channels/usePacingKnobs";
+import { diaDeHojeLocal, valorDeOverride } from "@/lib/ai/pacing-knobs";
 import { ApiError } from "@/lib/api/types";
+import { nomeDoCanal } from "@/lib/channels/estado";
+import { useT } from "@/hooks/i18n/useT";
 
 interface Props {
   item: PacingKnobsItem | null;
@@ -68,7 +72,9 @@ const msOrNull = (s: string): number | null =>
   s.trim() === "" ? null : Math.round(Number(s) * 1000);
 
 export function AntiBanSheet({ item, canWrite, onClose }: Props) {
+  const t = useT();
   const update = useUpdatePacingKnobs();
+  const qc = useQueryClient();
   const [form, setForm] = useState<FormState | null>(null);
 
   useEffect(() => {
@@ -77,11 +83,52 @@ export function AntiBanSheet({ item, canWrite, onClose }: Props) {
 
   const label = useMemo(() => {
     if (!item) return "";
-    const s = item.channel_session;
-    return s.display_name || s.phone_number || s.waha_session_name || "Conexão";
-  }, [item]);
+    // Mesma cadeia que vazava `org_xxxx` no seletor do editor de agente: o
+    // identificador do transporte era o penúltimo degrau, então uma conexão sem
+    // apelido e sem número aparecia com ele no título do painel.
+    return nomeDoCanal(item.channel_session, t);
+  }, [item, t]);
 
-  if (!item || !form) return null;
+  // Duas saídas mudas moravam aqui, e as duas mentiam. `item` nulo NÃO é "painel
+  // fechado": o painel só é montado quando alguém o abre (ConnectionsClient), então
+  // item nulo significa que a conexão pedida sumiu da lista — excluída em outra aba
+  // ou máquina, cache velho — e o botão morria sem dizer nada, exatamente o
+  // `return` mudo que o Sistema Vivo proíbe. Virou estado visível, com caminho de
+  // volta: "Tentar de novo" invalida `pacing-knobs`; quando o item reaparecer, o
+  // efeito acima re-hidrata o formulário e o painel normal assume. Já `form` nulo é
+  // só o frame transitório entre o item chegar e a hidratação rodar (um render) —
+  // pintar o formulário nesse instante é que seria mentira. Por isso `!form`
+  // continua mudo, e só ele.
+  if (!item) {
+    return (
+      <Sheet open onOpenChange={(open) => !open && onClose()}>
+        <SheetContent className="flex w-full flex-col gap-0 overflow-y-auto sm:max-w-md">
+          <SheetHeader>
+            <SheetTitle>{t("Proteção de envio")}</SheetTitle>
+            <SheetDescription data-testid="anti-ban-indisponivel">
+              {t(
+                "Não foi possível carregar a proteção de envio desta conexão. Ela pode ter sido removida, ou esta lista está desatualizada.",
+              )}
+            </SheetDescription>
+          </SheetHeader>
+
+          <div className="mt-auto flex justify-end gap-2 border-t border-border px-4 py-3">
+            <Button variant="ghost" onClick={onClose}>
+              {t("Fechar")}
+            </Button>
+            <Button
+              onClick={() => void qc.invalidateQueries({ queryKey: ["pacing-knobs"] })}
+              data-testid="anti-ban-tentar-de-novo"
+            >
+              {t("Tentar de novo")}
+            </Button>
+          </div>
+        </SheetContent>
+      </Sheet>
+    );
+  }
+
+  if (!form) return null;
   const eff = item.effective;
   const set = (patch: Partial<FormState>) => setForm((f) => (f ? { ...f, ...patch } : f));
 
@@ -93,7 +140,11 @@ export function AntiBanSheet({ item, canWrite, onClose }: Props) {
         window_end_hour: intOrNull(form.window_end_hour),
         throttle_ms: msOrNull(form.throttle_s),
         jitter_max_ms: msOrNull(form.jitter_s),
-        allow_sunday: form.allow_sunday,
+        // `null` quando o Switch está no default: salvar esta ficha por outro
+        // motivo (aquecimento, throttle) não pode congelar o padrão do dia como
+        // escolha permanente — foi assim que uma instalação ficou muda todo
+        // domingo. Ver `valorDeOverride`.
+        allow_sunday: valorDeOverride(form.allow_sunday, item.defaults.allowSunday),
         timezone: form.timezone.trim() === "" ? null : form.timezone.trim(),
         ...(form.daily_message_limit.trim() !== ""
           ? { daily_message_limit: Math.round(Number(form.daily_message_limit)) }
@@ -107,10 +158,10 @@ export function AntiBanSheet({ item, canWrite, onClose }: Props) {
             : new Date(`${form.numero_em_uso_desde}T12:00:00.000Z`).toISOString(),
         skip_warmup: form.pular_aquecimento,
       });
-      toast.success("Proteção de envio atualizada.");
+      toast.success(t("Proteção de envio atualizada."));
       onClose();
     } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : "Não foi possível salvar.");
+      toast.error(err instanceof ApiError ? t(err.message) : t("Não foi possível salvar."));
     }
   };
 
@@ -118,29 +169,34 @@ export function AntiBanSheet({ item, canWrite, onClose }: Props) {
     <Sheet open onOpenChange={(open) => !open && onClose()}>
       <SheetContent className="flex w-full flex-col gap-0 overflow-y-auto sm:max-w-md">
         <SheetHeader>
-          <SheetTitle>Proteção de envio — {label}</SheetTitle>
+          <SheetTitle>
+            {t("Proteção de envio —")} {label}
+          </SheetTitle>
           <SheetDescription>
-            Estes limites protegem o número contra bloqueio do WhatsApp. Campo vazio usa o
-            padrão seguro do sistema (mostrado no campo).
+            {t(
+              "Estes limites protegem o número contra bloqueio do WhatsApp. Campo vazio usa o padrão seguro do sistema (mostrado no campo).",
+            )}
           </SheetDescription>
         </SheetHeader>
 
         <div className="flex flex-col gap-5 px-4 py-2" data-testid="anti-ban-form">
           <fieldset className="flex flex-col gap-2" data-testid="aquecimento">
-            <Label htmlFor="numero-em-uso-desde">Este número é usado desde</Label>
+            <Label htmlFor="numero-em-uso-desde">{t("Este número é usado desde")}</Label>
             <Input
               id="numero-em-uso-desde"
               type="date"
-              max={new Date().toISOString().slice(0, 10)}
+              // O dia LOCAL, que é o que este campo fala. Com o dia UTC, às 21h
+              // em São Paulo o limite já oferecia amanhã.
+              max={diaDeHojeLocal()}
               value={form.numero_em_uso_desde}
               onChange={(e) => set({ numero_em_uso_desde: e.target.value })}
               disabled={!canWrite || form.pular_aquecimento}
               className="w-48"
             />
             <p className="text-xs text-muted-foreground">
-              A conexão pode ser nova sem que o número seja. O aquecimento conta a idade do
-              NÚMERO — se você deixar em branco, ele é tratado como recém-criado e começa
-              liberando pouco por dia.
+              {t(
+                "A conexão pode ser nova sem que o número seja. O aquecimento conta a idade do NÚMERO — em branco, ele é tratado como recém-criado e começa liberando pouco por dia. Uma data já salva não some se você limpar o campo: para mudá-la, informe outra.",
+              )}
             </p>
 
             <div className="mt-1 flex items-center gap-2">
@@ -151,20 +207,22 @@ export function AntiBanSheet({ item, canWrite, onClose }: Props) {
                 disabled={!canWrite}
               />
               <Label htmlFor="pular-aquecimento" className="font-normal">
-                Este número já está aquecido — pular o aquecimento
+                {t("Este número já está aquecido — pular o aquecimento")}
               </Label>
             </div>
             <p className="text-xs text-muted-foreground">
               {form.pular_aquecimento
-                ? "Vale só o teto diário abaixo. Use apenas se o número já envia há semanas: pular o aquecimento num número novo é o caminho mais rápido para o bloqueio."
+                ? t(
+                    "Vale só o teto diário abaixo. Use apenas se o número já envia há semanas: pular o aquecimento num número novo é o caminho mais rápido para o bloqueio.",
+                  )
                 : item.warmup.cap_today === null
-                  ? `Número com ${item.warmup.age_days} dia(s) de uso — já formado. Vale só o teto diário abaixo.`
-                  : `Hoje o aquecimento libera ${item.warmup.cap_today} envio(s) — o número tem ${item.warmup.age_days} dia(s) de uso. Enquanto esse número for menor que o teto diário, é ELE que limita, e mexer no teto diário não muda nada.`}
+                  ? `${t("Número com")} ${item.warmup.age_days} ${t("dia(s) de uso — já formado. Vale só o teto diário abaixo.")}`
+                  : `${t("Hoje o aquecimento libera")} ${item.warmup.cap_today} ${t("envio(s) — o número tem")} ${item.warmup.age_days} ${t("dia(s) de uso. Enquanto esse número for menor que o teto diário, é ELE que limita, e mexer no teto diário não muda nada.")}`}
             </p>
           </fieldset>
 
           <fieldset className="flex flex-col gap-2">
-            <Label>Janela de envio (horário local)</Label>
+            <Label>{t("Janela de envio (horário local)")}</Label>
             <div className="flex items-center gap-2">
               <Input
                 type="number"
@@ -175,10 +233,10 @@ export function AntiBanSheet({ item, canWrite, onClose }: Props) {
                 value={form.window_start_hour}
                 onChange={(e) => set({ window_start_hour: e.target.value })}
                 disabled={!canWrite}
-                aria-label="Hora de início da janela"
+                aria-label={t("Hora de início da janela")}
                 className="w-20"
               />
-              <span className="text-sm text-muted-foreground">h até</span>
+              <span className="text-sm text-muted-foreground">{t("h até")}</span>
               <Input
                 type="number"
                 min={1}
@@ -188,22 +246,25 @@ export function AntiBanSheet({ item, canWrite, onClose }: Props) {
                 value={form.window_end_hour}
                 onChange={(e) => set({ window_end_hour: e.target.value })}
                 disabled={!canWrite}
-                aria-label="Hora de fim da janela"
+                aria-label={t("Hora de fim da janela")}
                 className="w-20"
               />
               <span className="text-sm text-muted-foreground">h</span>
             </div>
             <p className="text-xs text-muted-foreground">
-              O assistente só envia mensagens dentro desta janela. Fora dela, a resposta fica
-              agendada para a próxima abertura — você vê o motivo na conversa.
+              {t(
+                "O assistente só envia mensagens dentro desta janela. Fora dela, a resposta fica agendada para a próxima abertura — você vê o motivo na conversa.",
+              )}
             </p>
           </fieldset>
 
           <fieldset className="flex items-center justify-between gap-4">
             <div>
-              <Label htmlFor="allow-sunday">Enviar aos domingos</Label>
+              <Label htmlFor="allow-sunday">{t("Enviar aos domingos")}</Label>
               <p className="text-xs text-muted-foreground">
-                Desligado por padrão: envio em domingo aumenta o risco de denúncia e bloqueio.
+                {t(
+                  "Ligado por padrão: quem escreve no domingo espera resposta no domingo. Desligue se você faz prospecção ativa e prefere não incomodar no fim de semana.",
+                )}
               </p>
             </div>
             <Switch
@@ -215,7 +276,7 @@ export function AntiBanSheet({ item, canWrite, onClose }: Props) {
           </fieldset>
 
           <fieldset className="flex flex-col gap-2">
-            <Label>Ritmo entre envios (segundos)</Label>
+            <Label>{t("Ritmo entre envios (segundos)")}</Label>
             <div className="flex items-center gap-2">
               <Input
                 type="number"
@@ -226,10 +287,10 @@ export function AntiBanSheet({ item, canWrite, onClose }: Props) {
                 value={form.throttle_s}
                 onChange={(e) => set({ throttle_s: e.target.value })}
                 disabled={!canWrite}
-                aria-label="Intervalo mínimo entre envios em segundos"
+                aria-label={t("Intervalo mínimo entre envios em segundos")}
                 className="w-24"
               />
-              <span className="text-sm text-muted-foreground">+ variação de até</span>
+              <span className="text-sm text-muted-foreground">{t("+ variação de até")}</span>
               <Input
                 type="number"
                 min={0}
@@ -239,39 +300,41 @@ export function AntiBanSheet({ item, canWrite, onClose }: Props) {
                 value={form.jitter_s}
                 onChange={(e) => set({ jitter_s: e.target.value })}
                 disabled={!canWrite}
-                aria-label="Variação aleatória máxima em segundos"
+                aria-label={t("Variação aleatória máxima em segundos")}
                 className="w-24"
               />
               <span className="text-sm text-muted-foreground">s</span>
             </div>
             <p className="text-xs text-muted-foreground">
-              Intervalo mínimo entre mensagens do mesmo número, mais uma variação aleatória —
-              ritmo cravado parece robô para o WhatsApp.
+              {t(
+                "Intervalo mínimo entre mensagens do mesmo número, mais uma variação aleatória — ritmo cravado parece robô para o WhatsApp.",
+              )}
             </p>
           </fieldset>
 
           <fieldset className="flex flex-col gap-2">
-            <Label>Teto diário de envios</Label>
+            <Label>{t("Teto diário de envios")}</Label>
             <Input
               type="number"
               min={item.bounds.daily_limit.min}
               max={item.bounds.daily_limit.max}
               inputMode="numeric"
-              placeholder="sem teto definido"
+              placeholder={t("sem teto definido")}
               value={form.daily_message_limit}
               onChange={(e) => set({ daily_message_limit: e.target.value })}
               disabled={!canWrite}
-              aria-label="Teto diário de mensagens"
+              aria-label={t("Teto diário de mensagens")}
               className="w-32"
             />
             <p className="text-xs text-muted-foreground">
-              Máximo de mensagens que este número envia por dia. Números novos também respeitam
-              o aquecimento automático abaixo, o que for menor.
+              {t(
+                "Máximo de mensagens que este número envia por dia. Números novos também respeitam o aquecimento automático abaixo, o que for menor.",
+              )}
             </p>
           </fieldset>
 
           <fieldset className="flex flex-col gap-2">
-            <Label>Fuso horário da janela</Label>
+            <Label>{t("Fuso horário da janela")}</Label>
             {/* LISTA, e não texto livre. A API já REJEITA fuso inválido — mas
                 rejeitar é devolver um erro a quem digitou certo na cabeça e
                 errado no teclado (`America/Asunción`, com o acento que um
@@ -280,46 +343,49 @@ export function AntiBanSheet({ item, canWrite, onClose }: Props) {
               value={form.timezone}
               onChange={(e) => set({ timezone: e.target.value })}
               disabled={!canWrite}
-              aria-label="Fuso horário IANA"
+              aria-label={t("Fuso horário IANA")}
               className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm disabled:opacity-50"
             >
-              <option value="">Usar o padrão ({eff.timezone})</option>
+              <option value="">
+                {t("Usar o padrão")} ({eff.timezone})
+              </option>
               {FUSOS_OFERECIDOS.map((f) => (
                 <option key={f.codigo} value={f.codigo}>
-                  {f.rotulo} — {f.codigo}
+                  {t(f.rotulo)} — {f.codigo}
                 </option>
               ))}
             </select>
             <p className="text-xs text-muted-foreground">
-              A janela de envio é avaliada neste fuso (ex.: America/Sao_Paulo).
+              {t("A janela de envio é avaliada neste fuso (ex.: America/Sao_Paulo).")}
             </p>
           </fieldset>
 
           <div className="rounded-md border border-border bg-muted/30 p-3">
-            <p className="text-xs font-medium">Aquecimento automático de número novo</p>
+            <p className="text-xs font-medium">{t("Aquecimento automático de número novo")}</p>
             <p className="mt-1 text-xs text-muted-foreground">
               {eff.warmupDailyCaps
                 .map((s) =>
                   s.cap === null
-                    ? `a partir de ${s.minAgeDays} dias: sem limite de aquecimento`
-                    : `${s.minAgeDays}+ dias: até ${s.cap}/dia`,
+                    ? `${t("a partir de")} ${s.minAgeDays} ${t("dias: sem limite de aquecimento")}`
+                    : `${s.minAgeDays}+ ${t("dias: até")} ${s.cap}/${t("dia")}`,
                 )
                 .join(" · ")}
             </p>
             <p className="mt-1 text-xs text-muted-foreground">
-              Número recém-conectado envia pouco e sobe aos poucos — enviar demais no início é
-              a causa nº 1 de bloqueio.
+              {t(
+                "Número recém-conectado envia pouco e sobe aos poucos — enviar demais no início é a causa nº 1 de bloqueio.",
+              )}
             </p>
           </div>
         </div>
 
         <div className="mt-auto flex justify-end gap-2 border-t border-border px-4 py-3">
           <Button variant="ghost" onClick={onClose}>
-            {canWrite ? "Cancelar" : "Fechar"}
+            {canWrite ? t("Cancelar") : t("Fechar")}
           </Button>
           {canWrite ? (
             <Button onClick={handleSave} disabled={update.isPending} data-testid="anti-ban-save">
-              {update.isPending ? "Salvando…" : "Salvar proteção"}
+              {update.isPending ? t("Salvando…") : t("Salvar proteção")}
             </Button>
           ) : null}
         </div>

@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { useAuth } from "@/hooks/auth/AuthProvider";
+import { useT } from "@/hooks/i18n/useT";
 import { MagnifyingGlass } from "@/lib/ui/icons";
 import { NAV_GROUPS, searchable, type NavDestination } from "@/lib/navigation/registry";
 import { cn } from "@/lib/utils";
@@ -20,10 +21,7 @@ import { cn } from "@/lib/utils";
 
 /** Sem acento e sem caixa: ninguém digita "orçamento" com cedilha às pressas. */
 function normalizar(texto: string): string {
-  return texto
-    .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "")
-    .toLowerCase();
+  return texto.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
 }
 
 const ROTULO_GRUPO = new Map(NAV_GROUPS.map((g) => [g.id, g.label]));
@@ -35,10 +33,11 @@ export function CommandPalette({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  const t = useT();
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="top-[15%] max-w-xl translate-y-0 gap-0 p-0">
-        <DialogTitle className="sr-only">Buscar telas</DialogTitle>
+        <DialogTitle className="sr-only">{t("Buscar telas")}</DialogTitle>
         {/* O miolo é um componente à parte porque o Radix o DESMONTA ao fechar:
             busca e destaque nascem zerados na próxima abertura por construção,
             sem um efeito de reset para manter em sincronia. */}
@@ -49,21 +48,30 @@ export function CommandPalette({
 }
 
 function Resultados({ aoEscolher }: { aoEscolher: () => void }) {
+  const t = useT();
   const router = useRouter();
   const { user, activeOrg } = useAuth();
   const [busca, setBusca] = useState("");
   const [destacado, setDestacado] = useState(0);
 
   const visiveis = useMemo(
-    () => searchable(user.is_platform_admin, activeOrg?.role ?? null),
-    [user.is_platform_admin, activeOrg?.role],
+    () =>
+      searchable(
+        user.is_platform_admin && !user.support,
+        activeOrg?.role ?? null,
+        activeOrg?.interface_settings,
+      ),
+    [user.is_platform_admin, user.support, activeOrg?.role, activeOrg?.interface_settings],
   );
 
   const resultados = useMemo(() => {
     const termo = normalizar(busca.trim());
     // Sem termo, abre no trabalho do dia em vez de uma tela vazia que não
     // ensina nada sobre o que dá para procurar aqui.
-    if (!termo) return visiveis.filter((d) => d.group === "atendimento");
+    if (!termo) {
+      const daily = visiveis.filter((d) => d.group === "atendimento");
+      return daily.length ? daily : visiveis.slice(0, 8);
+    }
     return visiveis.filter((d) => normalizar(`${d.label} ${d.description}`).includes(termo));
   }, [busca, visiveis]);
 
@@ -109,20 +117,20 @@ function Resultados({ aoEscolher }: { aoEscolher: () => void }) {
           value={busca}
           onChange={(e) => aoDigitar(e.target.value)}
           onKeyDown={aoTeclar}
-          placeholder="Buscar telas do sistema…"
-          className="h-12 w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+          placeholder={t("Buscar telas do sistema…")}
+          className="h-12 w-full bg-transparent text-sm outline-hidden placeholder:text-muted-foreground"
         />
       </div>
 
       {resultados.length === 0 ? (
         <p className="px-4 py-8 text-center text-sm text-muted-foreground">
-          Nada encontrado para “{busca}”.
+          {t("Nada encontrado para")} “{busca}”.
         </p>
       ) : (
         <ul
           id="palette-resultados"
           role="listbox"
-          aria-label="Telas"
+          aria-label={t("Telas")}
           className="max-h-80 overflow-y-auto p-2"
         >
           {resultados.map((d, i) => {
@@ -145,12 +153,12 @@ function Resultados({ aoEscolher }: { aoEscolher: () => void }) {
                 <Icon size={18} aria-hidden className="mt-0.5 shrink-0 text-muted-foreground" />
                 <div className="min-w-0">
                   <div className="flex items-baseline gap-2">
-                    <span className="text-sm font-medium">{d.label}</span>
-                    <span className="truncate text-[11px] uppercase tracking-wider text-muted-foreground/70">
-                      {ROTULO_GRUPO.get(d.group)}
+                    <span className="text-sm font-medium">{t(d.label)}</span>
+                    <span className="truncate text-[11px] tracking-wider text-muted-foreground uppercase">
+                      {t(ROTULO_GRUPO.get(d.group) ?? "")}
                     </span>
                   </div>
-                  <p className="truncate text-xs text-muted-foreground">{d.description}</p>
+                  <p className="truncate text-xs text-muted-foreground">{t(d.description)}</p>
                 </div>
               </li>
             );

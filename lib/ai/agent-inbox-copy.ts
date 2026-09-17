@@ -18,6 +18,13 @@ export type AgentInboxSeverity = "info" | "warn" | "critical";
  * de quê.
  */
 export const KIND_LABEL = {
+  // Diz que ALGUÉM ESPERA, não que um registro envelheceu. "Caso parado há
+  // 24h" descreve a tabela; do lado de lá existe uma pessoa que pediu algo e
+  // não teve resposta, e é isso que faz quem lê a Central abrir o item.
+  case_stale: "Um atendimento espera decisão da equipe",
+  appointment_outcome_required:"Confirme a presença no compromisso",
+  appointment_recovery_review:"A recuperação precisa de uma decisão da equipe",
+  routing_unassigned: "Conversa aguardando responsável",
   qr_rescan: "Conexão do WhatsApp caiu — precisa escanear o QR de novo",
   job_dead: "Uma tarefa do assistente falhou e parou de tentar",
   event_dead: "Um evento recebido não pôde ser processado",
@@ -54,6 +61,19 @@ export const KIND_LABEL = {
   promise_unfulfilled: "O assistente prometeu algo a um cliente e ninguém ficou responsável",
   contact_proposal_expired:
     "Uma informação que o assistente ouviu de um cliente venceu sem ninguém conferir",
+  // Diz o que ACONTECEU, e nunca que algo parou — contraste deliberado com
+  // `budget_exceeded` ("foi atingido"). Quem lê este aviso ainda tem a IA
+  // respondendo; confundir os dois faria o dono do negócio correr atrás de uma
+  // parada que não houve, ou ignorar a que houve.
+  budget_warning: "O gasto de IA passou do aviso que você definiu",
+  // Diz o que ACONTECEU com o material, e nunca "a indexação falhou": quem
+  // subiu um PDF quer saber que o agente ainda não sabe o que está nele.
+  conhecimento_nao_indexado: "Um material que você enviou não entrou na base de conhecimento",
+  // Diz o que ficou por fazer, não o que o sistema registrou: "chamada perdida"
+  // é o fato, e o que a pessoa precisa saber é que alguém tentou falar e não
+  // conseguiu. O motivo cru do upstream (`user_ended`, `do_not_disturb`) nunca
+  // chega à tela — vira frase de gente no corpo do aviso, escrito pelo worker.
+  voice_call_missed: "Alguém ligou e ninguém atendeu",
   other: "Aviso do assistente",
 } as const satisfies Record<InboxKind, string>;
 
@@ -69,8 +89,8 @@ export const SEVERITY_LABEL: Record<AgentInboxSeverity, string> = {
  * este build não conhece. O genérico é a defesa para ESSE caso — não para
  * cobrir esquecimento, que agora o compilador pega acima.
  */
-export function kindLabel(kind: string): string {
-  return (KIND_LABEL as Record<string, string>)[kind] ?? "Aviso do assistente";
+export function kindLabel(kind: string, t: (texto: string) => string = (texto) => texto): string {
+  return t((KIND_LABEL as Record<string, string>)[kind] ?? "Aviso do assistente");
 }
 
 /** Por que ninguém ficou responsável — o que muda é a AÇÃO que cabe a quem lê. */

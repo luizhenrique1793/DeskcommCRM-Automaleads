@@ -149,11 +149,27 @@ export interface PontoDeIa {
    * mostra o cadeado junto da razão: sem ela, o operador conclui que o produto
    * é limitado, em vez de entender que a troca quebraria algo em silêncio.
    */
-  fixo?: { razao: string };
+  /**
+   * Ponto que o produto resolve sozinho — a escolha do painel não se aplica.
+   * `usa` diz o que ele de fato chama: sem isso a tela caía na cadeia de
+   * resolução dos pontos de conversa e anunciava um modelo de chat num ponto
+   * que fala com a API de transcrição.
+   */
+  fixo?: { razao: string; usa?: { provider: string; modelId: string } };
   registraEm: DestinoDeTelemetria;
 }
 
 export const PONTOS_DE_IA: readonly PontoDeIa[] = [
+  {
+    id: "agent_preview",
+    rotulo: "Testar ou revisar resposta",
+    oQueFaz: "Prepara uma resposta com a versão e o conhecimento do agente, sem aplicar alterações ao cliente.",
+    papel: "atender",
+    exige: {tools:true,imagem:true},
+    emissor: "lib/agent-engine/agent/inbound-turn.ts",
+    sintomaDeFalha: "O teste ou a sugestão não consegue preparar a resposta para revisão.",
+    registraEm: "llm_calls",
+  },
   // ─────────────────────────── Atender o cliente ───────────────────────────
   {
     id: "agent_turn",
@@ -177,6 +193,20 @@ export const PONTOS_DE_IA: readonly PontoDeIa[] = [
     emissor: "lib/agent-engine/agent/operator-turn.ts",
     sintomaDeFalha:
       "O cliente é atendido normalmente, mas nada aparece no funil — nenhum lead criado, nenhuma etapa movida.",
+    registraEm: "llm_calls",
+  },
+  {
+    id: "automation_ai_message",
+    rotulo: "Abordar quem preencheu o formulário",
+    oQueFaz:
+      "Escreve a primeira mensagem para quem acabou de preencher um formulário, usando os campos que a pessoa respondeu e a orientação que você deu na automação.",
+    papel: "atender",
+    // Sem tools: o texto vem e quem envia é a automação, com janela de horário
+    // e opt-out. Dar `send_message` ao modelo faria dele o remetente.
+    exige: {},
+    emissor: "lib/agent-engine/agent/abordagem-de-formulario.ts",
+    sintomaDeFalha:
+      "O lead entra pelo formulário, a automação roda, e a mensagem de abordagem nunca é escrita — o contato fica no funil sem ninguém falar com ele.",
     registraEm: "llm_calls",
   },
   {
@@ -376,6 +406,20 @@ export const PONTOS_DE_IA: readonly PontoDeIa[] = [
     fixo: {
       razao:
         "Usa o padrão de transcrição da OpenAI, que é o formato que os serviços do mercado implementam. Aceita apontar para outro serviço compatível — inclusive um rodando na sua própria máquina — mas exige uma chave desse serviço, separada da chave do modelo de conversa.",
+      // ⚠️ O QUE ELE USA DE VERDADE, e por que precisa estar escrito aqui.
+      //
+      // A tela mostrava `claude-sonnet-5` neste ponto, com "usando o padrão da
+      // organização" — porque um ponto `fixo` percorria a mesma cadeia de
+      // resolução dos pontos de conversa e caía no último degrau. O texto ao
+      // lado dizia "usa o padrão de transcrição da OpenAI", então a mesma tela
+      // afirmava duas coisas incompatíveis sobre o mesmo ponto.
+      //
+      // Um modelo de conversa NÃO transcreve áudio. Anunciar um ali é dizer a
+      // quem opera que o áudio está sendo ouvido pelo modelo errado — e mandá-lo
+      // caçar um problema que não existe, ou trocar um modelo que não é o que
+      // faz o trabalho. `lib/messaging/media/transcription.ts` manda para
+      // `/v1/audio/transcriptions` com `whisper-1`.
+      usa: { provider: "openai", modelId: "whisper-1" },
     },
     sintomaDeFalha:
       "O cliente manda áudio e o agente responde como se não tivesse recebido nada.",

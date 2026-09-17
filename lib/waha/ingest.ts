@@ -11,76 +11,165 @@
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
 
+import type { SupabaseClient } from "@supabase/supabase-js";
+
 import { audit } from "@/lib/audit";
 import { sincronizarSaudeDaConexao } from "@/lib/channels/health";
+import { marcarConversaComMensagem } from "@/lib/channels/marcar-conversa";
 import { aplicarEfeitosPosEntrada } from "@/lib/channels/pos-entrada";
+import { pausarIaPorAtendimentoManual } from "@/lib/escalacao/atendimento-manual";
+import { acelerarPipelineDeEventos } from "@/lib/dev/kick-local-pipeline";
+import { canonicalPhoneBR } from "@/lib/channels/phone-variants";
+import { estamparAtribuicaoDoContato } from "@/lib/leads/atribuicao-de-anuncio";
+import { extrairAtribuicaoWaha } from "@/lib/waha/atribuicao-de-anuncio";
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { ackToStatus } from "@/lib/types/messaging";
+import type { WahaEnvelope, WahaPayload } from "@/lib/waha/envelope";
 import { bareWaMessageId, chatIdFromWaMessageId } from "@/lib/waha/message-id";
 import { logger } from "@/lib/logger";
 
-type Admin = ReturnType<typeof createAdminClient>;
+export type Admin = ReturnType<typeof createAdminClient>;
+
+/**
+ * A pausa da IA quando uma pessoa responde pelo celular vive em
+ * `lib/escalacao/atendimento-manual.ts` (`pausarIaPorAtendimentoManual`), e não
+ * mais aqui. Era `silenciarBotPorRetomadaHumana`, exclusiva deste arquivo e do
+ * WhatsApp; o gesto é o mesmo em qualquer canal (o Zernio tem o mesmo caminho de
+ * saída-por-fora-do-CRM), e duas encarnações da mesma regra divergiriam na
+ * primeira vez que alguém mexesse numa só. O helper unificado mantém o que esta
+ * função garantia — prazo que expira sozinho, renovado a cada fala humana, e
+ * silêncio maior NUNCA encurtado — e acrescenta o rastro de handoff.
+ */
+
+/**
+ * Quanto tempo um envio nosso pode ficar "em voo" antes de o eco deixar de ser
+ * explicável por ele.
+ *
+ * 60s é folgado de propósito: o custo de errar para o lado permissivo é uma
+ * digitação real do celular não silenciar a IA por um minuto; o custo de errar
+ * para o outro lado é a IA muda por três horas. Os dois erros não são simétricos.
+ */
+const JANELA_DO_ECO_MS = 60_000;
+
+/**
+ * A mensagem `fromMe` que chegou é o eco de um envio que ESTE CRM acabou de
+ * fazer — e não alguém digitando no celular?
+ *
+ * A prova exigida é forte: uma linha nossa na MESMA conversa, ainda sem
+ * `external_id` (portanto ainda em voo), com o MESMO corpo, dentro da janela.
+ * Qualquer uma dessas faltando, a resposta é "não sei" — e "não sei" silencia,
+ * porque é o desfecho seguro do lado do atendente humano (#371).
+ *
+ * Mídia não tem corpo comparável (o eco traz `media_url`, não texto): ali a
+ * prova cai para "existe envio nosso em voo do mesmo tipo na janela", que é mais
+ * permissivo e assumidamente mais fraco.
+ */
+async function ehEcoDeEnvioNosso(
+  admin: Admin,
+  organizationId: string,
+  conversationId: string,
+  p: WahaPayload,
+): Promise<boolean> {
+  const desde = new Date(Date.now() - JANELA_DO_ECO_MS).toISOString();
+  const { data, error } = await admin
+    .from("messages")
+    .select("id, body, type")
+    .eq("organization_id", organizationId)
+    .eq("conversation_id", conversationId)
+    .eq("direction", "outbound")
+    // `sent_via` separa o que NASCEU aqui do que veio do celular: a linha do
+    // celular é gravada como `external_device` e nunca pode servir de álibi.
+    .in("sent_via", ["ai", "user"])
+    // Sem `external_id` = ainda não confirmada pelo canal = ainda em voo. É esta
+    // a janela exata em que o eco é indistinguível de digitação humana.
+    .is("external_id", null)
+    .in("status", ["queued", "sending"])
+    .gte("created_at", desde)
+    .limit(20);
+
+  if (error) {
+    // Falha de leitura não pode virar "é eco": na dúvida, silencia — o
+    // desfecho seguro é o do atendente humano.
+    console.error("[waha.ingest] checagem de eco falhou", error.message);
+    return false;
+  }
+
+  const corpo = (p.body ?? "").trim();
+  for (const linha of data ?? []) {
+    const l = linha as { body: string | null; type?: string | null };
+    if (p.type && p.type !== "chat") {
+      // Mídia: sem corpo para comparar, a existência do envio em voo é a prova
+      // possível. Mais fraco, e escrito para ninguém supor o contrário.
+      if ((l.type ?? "chat") !== "chat") return true;
+      continue;
+    }
+    if (corpo.length > 0 && (l.body ?? "").trim() === corpo) return true;
+  }
+  return false;
+}
 
 interface Session {
   id: string;
   organization_id: string;
 }
 
-export interface WahaPayload {
-  id?: string;
-  from?: string;
-  to?: string;
-  fromMe?: boolean;
-  body?: string;
-  type?: string;
-  hasMedia?: boolean;
-  ack?: number;
-  ackName?: string;
-  participant?: string;
-  author?: string;
-  status?: string;
-  timestamp?: number;
-  mediaUrl?: string;
-  mimetype?: string;
-  /** WAHA >= 2026.x (NOWEB): mídia vem aninhada em payload.media. */
-  media?: { url?: string | null; mimetype?: string | null; filename?: string | null } | null;
-  _data?: {
-    notifyName?: string;
-    pushName?: string;
-    /** NOWEB: o conteúdo real (imageMessage, stickerMessage, …) — fonte do tipo. */
-    message?: Record<string, unknown>;
-    /**
-     * A chave do Baileys — e o achado que o passo 2 da spec 17 mediu.
-     *
-     * Quando o chat é `@lid`, o WhatsApp NÃO esconde o telefone: ele o manda em
-     * `remoteJidAlt` (chat 1:1) ou `participantAlt` (grupo). Medido em
-     * `webhook_events_log` da produção: **76 de 76** payloads @lid com `key`
-     * trazem o número. A leitura de que "@lid é opaco por privacidade" valia
-     * para o `from`, não para o payload inteiro.
-     */
-    key?: {
-      remoteJid?: string;
-      remoteJidAlt?: string;
-      participant?: string;
-      participantAlt?: string;
-      addressingMode?: string;
-      fromMe?: boolean;
-      id?: string;
-    };
-  } & Record<string, unknown>;
-}
-
-export interface WahaEnvelope {
-  event?: string;
-  session?: string;
-  payload?: WahaPayload;
-}
+/**
+ * O formato do fio mora em `lib/waha/envelope.ts`, onde é um schema Zod — e o
+ * tipo NASCE dele (`z.infer`). Re-exportado aqui porque este módulo era o dono
+ * do tipo e quem já o importava não precisa saber que ele mudou de casa.
+ */
+export type { WahaEnvelope, WahaPayload } from "@/lib/waha/envelope";
 
 export type ChatIdentity =
   | { kind: "phone"; phone: string; lid: null }
   | { kind: "lid"; phone: null; lid: string } // lid = somente dígitos
   | { kind: "group"; phone: null; lid: null }
   | { kind: "unknown"; phone: null; lid: null };
+
+/**
+ * Corta o chatId no `@` do sufixo — o que `replace(/@.*$/, "")` fazia aqui, sem
+ * o custo quadrático que fez o CodeQL apontar as duas linhas (js/polynomial-redos,
+ * alertas #6 e #7).
+ *
+ * ⚠️ NÃO troque por `indexOf("@")` nem por `lastIndexOf("@")`: nenhum dos dois é
+ * equivalente. `.` não casa terminador de linha e `$` (sem /m) só casa no fim da
+ * string, então o `@` que a regex achava é o PRIMEIRO **depois do ÚLTIMO
+ * terminador de linha**. Em `"@@@\n@lid"` a regex devolvia `"@@@\n"`; `indexOf`
+ * devolveria `""` e `lastIndexOf`, `"@@@\n@"`. Medido por varredura exaustiva
+ * (37.449 strings, alfabeto `{@ a \n \r LS PS + espaço}`): esta formulação diverge
+ * em 0; `indexOf` em 11.760; `lastIndexOf` em 11.798.
+ *
+ * Os quatro terminadores são exatamente os que `.` não casa (`\n \r U+2028 U+2029`
+ * — NEL, TAB e NBSP casam, então não entram). Escritos como escape de propósito:
+ * a versão com o caractere cru é indistinguível a olho da versão corrompida por
+ * um copy-paste, e `tsc`/`eslint` dão verde nas duas — só a semântica muda
+ * (4.582 divergências em 37.449).
+ *
+ * Por que era caro: o motor reinicia a tentativa a partir de CADA `@`, e quando há
+ * um terminador de linha no meio todas falham — O(n²). O `endsWith("@lid")` acima
+ * NÃO protege: `"@".repeat(n) + "\n@lid"` passa por ele. Medido nesta função,
+ * `String.replace` sendo síncrono (trava o event loop do processo inteiro, todos
+ * os tenants): 64 KB de `from` custam ~2,9 s; 256 KB, ~48 s. A entrada é externa —
+ * `payload.from` vem do corpo do webhook, e `WAHA_WEBHOOK_REQUIRE_SIGNATURE` é
+ * `false` por padrão. Esta varredura é linear: 1 MB em 0,7 ms.
+ *
+ * O que MUDOU desde que isto foi escrito: o corpo chegava por
+ * `JSON.parse(rawBody) as WahaEnvelope` — cast, sem validação —, então `from`
+ * podia nem ser string e o `.endsWith` acima lançava. Hoje o contrato é um
+ * schema (`lib/waha/envelope.ts`) e a rota recusa antes de chegar aqui. O
+ * TAMANHO continua livre, que é por isso que esta função segue linear.
+ */
+function semSufixoDeChat(chatId: string): string {
+  const aposQuebra =
+    Math.max(
+      chatId.lastIndexOf("\n"),
+      chatId.lastIndexOf("\r"),
+      chatId.lastIndexOf("\u2028"),
+      chatId.lastIndexOf("\u2029"),
+    ) + 1;
+  const arroba = chatId.indexOf("@", aposQuebra);
+  return arroba === -1 ? chatId : chatId.slice(0, arroba);
+}
 
 /**
  * Resolve um chatId WAHA em identidade canônica:
@@ -100,13 +189,16 @@ export type ChatIdentity =
  * opostas: um é decisão de produto, o outro é buraco de conhecimento. Só o
  * segundo é anomalia, então só ele emite evento.
  */
+
 export function parseChatId(chatId: string): ChatIdentity {
   if (chatId.endsWith("@g.us")) return { kind: "group", phone: null, lid: null };
   if (chatId.endsWith("@lid")) {
-    return { kind: "lid", phone: null, lid: chatId.replace(/@.*$/, "") };
+    return { kind: "lid", phone: null, lid: semSufixoDeChat(chatId) };
   }
   if (chatId.endsWith("@c.us") || chatId.endsWith("@s.whatsapp.net")) {
-    const digits = chatId.replace(/@.*$/, "").replace(/^\+/, "");
+    // `replace(/^\+/, "")` fica: é ancorado em `^`, casa 1 caractere, O(1) — não é
+    // o que o CodeQL apontou.
+    const digits = semSufixoDeChat(chatId).replace(/^\+/, "");
     return { kind: "phone", phone: "+" + digits, lid: null };
   }
   return { kind: "unknown", phone: null, lid: null };
@@ -232,6 +324,7 @@ const NOWEB_MESSAGE_KEY_TYPE: Record<string, string> = {
   audioMessage: "audio",
   documentMessage: "document",
   documentWithCaptionMessage: "document",
+  contactMessage: "contact",
 };
 
 export function resolveMessageType(p: WahaPayload): string {
@@ -255,6 +348,24 @@ export function resolveMessageType(p: WahaPayload): string {
 
 function notifyNameOf(p: WahaPayload): string | null {
   return p._data?.notifyName ?? p._data?.pushName ?? null;
+}
+
+/** Corpo textual: WAHA nem sempre preenche `body` em cartões de contato NOWEB. */
+function bodyOf(p: WahaPayload): string | null {
+  if (p.body) return p.body;
+  const msg = p._data?.message;
+  if (!msg || typeof msg !== "object") return null;
+  // `_data.message` é `unknown` no schema Zod (`lib/waha/envelope.ts`), de
+  // propósito: a forma NOWEB varia por tipo de mensagem e exigi-la aqui só
+  // criaria uma porta nova de descartar a mensagem inteira. O estreitamento é
+  // explícito, no mesmo estilo do `cm as {…}` logo abaixo.
+  const cm = (msg as { contactMessage?: unknown }).contactMessage;
+  if (cm && typeof cm === "object") {
+    const o = cm as { vcard?: string; displayName?: string };
+    if (o.vcard) return o.vcard;
+    if (o.displayName) return o.displayName;
+  }
+  return null;
 }
 
 /**
@@ -336,7 +447,11 @@ async function upsertContact(
     // ele já é um número, ou de `_data.key.remoteJidAlt` quando o chat é `@lid`.
     // Resolver aqui, e não no SQL, foi o que permitiu manter a assinatura da
     // função (e portanto os grants e os invariantes de hardening) intacta.
-    p_phone: parsed.kind === "phone" ? parsed.phone : telefoneAlt,
+    p_phone: parsed.kind === "phone"
+      ? canonicalPhoneBR(parsed.phone)
+      : telefoneAlt
+        ? canonicalPhoneBR(telefoneAlt)
+        : null,
     p_lid: parsed.kind === "lid" ? parsed.lid : null,
     p_chat_id: chatId,
     p_notify: notifyName,
@@ -384,6 +499,11 @@ async function upsertConversation(
  *
  * O evento é o que torna a pergunta respondível: `select count(*) from event_log
  * where event_type = 'whatsapp.conversation_mark_failed'`.
+ *
+ * ⚠️ O CORPO MUDOU DE CASA, e o motivo está em `lib/channels/marcar-conversa.ts`:
+ * Meta e Zernio chamavam a mesma RPC e tratavam a falha pior — a Meta ignorava
+ * o retorno inteiro. Esta função continua existindo com a assinatura que os dois
+ * chamadores daqui usam; quem decide o que fazer com a falha é uma só.
  */
 async function markConversation(
   admin: Admin,
@@ -393,40 +513,38 @@ async function markConversation(
   preview: string,
   at: string,
 ): Promise<void> {
-  const { error } = await admin.rpc("fn_mark_conversation_message" as never, {
-    p_conv: convId,
-    p_direction: direction,
-    p_preview: preview,
-    p_at: at,
-  } as never);
-  if (!error) return;
-
-  const { error: erroAviso } = await admin.rpc("emit_event" as never, {
-    p_event_type: "whatsapp.conversation_mark_failed",
-    p_entity_kind: "conversation",
-    p_entity_id: convId,
-    // O preview NÃO entra no payload: ele é o texto da mensagem do cliente, e
-    // isto é registro operacional, não cópia de conteúdo. O que se precisa
-    // saber para agir é qual conversa, que sentido, e o erro.
-    p_payload: { direction, erro: error.message },
-    p_metadata: { severity: "warn" },
-    p_organization_id: organizationId,
-  } as never);
-
-  if (erroAviso) {
-    // Segunda linha de defesa: o próprio canal de aviso caiu. Aqui o log do
-    // processo é o que sobra — é para ESTE caso que ele existe, não como rotina.
-    console.error("[waha.ingest] o carimbo falhou E o aviso também", {
-      conversa: convId,
-      erro: error.message,
-      aviso: erroAviso.message,
-    });
-  }
+  await marcarConversaComMensagem(admin as unknown as SupabaseClient, {
+    organizationId,
+    conversationId: convId,
+    direction,
+    preview,
+    at,
+    canal: "waha",
+  });
 }
 
 /**
  * Mensagem recebida (fromMe=false). Contato = remetente (`from`).
  */
+async function mensagemIngeridaPorExternalId(
+  admin: Admin,
+  orgId: string,
+  externalId: string,
+): Promise<{ id: string; contact_id: string; body: string | null } | null> {
+  const { data, error } = await admin
+    .from("messages")
+    .select("id, contact_id, body")
+    .eq("organization_id", orgId)
+    .eq("external_id", externalId)
+    .eq("direction", "inbound")
+    .maybeSingle();
+  if (error) {
+    logger.warn("waha.ingest: dedup sem ler mensagem existente", { detail: error.message });
+    return null;
+  }
+  return data ?? null;
+}
+
 async function handleInbound(
   admin: Admin,
   session: Session,
@@ -438,7 +556,8 @@ async function handleInbound(
   if (parsed.kind === "group") return; // grupos não fazem binding CRM
   if (!p.id) return;
   // WAHA emite eventos vazios p/ status/read-receipt/presence — não viram mensagem.
-  if (!p.body && !mediaUrlOf(p) && !p.hasMedia) return;
+  const texto = bodyOf(p);
+  if (!texto && !mediaUrlOf(p) && !p.hasMedia) return;
   // Daqui para baixo era para ser uma mensagem de verdade: se o chat não é
   // endereçável, PERDEMOS uma — e isso precisa ser contável. O aviso fica depois
   // das guardas acima de propósito; antes delas, todo evento de presença viraria
@@ -457,6 +576,17 @@ async function handleInbound(
     telefoneAlternativoDe(p),
   );
   if (!contactId) return;
+
+  // Best-effort: o dado do anúncio (se houver) vai embutido na PRÓPRIA
+  // mensagem que o app do cliente manda ao clicar num anúncio "Clique para o
+  // WhatsApp" — não é exclusivo da API oficial. NUNCA verificado contra um
+  // clique real nesta instalação (ver cabeçalho de `atribuicao-de-anuncio.ts`);
+  // por isso é silencioso quando não reconhece a forma, nunca derruba o
+  // inbound. `estamparAtribuicaoDoContato` só grava na primeira vez — se o
+  // contato já tem atribuição, o UPDATE casa zero linhas.
+  const atribuicao = extrairAtribuicaoWaha(p._data?.message);
+  if (atribuicao) await estamparAtribuicaoDoContato(admin, contactId, atribuicao);
+
   const conversationId = await upsertConversation(admin, session.organization_id, contactId, session.id);
   if (!conversationId) return;
 
@@ -473,7 +603,7 @@ async function handleInbound(
       direction: "inbound",
       status: "delivered",
       ack: p.ack ?? null,
-      body: p.body ?? null,
+      body: texto,
       media_url: mediaUrlOf(p),
       media_mime: mediaMimeOf(p),
       sent_via: "external_device",
@@ -504,10 +634,30 @@ async function handleInbound(
       external_id: p.id,
       direcao: "inbound",
     });
+    // A 1ª entrega pode ter gravado a mensagem e estourado o tempo ANTES de
+    // `aplicarEfeitosPosEntrada` — a reentrega cai aqui. Reacelerar só o
+    // pipeline (sem re-despachar o agente) destrava o match_reply.
+    const existente = await mensagemIngeridaPorExternalId(admin, session.organization_id, p.id);
+    if (existente) {
+      try {
+        await acelerarPipelineDeEventos(admin, {
+          organizationId: session.organization_id,
+          contactId: existente.contact_id,
+          messageId: existente.id,
+          texto: existente.body,
+        });
+      } catch (err) {
+        logger.warn("waha.ingest: dedup nao reacelerou pipeline", {
+          organization_id: session.organization_id,
+          external_id: p.id,
+          detail: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
     return;
   }
 
-  await markConversation(admin, session.organization_id, conversationId, "inbound", previewFromMessage(p), now);
+  await markConversation(admin, session.organization_id, conversationId, "inbound", previewFromMessage(p), p.timestamp ? new Date(p.timestamp * 1000).toISOString() : now);
 
   await audit({
     action: "message.received",
@@ -534,7 +684,7 @@ async function handleInbound(
     conversationId,
     messageId: insertedMessage?.id ?? null,
     channelSessionId: session.id,
-    texto: p.body ?? null,
+    texto,
     nomeDoContato: notifyNameOf(p),
     requestId,
     origem: "waha_webhook",
@@ -681,7 +831,7 @@ async function handleOutboundFromUserPhone(
       direction: "outbound",
       status: "sent",
       ack: p.ack ?? null,
-      body: p.body ?? null,
+      body: bodyOf(p),
       media_url: mediaUrlOf(p),
       media_mime: mediaMimeOf(p),
       sent_via: "external_device",
@@ -705,6 +855,41 @@ async function handleOutboundFromUserPhone(
   }
 
   await markConversation(admin, session.organization_id, conversationId, "outbound", previewFromMessage(p), now);
+
+  // Uma PESSOA respondeu este cliente pelo celular, fora do composer/IA — a IA
+  // para NESTA conversa para não responder junto, por uma janela que expira
+  // sozinha (ver `PRAZO_DO_SILENCIO_MS`). NÃO mexe em `contacts.ai_authorized_at`
+  // — a origem do lead é outro estado.
+  //
+  // ⚠️ MAS ANTES: isto é MESMO um humano, ou é o eco do nosso próprio envio?
+  //
+  // ⚠️ NÃO basta o `jaRegistrada` acima. Este comentário já afirmou que bastava
+  // ("o eco do nosso próprio envio já saiu no dedup") e a afirmação é FALSA,
+  // medida na fonte: `jaRegistrada` casa por `.in("external_id", …)`, e todo
+  // envio do CRM grava a linha ANTES de falar com o canal (`status='queued'`,
+  // `external_id` NULL) — o id só existe depois que o WAHA responde. Nessa
+  // janela o dedup não casa nada, o eco chega com `fromMe`, e esta função
+  // concluía "humano assumiu". A tela mostrava "Automático pausado", um estado
+  // legítimo que ninguém investiga. (issue #519, consertada no #521)
+  //
+  // Aqui isso é PIOR do que era: o silêncio deste caminho é um estado que dura
+  // até vencer o prazo ou até alguém clicar — a IA passaria a se calar porque
+  // ela mesma falou.
+  //
+  // As DUAS decisões que eram uma só se separam aqui, e em direções OPOSTAS de
+  // propósito:
+  //   gravar a linha  -> tolerante  (na dúvida grava; perder mensagem é pior que
+  //                                  duplicar — é o #108, que já custou caro)
+  //   silenciar o bot -> ESTRITO    (na dúvida NÃO cala; calar a IA por engano é
+  //                                  pior que não calar)
+  // Quem reaproveitar esta condição para pular o INSERT reabre o #108.
+  if (!(await ehEcoDeEnvioNosso(admin, session.organization_id, conversationId, p))) {
+    await pausarIaPorAtendimentoManual(admin, {
+      organizationId: session.organization_id,
+      conversationId,
+      canal: "waha",
+    });
+  }
 
   await audit({
     action: "message.sent",
@@ -823,7 +1008,7 @@ async function handleSessionStatus(
 async function handleMessageEdited(
   admin: Admin,
   session: Session,
-  p: WahaPayload & { editedMessageId?: string },
+  p: WahaPayload,
 ): Promise<void> {
   const alvo = bareWaMessageId(p.editedMessageId ?? "");
   const corpo = typeof p.body === "string" ? p.body : null;
@@ -848,7 +1033,7 @@ async function handleMessageEdited(
 async function handleMessageRevoked(
   admin: Admin,
   session: Session,
-  p: WahaPayload & { revokedMessageId?: string },
+  p: WahaPayload,
 ): Promise<void> {
   const alvo = bareWaMessageId(p.revokedMessageId ?? "");
   if (!alvo) return;
@@ -871,7 +1056,7 @@ export async function dispatchWahaEvent(
   requestId: string,
 ): Promise<void> {
   const eventType = envelope.event ?? "unknown";
-  const payload = envelope.payload ?? {};
+  const payload: WahaPayload = envelope.payload ?? {};
 
   if (eventType === "message" || eventType === "message.any") {
     if (payload.fromMe) {

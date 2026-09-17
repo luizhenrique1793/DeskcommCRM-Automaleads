@@ -1,3 +1,4 @@
+import { criarOrigemDeFollowup } from "./followup-service-origin";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import pg from "pg";
 
@@ -31,7 +32,8 @@ import type { EnrollmentEventRef, EnrollmentRow } from "@/lib/followup/node-hand
  * re-drain; (2) inbound em waiting_reply sem cancel_on_reply acorda (marker +
  * next_eval_at=now) e o PRÓPRIO tick do engine classifica em vez de rotear
  * no_reply (a corrida classify-lento documentada no HANDOFF); (3) inbound com
- * cancel_on_reply=true cancela (replied); (4) handoff aberto aplica a política
+ * cancel_on_reply=true cancela (replied), inclusive quando a inscrição está em
+ * espera fixa active; (4) handoff aberto aplica a política
  * do pointer (pause/cancel/allow); (5) O CENTERPIECE anti-Tomik: pausa por
  * handoff → fecha → retoma pra active com next_eval_at setado, nunca preso.
  */
@@ -167,9 +169,12 @@ function engineDb(): AdminClient {
     async loadLeadFacts() {
       return { lead_stage: null, tags: [] };
     },
+    async loadLastInboundBody() {
+      return null;
+    },
     async loadEnrollmentEvents(enrollmentId): Promise<EnrollmentEventRef[]> {
       const { rows } = await pool.query<EnrollmentEventRef>(
-        `select node_id, idempotency_key from followup_enrollment_events where enrollment_id = $1`,
+        `select node_id, idempotency_key, event_type, payload from followup_enrollment_events where enrollment_id = $1 order by created_at asc`,
         [enrollmentId],
       );
       return rows;
@@ -212,6 +217,7 @@ function engineDb(): AdminClient {
         [item.organization_id, item.title, item.body, item.ref_id],
       );
     },
+    async persistirRespostaFollowup() {},
   };
 }
 
@@ -296,12 +302,13 @@ async function seedEnrollment(params: {
       : status === "paused_handoff"
         ? null
         : new Date(Date.now() + 3_600_000).toISOString();
+  const boundary = await criarOrigemDeFollowup(pool, params.org, params.contactId);
   const { rows } = await pool.query<{ id: string }>(
     `insert into followup_enrollments
-       (organization_id, pointer_id, version_id, contact_id, current_node_id, status, next_eval_at, steps_taken)
-     values ($1, $2, $3, $4, $5, $6, $7, $8)
+       (organization_id, pointer_id, version_id, contact_id, current_node_id, status, next_eval_at, steps_taken, conversation_id, service_boundary)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
      returning id`,
-    [params.org, params.pointerId, params.versionId, params.contactId, params.currentNodeId, status, nextEvalAt, params.stepsTaken ?? 0],
+    [params.org, params.pointerId, params.versionId, params.contactId, params.currentNodeId, status, nextEvalAt, params.stepsTaken ?? 0, boundary.conversation_id, JSON.stringify(boundary)],
   );
   return rows[0]!.id;
 }
@@ -639,6 +646,34 @@ describe("applyReactivityEvent — inbound wake (waiting_reply, sem cancel_on_re
     expect(after.outcome).toBe("replied");
   });
 
+  // O nome anterior deste caso dizia "espera fixa", e o caminho testado não lê
+  // tipo de nó nenhum: `esperaAtiva` filtra por `status === 'active'`. O rótulo
+  // prometia menos do que o código faz, e quem lesse o teste procuraria uma
+  // condição de nó que não existe. A amplitude é deliberada — a chave na tela
+  // diz "cancelar se o lead responder", sem ressalva de nó —, e o caso irmão
+  // abaixo a prende de propósito.
+  it("cancel_on_reply cancela também a inscrição active, não só a waiting_reply", async () => {
+    const org = nextOrgId();
+    await seedOrg(org);
+    const contactId = await seedContact(org);
+    const { pointerId, versionId } = await seedFlow(org, SIMPLE_GRAPH, {
+      triggerConfig: { kind: "stage_change", params: { stage_id: nextOrgId() }, cancel_on_reply: true },
+    });
+    const enrollmentId = await seedEnrollment({ org, pointerId, versionId, contactId, currentNodeId: "w1", status: "active" });
+
+    const row = eventRow({ organization_id: org, event_type: "message.received", payload: { contact_id: contactId } });
+    const summary = await applyReactivityEvent(reactivityDb(), () => new Date(), row);
+    expect(summary).toEqual({ matched: true, reacted: 1 });
+
+    const after = await getEnrollment(enrollmentId);
+    expect(after.status).toBe("cancelled");
+    expect(after.outcome).toBe("replied");
+    expect(after.next_eval_at).toBeNull();
+
+    const events = await getEvents(enrollmentId);
+    expect(events.map((e) => e.event_type)).toEqual(["reactivity_replied"]);
+  });
+
   it("cancel_on_reply ausente (schema antigo) — comportamento inalterado: acorda, não cancela", async () => {
     const org = nextOrgId();
     await seedOrg(org);
@@ -834,6 +869,7 @@ describe("completeTurnForEnrollment (turn-bridge) — respeita paused_handoff", 
       currentNodeId: "ac1",
       nextEvalAt: new Date(Date.now() - 1_000).toISOString(),
     });
+    expect((await getEnrollment(enrollmentId)).conversation_id).toBe(conversationId);
     const tick1 = await runFollowupTick({ db: pgDb, clock: relogioAncoradoNoBanco(), enqueueJob: async (j) => void jobs.push(j) }, { limit: 5 });
     expect(tick1.scheduled).toBe(1);
     const afterTick1 = await getEnrollment(enrollmentId);

@@ -8,9 +8,51 @@ import type { NextConfig } from "next";
  *  - Initial bundle /app/inbox < 250KB gzipped
  */
 const nextConfig: NextConfig = {
-  // Self-host (HostGator): gera .next/standalone pro container Docker (node server.js).
-  // Aditivo — não afeta o deploy Vercel.
-  output: "standalone",
+  // Self-host: gera .next/standalone pro container Docker (node server.js).
+  // Na Vercel (VERCEL=1) fica desligado — Next 16.3 + adapter + standalone
+  // quebra o onBuildComplete com ENOENT next-server.js.nft.json (#96646).
+  output: process.env.VERCEL ? undefined : "standalone",
+  /**
+   * O `standalone` copia SÓ o que o file tracing detecta — e ele não detecta
+   * tudo de `@swc/helpers`.
+   *
+   * Medido no build da `main`: o pacote real tem 108 arquivos em `esm/`, e o
+   * standalone levava **2**. Em runtime o Node pedia
+   * `@swc/helpers/esm/_interop_require_default`, não achava, e o container
+   * subia em crashloop com `MODULE_NOT_FOUND` — a imagem construía, publicava e
+   * só morria ao dar `docker compose up` na VPS.
+   *
+   * Não aparecia no `next@16.3.0`: aquela versão resolvia o helper pelo CJS. O
+   * bump para `16.3.1` passou a resolvê-lo por `exports`/ESM, e o buraco do
+   * trace virou falha dura. Como o helper é injetado pelo COMPILADOR (nenhum
+   * arquivo nosso o importa), não há import para o trace seguir — a inclusão
+   * precisa ser declarada.
+   *
+   * O glob passa pelo layout do pnpm (`.pnpm/@swc+helpers@<versão>/…`) porque é
+   * onde o pacote realmente mora aqui; o `*` cobre o bump de versão seguinte
+   * sem exigir que alguém lembre de editar esta linha.
+   */
+  outputFileTracingIncludes: {
+    "/**": [
+      "./node_modules/.pnpm/@swc+helpers@*/node_modules/@swc/helpers/**",
+      // Mesmo defeito do @swc/helpers acima: js-binding.js do @napi-rs/canvas
+      // resolve o binário nativo com `require()` computado em runtime
+      // (process.platform/isMusl()), então o tracer não o segue e o
+      // standalone sobe sem o binário — pdfjs-dist quebra no import com
+      // "DOMMatrix is not defined" (lib/ai/rag/extractors/pdf.ts).
+      //
+      // São DOIS padrões, e o motivo de não ser um `@napi-rs/**` só está
+      // medido: dentro de `@napi-rs/` o pnpm põe, ao lado do pacote real, um
+      // SYMLINK por plataforma (`canvas-linux-x64-gnu` ->
+      // `../../../@napi-rs+canvas-linux-x64-gnu@…`). O glob casa o symlink, o
+      // Turbopack tenta lê-lo como arquivo para calcular o hash do
+      // `.nft.json`, e o build morre com `Is a directory (os error 21)` —
+      // não no import, no EMIT. Apontando para o conteúdo de cada pacote em
+      // vez de para o diretório que os agrega, nenhum symlink é visitado.
+      "./node_modules/.pnpm/@napi-rs+canvas@*/node_modules/@napi-rs/canvas/**",
+      "./node_modules/.pnpm/@napi-rs+canvas-*/node_modules/@napi-rs/*/*.node",
+    ],
+  },
   reactStrictMode: true,
   poweredByHeader: false,
   // typedRoutes moved out of experimental in Next 15.5+
@@ -31,6 +73,13 @@ const nextConfig: NextConfig = {
   async headers() {
     return [
       {
+        source: "/notify-sw.js",
+        headers: [
+          { key: "Cache-Control", value: "no-cache" },
+          { key: "Service-Worker-Allowed", value: "/" },
+        ],
+      },
+      {
         source: "/(.*)",
         headers: [
           { key: "X-Content-Type-Options", value: "nosniff" },
@@ -40,7 +89,11 @@ const nextConfig: NextConfig = {
           // usa getUserMedia({audio}); microphone=() bloquearia em TODA origem,
           // inclusive a própria — daria "microphone is not allowed in this document".
           // Câmera e geolocalização seguem bloqueadas (não usadas).
-          { key: "Permissions-Policy", value: "camera=(), microphone=(self), geolocation=()" },
+          // notifications=(self): bandeja do SO quando a janela está minimizada.
+          {
+            key: "Permissions-Policy",
+            value: "camera=(), microphone=(self), geolocation=(), notifications=(self)",
+          },
         ],
       },
     ];

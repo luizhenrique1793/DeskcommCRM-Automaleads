@@ -37,6 +37,13 @@ log_err() {  # log_err <mensagem> — grava com timestamp, corta pra ~200 linhas
   { tail -n 200 "$ERRLOG" > "${ERRLOG}.tmp" && mv "${ERRLOG}.tmp" "$ERRLOG"; } 2>/dev/null || true
 }
 
+# Antes de qualquer outra coisa: esta cópia do repo manda neste projeto Docker?
+#
+# Cedo de propósito — antes até de ANUNCIAR a versão. Uma cópia que não é a dona
+# anunciaria a versão da árvore dela, e o app ofereceria "Atualizar agora" com
+# base num número que não descreve o que está no ar.
+recusar_projeto_de_outra_arvore log_err || exit 0
+
 post() {  # post <json> → corpo da resposta em 2xx; VAZIO em qualquer falha
   # (quem chama, ex. o laço de retry do run_result, usa "saiu vazio" como sinal
   # de falha — por isso o corpo só é impresso no ramo de sucesso).
@@ -150,7 +157,17 @@ if [ -n "$LATEST_TAG" ] && [ "$LATEST_TAG" != "$CURRENT" ]; then
   # HEARTBEAT INTEIRO morreria com 422 — sem short-circuit, isso morre calado.
   # 30000 cru garante ≤60000 escapado mesmo no pior caso (100% do texto
   # escapando 2x), com folga sobre o teto de 64000.
-  CHANGELOG="$(git show "${LATEST_TAG}:CHANGELOG.md" 2>/dev/null | head -c 30000 || true)"
+  # O corte deixou de ser cego. O `awk` para de imprimir AO IMPRIMIR o cabeçalho
+  # da versão instalada — e o cabeçalho entra de propósito: é ele que prova ao
+  # app que a faixa está completa. Isso encolhe o payload no caso comum (uma ou
+  # duas versões de salto) em vez de subir o teto, que mataria o heartbeat
+  # inteiro com 422, calado. O `head -c 30000` continua depois, como teto para o
+  # salto grande. `index()` e não regex: o rótulo tem `[` e `]`, e escapar isso
+  # em awk é onde se erra. Instalação fora de release (CURRENT é um SHA) nunca
+  # casa, cai no arquivo inteiro cortado, e o app declara que não alcançou.
+  # MANTENHA numa linha física só: tests/unit/changelog-cabe-na-tela-da-vps.test.ts
+  # lê o teto daqui por regex de linha única e EXPLODE se ela for quebrada.
+  CHANGELOG="$(git show "${LATEST_TAG}:CHANGELOG.md" 2>/dev/null | awk -v cur="## [${CURRENT#v}]" 'index($0, cur) == 1 { print; exit } { print }' | head -c 30000 || true)"
   # `head -c` corta em byte fixo, e o CHANGELOG tem emoji/acento multi-byte
   # (UTF-8) — um corte no meio de um caractere quebraria o JSON de um jeito
   # difícil de rastrear. `iconv -c` descarta o byte incompleto do final sem
@@ -165,7 +182,35 @@ fi
 # Cinto e suspensório: o "LC_ALL=C" acima já torna esc() incapaz de abortar
 # por sequência inválida, mas a morte do agente é grave o bastante (run
 # travado pra sempre) pra justificar a redundância explícita do "|| true".
+# Pin pela metade: o app fixado numa versão e o worker/scheduler seguindo canal
+# móvel. É o estado que a PRIMEIRA atualização de uma instalação legada deixa —
+# medido em ensaio e na produção —, e o `update.sh` que o produz é o antigo, que
+# não sabe avisar. Este agente é o único que roda DEPOIS dele já com o kit novo
+# em disco (cron de 5 min, lido a cada execução), então é por aqui que a
+# informação alcança quem parou na primeira e não voltou.
+#
+# Ele AVISA, não corrige. Gravar no `.env` de uma instalação alheia é mudança de
+# comportamento e precisa de decisão de quem opera — não de um cron.
+# Preenche a lacuna sozinho, e só a lacuna. O estado dura no máximo um ciclo de
+# cron (5 min) em vez de durar até alguém rodar o update de novo — que era o que
+# acontecia, porque a tela dizia "concluída" e ninguém volta.
+PIN_CORRIGIDO="$(completar_pin_ausente .env)" || PIN_CORRIGIDO=""
+[ -n "$PIN_CORRIGIDO" ] && log_err "fixei a versão de $PIN_CORRIGIDO no .env (estava sem versão fixa; usei a que já estava rodando)"
+
+# O que sobra depois de corrigir: valor explícito em canal móvel, que é decisão
+# do operador e não se toca. Aqui só se avisa.
+PIN_FALTANDO="$(pin_incompleto .env)" || PIN_FALTANDO=""
+
 BODY="{\"kind\":\"heartbeat\",\"current_version\":\"${CURRENT}\",\"current_sha\":\"${CURRENT_SHA}\",\"off_release\":${OFF_RELEASE},\"latest_version\":\"${LATEST_TAG}\",\"compare_failed\":${COMPARE_FAILED},\"has_known_release\":${HAS_KNOWN_RELEASE},\"changelog\":\"$(esc "$CHANGELOG")\"}" || true
+
+# Só no log do host, de propósito. Mandar isto no heartbeat seria inútil: o
+# schema da rota é `z.object` sem `.strict()`, então o Zod DESCARTA chave
+# desconhecida em silêncio — o campo viajaria e não chegaria a lugar nenhum,
+# que é a definição de controle decorativo. Quando o app aprender o campo, aí
+# ele entra no BODY junto.
+if [ -n "$PIN_FALTANDO" ]; then
+  log_err "a versão de $PIN_FALTANDO está solta (seguindo um canal, não uma versão fixa) — rode 'bash hostgator-setup-kit/update.sh' mais uma vez para fixar"
+fi
 RESP="$(post "$BODY")"
 
 [ "$(json_field "$RESP" update_requested)" = "true" ] || exit 0
@@ -185,6 +230,27 @@ report() { post "{\"kind\":\"run_progress\",\"run_id\":\"${RUN_ID}\",\"step\":\"
 # sempre; sem o "|| true" isso já derrubava o agente ANTES de sequer chamar o
 # update.sh (achado só rodando de propósito com o comando falhando).
 PREV_IMAGE="$(dc images -q app 2>/dev/null | head -1)" || true
+# O worker e o scheduler passaram a ser imagens publicadas e pinadas na mesma
+# versão do app (antes eram `build:`-only e nenhum update os alcançava). Isso
+# tem um custo aqui: um rollback que voltasse SÓ o app deixaria o parque com
+# app na versão antiga e worker/scheduler na nova — mistura de versões que a
+# doutrina de packaging existe para impedir. Então os três voltam juntos.
+#
+# SÓ numa instalação que já passou pelo update.sh novo — isto é, cujo .env já
+# tem WORKER_IMAGE/SCHEDULER_IMAGE. Numa instalação LEGADA o `images -q` devolve
+# o ID da imagem antiga, e gravá-lo no .env seria pior que não voltar nada: o
+# scheduler legado era `alpine:3.20` com o crontab montado por um `command:`
+# inline que este compose não tem mais. Pinar aquele ID deixaria o contêiner
+# rodando o CMD do alpine puro — ele sai na hora, e `restart: unless-stopped` o
+# recoloca em crashloop. Os 16 crons parariam, em silêncio, gravado no .env.
+if grep -qE '^WORKER_IMAGE=' .env 2>/dev/null; then
+  PREV_WORKER_IMAGE="$(dc images -q worker 2>/dev/null | head -1)" || true
+fi
+if grep -qE '^SCHEDULER_IMAGE=' .env 2>/dev/null; then
+  PREV_SCHEDULER_IMAGE="$(dc images -q scheduler 2>/dev/null | head -1)" || true
+fi
+PREV_WORKER_IMAGE="${PREV_WORKER_IMAGE:-}"
+PREV_SCHEDULER_IMAGE="${PREV_SCHEDULER_IMAGE:-}"
 if [ -z "$PREV_IMAGE" ]; then
   # Registrado, não ignorado: sem imagem anterior conhecida, se o update.sh
   # falhar mais adiante NÃO HÁ como voltar — o status vai sair "failed", nunca
@@ -229,16 +295,34 @@ if [ $RC -eq "$REFUSED_RC" ]; then
 elif [ $RC -ne 0 ]; then
   STATUS="failed"
   if [ -n "$PREV_IMAGE" ]; then
+    # Os serviços que temos como voltar. Worker e scheduler entram só se o
+    # `images -q` deles respondeu: numa instalação que ainda não tinha as
+    # imagens novas, voltar o app sozinho continua sendo o comportamento certo,
+    # e é melhor que não voltar nada.
+    ROLLBACK_ARGS=(app)
+    [ -n "$PREV_WORKER_IMAGE" ] && ROLLBACK_ARGS+=(worker)
+    [ -n "$PREV_SCHEDULER_IMAGE" ] && ROLLBACK_ARGS+=(scheduler)
+
     if APP_IMAGE="$PREV_IMAGE" APP_PULL_POLICY=missing \
-         dc up -d app >>"$LOG" 2>&1; then
+       WORKER_IMAGE="${PREV_WORKER_IMAGE:-}" WORKER_PULL_POLICY=missing \
+       SCHEDULER_IMAGE="${PREV_SCHEDULER_IMAGE:-}" SCHEDULER_PULL_POLICY=missing \
+         dc up -d "${ROLLBACK_ARGS[@]}" >>"$LOG" 2>&1; then
       STATUS="failed_rolled_back"
-      # Persiste a volta: o update.sh já gravou a imagem NOVA (quebrada) no
+      # Persiste a volta: o update.sh já gravou as imagens NOVAS (quebradas) no
       # .env antes do pull. Sem reescrever aqui, o próximo `up -d` — o do
       # cliente, semanas depois — traria o app quebrado de volta e desfaria o
-      # rollback em silêncio. PREV_IMAGE é um ID local (não uma tag no
+      # rollback em silêncio. Os IDs guardados são LOCAIS (não tags do
       # registro), então a política de pull precisa ir junto.
       set_env_var .env APP_IMAGE "$PREV_IMAGE"
       set_env_var .env APP_PULL_POLICY missing
+      if [ -n "$PREV_WORKER_IMAGE" ]; then
+        set_env_var .env WORKER_IMAGE "$PREV_WORKER_IMAGE"
+        set_env_var .env WORKER_PULL_POLICY missing
+      fi
+      if [ -n "$PREV_SCHEDULER_IMAGE" ]; then
+        set_env_var .env SCHEDULER_IMAGE "$PREV_SCHEDULER_IMAGE"
+        set_env_var .env SCHEDULER_PULL_POLICY missing
+      fi
     fi
   fi
 fi

@@ -25,7 +25,12 @@ import { describe, expect, it } from "vitest";
 
 const RAIZ = join(__dirname, "..", "..");
 const DIR_CRON = join(RAIZ, "app", "api", "v1", "cron");
-const COMPOSE = join(RAIZ, "docker-compose.prod.yml");
+// O crontab saiu do `command:` inline do compose e virou o entrypoint da imagem
+// `deskcomm-scheduler` — o `apk add curl tzdata` a cada start amarrava a volta
+// do cron à internet da VPS. A cerca continua a mesma; só a fonte da verdade do
+// "o que roda" mudou de arquivo.
+const CRONTAB = join(RAIZ, "docker", "scheduler", "entrypoint.sh");
+const VERCEL_TS = join(RAIZ, "vercel.ts");
 
 /** As rotas que existem, lidas do disco — não de uma lista mantida à mão. */
 function rotasNoCodigo(): string[] {
@@ -37,8 +42,8 @@ function rotasNoCodigo(): string[] {
 
 /** As rotas que o `scheduler` chama, extraídas do crontab embutido no compose. */
 function rotasAgendadas(): string[] {
-  const yml = readFileSync(COMPOSE, "utf8");
-  const achadas = yml.matchAll(/api\/v1\/cron\/([a-z0-9-]+)/g);
+  const sh = readFileSync(CRONTAB, "utf8");
+  const achadas = sh.matchAll(/api\/v1\/cron\/([a-z0-9-]+)/g);
   return [...new Set([...achadas].map((m) => m[1]!))].sort();
 }
 
@@ -55,7 +60,7 @@ describe("rotas de cron × agendamento no self-host", () => {
     const naoAgendadas = rotasNoCodigo().filter((r) => !rotasAgendadas().includes(r));
     expect(
       naoAgendadas,
-      `Rota(s) de cron sem linha no crontab do serviço 'scheduler' em docker-compose.prod.yml: ` +
+      `Rota(s) de cron sem linha no crontab de docker/scheduler/entrypoint.sh: ` +
         `${naoAgendadas.join(", ")}. Num self-host elas NUNCA rodam, e a feature não dá erro — ` +
         `só não acontece. Adicione a linha (ou apague a rota, se ela morreu).`,
     ).toEqual([]);
@@ -70,5 +75,23 @@ describe("rotas de cron × agendamento no self-host", () => {
       `Crontab agenda rota(s) que não existem mais: ${orfas.join(", ")}. ` +
         `O curl silencia o 404 e ninguém percebe.`,
     ).toEqual([]);
+  });
+});
+
+function rotasNoVercelTs(): string[] {
+  const fonte = readFileSync(VERCEL_TS, "utf8");
+  const achadas = fonte.matchAll(/path:\s*"\/api\/v1\/cron\/([a-z0-9-]+)"/g);
+  return [...new Set([...achadas].map((m) => m[1]!))].sort();
+}
+
+describe("rotas de cron × agendamento no Vercel Pro", () => {
+  it("vercel.ts agenda as mesmas rotas do scheduler", () => {
+    expect(rotasNoVercelTs()).toEqual(rotasAgendadas());
+  });
+
+  it("documenta o CRON_SECRET da Vercel — senão o Pro agenda e a rota responde 403", () => {
+    const fonte = readFileSync(join(RAIZ, "lib", "env.ts"), "utf8");
+    expect(fonte).toContain("CRON_SECRET");
+    expect(fonte).toContain("env.INTERNAL_CRON_SECRET = vercelCron");
   });
 });

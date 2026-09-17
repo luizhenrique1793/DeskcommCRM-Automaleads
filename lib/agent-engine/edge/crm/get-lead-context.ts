@@ -14,6 +14,8 @@
 import type { Queryable } from '../../queue/queue';
 import type { CrmEdgeConfig } from './mcp-client';
 import { deriveLgpdFromContact, type LgpdInput } from '../../guardrails/lgpd/legal-basis';
+import { isoLocalComOffset } from '@/lib/tempo/agora';
+import { nomeDoContato } from '@/lib/contacts/rotulo-do-contato';
 
 /**
  * Heurística conservadora de contagem: ~3,5 chars/token para pt-br (BPE real fica
@@ -38,6 +40,15 @@ export interface LeadContextMessage {
   direction: 'inbound' | 'outbound';
   /** Corpo textual; mídia usa o derivado (transcrição/visão/pdf) ou marcador [tipo]. */
   body: string;
+  /**
+   * ISO 8601 no FUSO DA ORGANIZAÇÃO, com o offset real daquele instante
+   * (`2026-09-02T15:45:38-03:00`) — nunca UTC cru. Um agente instruído a ler o
+   * horário de cada mensagem para decidir se a loja está aberta precisa da hora
+   * de PAREDE do tenant, a mesma que o bloco `## Agora` do turno usa; entregar
+   * aqui o `+00` do fuso da sessão do Postgres foi o defeito medido em produção
+   * que `isoLocalComOffset` (lib/tempo/agora.ts) existe para consertar. Ainda
+   * parseável por `Date.parse` (o offset preserva o instante exato).
+   */
   sent_at: string;
   /** Metadados de mídia (Onda 3): presentes só em mensagens com mídia. */
   type?: string;
@@ -64,7 +75,18 @@ export interface UltimaDecisaoHumana {
 
 /** Payload curado que o modelo recebe. */
 export interface LeadContext {
+  /** ⚠️ É o id do CONTATO, não de um lead do funil. Ver `contact_id` abaixo. */
   lead_id: string;
+  /**
+   * O mesmo valor de `lead_id`, com o nome verdadeiro (issue #509).
+   *
+   * OPCIONAL no tipo, e não por preguiça: exigir o campo obrigaria a editar
+   * fixtures em `tests/invariants/**`, que é CONGELADO pelo hook de governança
+   * (`loop/hooks/freeze-invariants.sh` — invariante existente não se edita). A
+   * produção sempre o preenche; quem constrói contexto à mão num teste não
+   * precisa dele.
+   */
+  contact_id?: string;
   contact: {
     name: string | null;
     phone: string | null;
@@ -74,6 +96,7 @@ export interface LeadContext {
     is_blocked: boolean;
   };
   conversation_id: string | null;
+  previous_service?: { label: string; outcomes: string[] };
   /**
    * `null` quando nenhum humano decidiu nada sobre propostas deste contato.
    *
@@ -150,13 +173,13 @@ interface HistoryRow {
   media_storage_path: string | null;
   media_mime: string | null;
   media_derived_text: string | null;
-  sent_at: string;
+  sent_at: Date;
 }
 
 export async function getLeadContext(
   db: Queryable,
   _cfg: CrmEdgeConfig,
-  input: { tenantId: string; leadId: string; conversationId?: string | null },
+  input: { tenantId: string; leadId: string; conversationId?: string | null; fuso: string },
   knobs: LeadContextKnobs,
 ): Promise<LeadContextResult> {
   const { rows: contactRows } = await db.query<ContactRow>(
@@ -208,10 +231,14 @@ export async function getLeadContext(
     ? (
         await db.query<HistoryRow>(
           `select direction, type, body, media_url, media_storage_path, media_mime,
-                  media_derived_text, sent_at::text as sent_at
+                  media_derived_text, sent_at
            from messages
            where organization_id = $1 and conversation_id = $2
              and direction in ('inbound', 'outbound')
+             and exists(select 1 from conversations c where c.organization_id=$1 and c.id=$2
+               and ((messages.direction='inbound' and messages.service_revision=c.service_revision
+                 and messages.demanda_id is not distinct from c.current_demanda_id)
+                 or (messages.direction='outbound' and messages.sent_at >= c.service_started_at)))
            order by sent_at desc, id desc
            limit $3`,
           [input.tenantId, conversationId, knobs.historyLimit],
@@ -231,11 +258,27 @@ export async function getLeadContext(
     false,
   );
 
+  const { rows: previousOutcomes } = await db.query<{ desfecho: string }>(
+    `select distinct d.desfecho from demandas d join demanda_conversas dc on dc.demanda_id=d.id and dc.organization_id=d.organization_id
+     where d.organization_id=$1 and dc.conversation_id=$2 and d.fechada_em is not null limit 5`,
+    [input.tenantId, conversationId]);
+
   const context = fitToBudget(
     {
+      previous_service: { label: 'Histórico encerrado. Desfechos anteriores não são tarefas ou compromissos pendentes.', outcomes: previousOutcomes.map((d) => d.desfecho) },
+      // ⚠️ `lead_id` aqui é, e sempre foi, o id do CONTATO (ver o comentário da
+      // consulta acima e `inbound-turn.ts:1121`). O nome mente, e o modelo
+      // acreditava: passava este valor ao parâmetro `lead_id` das ferramentas
+      // de agenda, que espera um NEGÓCIO do funil. (issue #509)
+      //
+      // O campo antigo fica — ele circula por follow-up, case-reply e escalação,
+      // e por invariantes congelados; trocar o nome custa uma wave inteira e
+      // somar o certo custa uma linha. `contact_id` é a porta para o modelo
+      // acertar; as descrições das ferramentas apontam para ela.
       lead_id: input.leadId,
+      contact_id: input.leadId,
       contact: {
-        name: contact.display_name ?? contact.name,
+        name: nomeDoContato(contact),
         phone: contact.phone_number,
         email: contact.email,
         tags: contact.tags ?? [],
@@ -246,8 +289,48 @@ export async function getLeadContext(
     },
     history,
     knobs.maxTokens,
+    input.fuso,
   );
   return { ok: true, context, tokenCount: countPayloadTokens(JSON.stringify(context)), lgpd };
+}
+
+/** As colunas do CRM de que o corpo de UMA mensagem depende. */
+export interface CorpoDaMensagemRow {
+  type: string;
+  body: string | null;
+  media_url: string | null;
+  media_storage_path: string | null;
+  media_derived_text: string | null;
+}
+
+/**
+ * O corpo de UMA mensagem como o prompt o lê — UMA composição, DOIS leitores.
+ *
+ * O histórico (`fitToBudget`, logo abaixo) sempre compôs o corpo da linha. A
+ * linha canônica do job (`inbound-turn.ts:loadInboundBodyForJob`) lia a coluna
+ * `body` CRUA — as duas leem a MESMA linha por caminhos diferentes, e a
+ * divergência não é teórica: áudio e foto chegam sem legenda, isto é, com `body`
+ * NULL (o ingest do transporte devolve cedo quando a mensagem não tem texto,
+ * nem URL de mídia, nem mídia), e o conteúdo é o derivado (transcrição/visão,
+ * gravado DEPOIS pelo
+ * `media-derive-worker` — a corrida) ou o marcador `[tipo]`. Lido cru, um áudio
+ * transcrito valia `''` enquanto o texto do cliente estava no histórico logo
+ * abaixo: a abertura anunciava "não há texto utilizável" sobre uma mensagem que
+ * TEM texto, e a barreira do falso-vazio desarmava, porque
+ * `claimsCurrentInboundIsEmpty` não arma sobre `''`. (issue #617)
+ *
+ * `@internal` só na intenção de não espalhar a receita: quem lê uma linha de
+ * `messages` para o prompt passa por aqui, senão a composição volta a divergir.
+ */
+export function corpoDaMensagem(m: CorpoDaMensagemRow): string {
+  const hasMedia = Boolean(m.media_storage_path || m.media_url);
+  const derived = m.media_derived_text;
+  // Onda 3: legenda e derivado (transcrição/visão/pdf) COEXISTEM, e o derivado
+  // vem ENQUADRADO (frameMediaBody) — sem isso o agente caía no reflexo
+  // "não consigo ver mídia" mesmo tendo o conteúdo. Sem derivado, marcador [tipo].
+  return derived
+    ? frameMediaBody(m.type, m.body, derived)
+    : (m.body ?? (hasMedia ? `[${m.type}]` : ''));
 }
 
 /**
@@ -260,20 +343,20 @@ function fitToBudget(
   base: Omit<LeadContext, 'messages'>,
   history: HistoryRow[],
   maxTokens: number,
+  fuso: string,
 ): LeadContext {
   let messages: LeadContextMessage[] = history.map((m) => {
     const hasMedia = Boolean(m.media_storage_path || m.media_url);
-    const derived = m.media_derived_text;
-    // Onda 3: legenda e derivado (transcrição/visão/pdf) COEXISTEM, e o derivado
-    // vem ENQUADRADO (frameMediaBody) — sem isso o agente caía no reflexo
-    // "não consigo ver mídia" mesmo tendo o conteúdo. Sem derivado, marcador [tipo].
-    const body = derived
-      ? frameMediaBody(m.type, m.body, derived)
-      : (m.body ?? (hasMedia ? `[${m.type}]` : ''));
+    // A composição do corpo é UMA só, exportada logo acima: a linha canônica do
+    // job passa pela mesma função. Duas receitas para a mesma linha foi o defeito
+    // da #617 — o histórico mostrava o texto do áudio e a abertura dizia vazio.
+    const body = corpoDaMensagem(m);
     return {
       direction: m.direction,
       body,
-      sent_at: m.sent_at,
+      // Hora de PAREDE do tenant, não UTC cru — ver o comentário de `sent_at` na
+      // interface acima e o cabeçalho de `isoLocalComOffset`.
+      sent_at: isoLocalComOffset(m.sent_at, fuso),
       ...(hasMedia ? { type: m.type, media_storage_path: m.media_storage_path, media_mime: m.media_mime } : {}),
     };
   });

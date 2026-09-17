@@ -21,7 +21,7 @@ const buttonVariants = cva(
     "rounded-sm font-medium",
     "transition-[background-color,border-color,color,box-shadow,transform]",
     "duration-fast ease-out",
-    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500 focus-visible:ring-offset-2 focus-visible:ring-offset-bg",
+    "focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-accent-500 focus-visible:ring-offset-2 focus-visible:ring-offset-bg",
     "disabled:pointer-events-none disabled:opacity-50",
     "[&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
     "active:translate-y-px",
@@ -44,12 +44,18 @@ const buttonVariants = cva(
         link:
           "bg-transparent text-accent underline underline-offset-4 decoration-1 hover:decoration-2 h-auto p-0",
       },
+      // Alturas de toque: abaixo de `lg` (mesmo corte que o resto da casca
+      // usa pra decidir "é celular/tablet, é mouse") toda variante bate os
+      // 44px recomendados pra alvo de toque; de `lg:` pra cima, onde quem
+      // aciona é cursor, volta pro tamanho compacto original — mudar isso
+      // globalmente pro app inteiro em telas grandes infla a densidade sem
+      // necessidade nenhuma. `lg` já nascia com 44px e não precisou mudar.
       size: {
-        sm: "h-8 px-3 text-xs",
-        default: "h-9 px-4 text-sm",
-        md: "h-9 px-4 text-sm",
+        sm: "h-11 px-3 text-xs lg:h-8",
+        default: "h-11 px-4 text-sm lg:h-9",
+        md: "h-11 px-4 text-sm lg:h-9",
         lg: "h-11 px-6 text-sm",
-        icon: "h-9 w-9",
+        icon: "h-11 w-11 lg:h-9 lg:w-9",
       },
     },
     defaultVariants: {

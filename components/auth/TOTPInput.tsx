@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type ClipboardEvent, type KeyboardEvent } from "react";
+import { useT } from "@/hooks/i18n/useT";
 import { cn } from "@/lib/utils";
 
 interface TOTPInputProps {
@@ -29,6 +30,7 @@ export function TOTPInput({
   hasError,
   className,
 }: TOTPInputProps) {
+  const t = useT();
   const inputs = useRef<Array<HTMLInputElement | null>>([]);
   const [chars, setChars] = useState<string[]>(() =>
     Array.from({ length: LENGTH }, (_, i) => value[i] ?? ""),
@@ -98,7 +100,7 @@ export function TOTPInput({
     <div
       className={cn("flex items-center justify-center gap-2", className)}
       role="group"
-      aria-label="Código de 6 dígitos"
+      aria-label={t("Código de 6 dígitos")}
     >
       {chars.map((c, i) => (
         <input
@@ -113,14 +115,14 @@ export function TOTPInput({
           value={c}
           disabled={disabled}
           aria-invalid={hasError ? true : undefined}
-          aria-label={`Dígito ${i + 1}`}
+          aria-label={`${t("Dígito")} ${i + 1}`}
           onChange={(e) => handleChange(i, e.target.value)}
           onKeyDown={(e) => handleKeyDown(i, e)}
           onPaste={handlePaste}
           onFocus={(e) => e.currentTarget.select()}
           className={cn(
             "h-12 w-10 rounded-md border border-input bg-background text-center font-mono text-lg tabular-nums",
-            "shadow-sm outline-none transition focus:border-ring focus:ring-2 focus:ring-ring/30",
+            "shadow-sm outline-hidden transition focus:border-ring focus:ring-2 focus:ring-ring/30",
             hasError && "border-destructive focus:ring-destructive/30",
             disabled && "opacity-50",
           )}

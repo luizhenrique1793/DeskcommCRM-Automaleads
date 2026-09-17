@@ -17,7 +17,42 @@
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
 
+import { parseMetaInboundContact } from "@/lib/channels/meta/contact-card";
+import type { SharedContact } from "@/lib/messaging/contact-card";
+import type { MetaWebhookEnvelope } from "./envelope";
+
 /** Assinatura da Meta: `sha256=<hex>` no header `X-Hub-Signature-256`. */
+/**
+ * A instalação consegue RECEBER pelo canal oficial? — as duas metades.
+ *
+ * São dois segredos com papéis diferentes, e conferir só um produz o pior tipo
+ * de tela: a que diz "pronto" sobre algo que não funciona.
+ *
+ *   META_WEBHOOK_VERIFY_TOKEN → responde o handshake GET, em que a Meta valida
+ *                               o endereço. Sem ele o webhook nem é aceito.
+ *   META_APP_SECRET           → valida a ASSINATURA de cada mensagem que chega
+ *                               (`verifyMetaSignature`, logo abaixo). Sem ele,
+ *                               o handshake passa e TODO POST assinado morre em
+ *                               401 `invalid_signature` — o número envia e
+ *                               nunca recebe, sem erro em lugar nenhum.
+ *
+ * Nenhum dos dois é escrito pelo `install.sh` (`git grep 'META_' -- '*.sh'`
+ * devolve vazio): numa instalação recém-feita os dois estão ausentes, que é
+ * exatamente quando o aviso precisa aparecer.
+ *
+ * `.trim() !== ""` e não `Boolean()`: o contrato do `.env` deste projeto é que
+ * vazio é ausente — o template gera `CHAVE=` e é assim que `preenchida()` em
+ * `lib/instalacao/ambiente.ts:61` já decide.
+ */
+// O mesmo tipo que `lib/instalacao/ambiente.ts` usa para ler `.env`:
+// `NodeJS.ProcessEnv` exige `NODE_ENV` e obrigaria todo teste a montá-lo.
+export function metaPodeReceber(
+  source: Record<string, string | undefined> = process.env,
+): boolean {
+  const cheia = (nome: string): boolean => (source[nome] ?? "").trim() !== "";
+  return cheia("META_WEBHOOK_VERIFY_TOKEN") && cheia("META_APP_SECRET");
+}
+
 export function verifyMetaSignature(
   rawBody: string,
   signatureHeader: string | null,
@@ -75,9 +110,11 @@ export interface InboundMessageEvent {
   from: string;
   profileName: string | null;
   sentAt: Date;
-  /** `text` | `audio` | `image` | `video` | `document` | `sticker` | … */
+  /** `text` | `audio` | `image` | `video` | `document` | `sticker` | `contact` | … */
   type: string;
   text: string | null;
+  /** Preenchido quando `type === "contact"` (cartão compartilhado). */
+  sharedContact?: SharedContact | null;
   media: {
     id: string;
     /** A Meta manda URL pronta, com `ext=` de expiração — baixe na hora, não guarde. */
@@ -86,6 +123,12 @@ export interface InboundMessageEvent {
     /** Nota de voz de verdade (não anexo de áudio). */
     voice: boolean;
   } | null;
+  /**
+   * `messages[].referral` cru — vem na mensagem que o app do cliente manda ao
+   * clicar num anúncio "Clique para o WhatsApp". Repassado sem interpretar: a
+   * leitura é de `extrairAtribuicaoMeta`. Opcional porque só a ingestão o lê.
+   */
+  referral?: unknown;
 }
 
 /** Status de entrega de uma mensagem que ENVIAMOS (sent/delivered/read/failed). */
@@ -101,18 +144,12 @@ export interface MessageStatusEvent {
 
 export type MetaWebhookEvent = TemplateStatusEvent | MessageStatusEvent | InboundMessageEvent;
 
-interface MetaChange {
-  field?: string;
-  value?: Record<string, unknown>;
-}
-interface MetaEntry {
-  id?: string;
-  changes?: MetaChange[];
-}
-export interface MetaWebhookEnvelope {
-  object?: string;
-  entry?: MetaEntry[];
-}
+/**
+ * O formato do fio mora em `./envelope.ts`, onde é um schema Zod — e o tipo
+ * NASCE dele (`z.infer`). Aqui era um `interface` escrita à mão, que o
+ * `JSON.parse ... as` da rota prometia sem nunca conferir.
+ */
+export type { MetaWebhookEnvelope } from "./envelope";
 
 /**
  * A Meta manda `rejected_reason: "NONE"` em template APROVADO (medido contra a WABA
@@ -174,7 +211,9 @@ export function parseMetaWebhook(envelope: MetaWebhookEnvelope): MetaWebhookEven
 
           const perfil = contatos.find((c) => str(c.wa_id) === from);
           const tipo = str(raw.type) ?? "unknown";
-          const corpoMidia = raw[tipo] as Record<string, unknown> | undefined;
+          const corpoMidia = tipo !== "contacts" ? (raw[tipo] as Record<string, unknown> | undefined) : undefined;
+          const sharedContact = tipo === "contacts" ? parseMetaInboundContact(raw) : null;
+          const tipoCrm = tipo === "contacts" ? "contact" : tipo;
 
           out.push({
             kind: "inbound_message",
@@ -185,8 +224,12 @@ export function parseMetaWebhook(envelope: MetaWebhookEnvelope): MetaWebhookEven
             profileName: str((perfil?.profile as Record<string, unknown> | undefined)?.name),
             // A Meta manda epoch em SEGUNDOS, string. Passar direto ao Date daria 1970.
             sentAt: new Date(Number(str(raw.timestamp) ?? "0") * 1000),
-            type: tipo,
-            text: tipo === "text" ? str((raw.text as Record<string, unknown>)?.body) : null,
+            type: tipoCrm,
+            text:
+              tipoCrm === "text"
+                ? str((raw.text as Record<string, unknown>)?.body)
+                : sharedContact?.name ?? null,
+            ...(sharedContact ? { sharedContact } : {}),
             media:
               corpoMidia && str(corpoMidia.id)
                 ? {
@@ -196,6 +239,7 @@ export function parseMetaWebhook(envelope: MetaWebhookEnvelope): MetaWebhookEven
                     voice: corpoMidia.voice === true,
                   }
                 : null,
+            referral: raw.referral ?? null,
           });
         }
         continue;

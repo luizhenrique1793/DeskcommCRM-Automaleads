@@ -1,6 +1,6 @@
 # Resposta ao contribuidor
 
-> Puxe nos passes 1 e 10. Este reference é o **como falar**; o que medir está em
+> Puxe nos passes 1 e 10, e no 12-ter quando só parte de um PR entrou. Este reference é o **como falar**; o que medir está em
 > `complemento-do-ci.md`.
 
 O objetivo não é ser simpático. É que a pessoa saiba exatamente onde está, o que foi medido, e o que
@@ -9,6 +9,18 @@ falta — e que nada do que ela leia seja cobrança por algo que ninguém contou
 ---
 
 ## Acolhida (passe 1) — em minutos, sem uma linha de avaliação
+
+**Ela sai sozinha em PR de fork**, por `.github/workflows/acolhida.yml`, em minutos e sem depender
+de alguém estar triando — que era o gargalo real: a taxa de recusa aqui é zero, o que custava era o
+tempo até alguém olhar. O passe 1 humano só escreve isto quando o robô não escreveu (PR interno, ou
+o workflow desligado); e o robô desiste sozinho se já houver qualquer âncora `triagem-de-pr:v1:` no
+PR — inclusive a sua.
+
+Duas frases do molde abaixo o robô **não pode** dizer, e é por isso que o texto dele não é cópia
+literal: "acabei de liberar" (ele não libera — aprovar run de fork é executar código de fora nos
+nossos runners, e está recusado por escrito no cabeçalho do workflow) e um prazo negociado caso a
+caso (ele promete "em até um dia útil", fixo). Mudar o texto aqui sem mudar lá faz as duas versões
+divergirem; `tests/unit/acolhida-nao-toca-no-fork.test.ts` guarda o essencial do lado de lá.
 
 Três informações, nesta ordem. Nada além.
 
@@ -89,6 +101,41 @@ descobre que quebrou.
 
 **Sugestão, se fizer sentido pra você:** <opção>. Mas o desenho é seu — se preferir outro caminho,
 me diz que eu meço o seu.
+```
+
+---
+
+## Quando só parte do PR entrou
+
+O PR parcialmente incorporado fica aberto só se o que sobrou tem destino (decisão do dono em
+16/09/2026; passe 12-ter). O comentário começa igual nos dois casos — **o que entrou**, com o link, e
+**o que não entrou**, com o motivo de cada parte — e muda no fim:
+
+- **O resto tem destino** (decisão pendente, acompanhamento planejado, espera por resposta dele,
+  destino de extensão): diga qual, e que é por isso que o PR continua aberto. PR aberto sem destino
+  escrito lê como esquecido.
+- **O resto foi descartado:** o PR fecha — por quem tem a autoridade de fechar naquela rodada
+  (fronteira do `TRIAGEM.md`); sem ela, o comentário diz o que entrou e o fechamento vai para o
+  relatório ao mantenedor. O motivo é sobre a parte, não sobre
+  ele — por exemplo, *"serve à sua instalação e não a todas"*, ou *"a `main` já resolve isto de outro
+  jeito, aqui"*.
+
+O crédito não depende do desfecho: o que entrou está nos commits com ele como autor. Diga isso, com
+o link — é o que ele vai procurar no próprio perfil.
+
+```markdown
+<!-- triagem-de-pr:v1:pass=12-ter -->
+Parte deste PR entrou na `main`, nos commits com você como autor: <o que entrou> — <link>.
+
+**O que não entrou, e por quê:** <a parte> — <o motivo, com a medição quando houver>.
+
+<!-- se o resto tem destino -->
+Por isso o PR continua aberto: <o destino — a decisão que falta e de quem ela é, o acompanhamento
+planejado, ou o que eu preciso de você>.
+
+<!-- se o resto foi descartado, e só quando quem escreve tem a autoridade de fechar nesta rodada -->
+Por isso estou fechando o PR. Fechar aqui só registra que o resto não entra; o que entrou está
+dentro, com o seu nome.
 ```
 
 ---

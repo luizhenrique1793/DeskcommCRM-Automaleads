@@ -1,28 +1,39 @@
+import { requireSupportWrite } from "@/lib/impersonate/support";
 /**
  * POST /api/v1/messages — envia mensagem outbound (handler em ./_handler.ts).
  */
 import { randomUUID } from "node:crypto";
 import { type NextRequest } from "next/server";
 
+import { resolveAuthDual } from "@/lib/api/auth-dual";
 import { ApiError } from "@/lib/api/types";
 import { fail, ok } from "@/lib/api/wrappers";
-import { requireRole } from "@/lib/auth/require-role";
 import { sendMessageSchema, validateRequest, type SendMessageInput } from "@/lib/schemas";
-import { createClient } from "@/lib/supabase/server";
 
 import { sendMessageHandler } from "./_handler";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest): Promise<Response> {
+  const supportDenied = await requireSupportWrite();
+  if (supportDenied) return supportDenied;
+
   const requestId = randomUUID();
-  const supabase = await createClient();
 
   // spec 13 §4: escrita é agent+ (viewer é read-only).
-  const authz = await requireRole("agent", { requestId, resource: "messages" });
+  //
+  // Aceita sessão de navegador OU token de servidor (`dsk_…` com `mcp:write`),
+  // porque esta rota é a porta de envio de quem não tem navegador: o gateway do
+  // CRM que está sendo absorvido, e qualquer integração server-to-server. A org
+  // nunca vem do corpo; no ramo do token ela sai da linha do token.
+  const authz = await resolveAuthDual(req, {
+    requestId,
+    resource: "messages",
+    role: "agent",
+    scope: "mcp:write",
+  });
   if (!authz.ok) return authz.response;
-  const user = authz.user;
-  const activeOrg = authz.org;
+  const { supabase, organizationId, actor, idioma } = authz;
 
   let input;
   try {
@@ -41,9 +52,10 @@ export async function POST(req: NextRequest): Promise<Response> {
     const message = await sendMessageHandler(
       supabase,
       {
-        organization_id: activeOrg.orgId,
-        actor: { type: "user", id: user.id },
+        organization_id: organizationId,
+        actor,
         requestId,
+        idioma,
       },
       input as SendMessageInput,
     );

@@ -5,6 +5,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useTransition, useState } from "react";
 import { useRouter } from "next/navigation";
 
+import { useT } from "@/hooks/i18n/useT";
 import { loginSchema, type LoginInput } from "@/lib/auth/schemas";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -12,6 +13,7 @@ import { Label } from "@/components/ui/label";
 import { signInWithPassword } from "@/app/actions/auth/signInWithPassword";
 
 export function LoginForm({ next }: { next?: string }) {
+  const t = useT();
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
   const [serverError, setServerError] = useState<string | null>(null);
@@ -33,7 +35,7 @@ export function LoginForm({ next }: { next?: string }) {
       const res = await signInWithPassword(values, next);
       if (!res) {
         // Should be unreachable (redirect throws), but guard anyway.
-        router.replace(next || "/app/inbox");
+        router.replace(next || "/app");
         return;
       }
       if (res.error === "mfa_required") {
@@ -44,19 +46,19 @@ export function LoginForm({ next }: { next?: string }) {
         return;
       }
       if (res.error === "invalid_credentials") {
-        setServerError("Email ou senha incorretos.");
+        setServerError(t("Email ou senha incorretos."));
       } else if (res.error === "rate_limited") {
-        setServerError("Muitas tentativas. Aguarde alguns minutos.");
+        setServerError(t("Muitas tentativas. Aguarde alguns minutos."));
       } else if (res.error === "validation_error") {
-        setServerError("Dados inválidos. Confira os campos.");
+        setServerError(t("Dados inválidos. Confira os campos."));
       } else {
-        setServerError("Erro inesperado. Tente novamente.");
+        setServerError(t("Erro inesperado. Tente novamente."));
       }
     });
   };
 
   return (
-    <form onSubmit={handleSubmit(onSubmit)} className="space-y-4" noValidate>
+    <form method="post" onSubmit={handleSubmit(onSubmit)} className="space-y-4" noValidate>
       <div className="space-y-1.5">
         <Label htmlFor="email">Email</Label>
         <Input
@@ -68,11 +70,11 @@ export function LoginForm({ next }: { next?: string }) {
           {...register("email")}
         />
         {errors.email && (
-          <p className="text-xs text-destructive">{errors.email.message}</p>
+          <p className="text-xs text-destructive">{t(errors.email.message ?? "")}</p>
         )}
       </div>
       <div className="space-y-1.5">
-        <Label htmlFor="password">Senha</Label>
+        <Label htmlFor="password">{t("Senha")}</Label>
         <Input
           id="password"
           type="password"
@@ -81,7 +83,7 @@ export function LoginForm({ next }: { next?: string }) {
           {...register("password")}
         />
         {errors.password && (
-          <p className="text-xs text-destructive">{errors.password.message}</p>
+          <p className="text-xs text-destructive">{t(errors.password.message ?? "")}</p>
         )}
       </div>
       {serverError && (
@@ -93,7 +95,7 @@ export function LoginForm({ next }: { next?: string }) {
         </div>
       )}
       <Button type="submit" className="w-full" disabled={isPending}>
-        {isPending ? "Entrando..." : "Entrar"}
+        {isPending ? t("Entrando...") : t("Entrar")}
       </Button>
     </form>
   );

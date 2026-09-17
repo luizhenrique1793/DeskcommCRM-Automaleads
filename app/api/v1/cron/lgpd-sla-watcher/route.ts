@@ -7,7 +7,9 @@
  *   - redact / store_redact → alarm if received_at <= now - 10 days (D+10)
  *
  * Auth: `Authorization: Bearer <INTERNAL_CRON_SECRET|INTERNAL_SECRET>` (fail-closed).
- * Audit: emits lgpd.sla_watcher_run after processing.
+ * Audit: emite `lgpd.sla_watcher_run` quando houve alarme, dedup ou erro — tick
+ *   de instalação sem solicitação vencida NÃO audita (ver a guarda "cron que não
+ *   fez nada não audita", vigiada por `cron-audita-so-quando-ha-efeito.test.ts`).
  *
  * MVP: calendar-day approximation for SELECT is intentional and acceptable
  * (D+5 corridos ≈ D+5 úteis in short windows). Precision via computeDueAt
@@ -21,6 +23,7 @@ import { env } from "@/lib/env";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { audit } from "@/lib/audit";
 import { triggerSlaAlarm } from "@/lib/lgpd/sla-alarm";
+import { marcaDaSaida, type MarcaDeSaida } from "@/lib/branding/saida";
 import type { LgpdRequest } from "@/lib/lgpd/types";
 import type { AlarmThreshold } from "@/lib/lgpd/sla-alarm";
 
@@ -101,6 +104,20 @@ export async function GET(req: NextRequest): Promise<Response> {
   let dedupedCount = 0;
   let errorsCount = 0;
 
+  // Uma organização pode ter muitas solicitações vencidas no mesmo lote (o teto
+  // é 500), e a marca dela é a mesma para todas. Sem esta memória o cron faria
+  // uma leitura de `organizations.settings` por LINHA para devolver o mesmo
+  // objeto. Vive só dentro desta invocação de propósito: o próximo ciclo (12h
+  // depois) tem de reler, senão uma troca de marca demoraria meio dia a valer.
+  const marcaPorOrg = new Map<string, MarcaDeSaida>();
+  const marcaDe = async (orgId: string): Promise<MarcaDeSaida> => {
+    const guardada = marcaPorOrg.get(orgId);
+    if (guardada) return guardada;
+    const resolvida = await marcaDaSaida(orgId);
+    marcaPorOrg.set(orgId, resolvida);
+    return resolvida;
+  };
+
   for (const row of requests) {
     const threshold: AlarmThreshold =
       row.request_type === "data_request" ? "data_request_d5" : "redact_d10";
@@ -139,6 +156,7 @@ export async function GET(req: NextRequest): Promise<Response> {
         threshold,
         organizationDpoEmail: dpoEmail,
         organizationName: orgName,
+        marca: await marcaDe(row.organization_id),
       });
 
       if (result.reason === "dedup_24h") {
@@ -161,18 +179,28 @@ export async function GET(req: NextRequest): Promise<Response> {
   // ────────────────────────────────────────────────────────────────────────
   // Master audit entry (fire-and-forget)
   // ────────────────────────────────────────────────────────────────────────
-  void audit({
-    action: "lgpd.sla_watcher_run",
-    requestId,
-    bypassedRls: true,
-    metadata: {
-      scanned,
-      alarmed: alarmedCount,
-      deduped: dedupedCount,
-      errors: errorsCount,
-      duration_ms: durationMs,
-    },
-  });
+  // Varredura que não achou solicitação vencida não é mutação e não ocupa linha
+  // de auditoria (mesmo critério do snooze-watcher e do recover-stuck-messages).
+  //
+  // `deduped` ENTRA na condição, e aqui a régua é mais generosa que nos irmãos
+  // de propósito: dedup significa que existe prazo LGPD estourado sendo
+  // reencontrado, e num caminho de compliance o registro de que o alarme
+  // continua de pé vale mais que a linha economizada. O que sai é só o tick de
+  // uma instalação sem nenhuma solicitação vencida — que é o caso normal.
+  if (alarmedCount > 0 || dedupedCount > 0 || errorsCount > 0) {
+    void audit({
+      action: "lgpd.sla_watcher_run",
+      requestId,
+      bypassedRls: true,
+      metadata: {
+        scanned,
+        alarmed: alarmedCount,
+        deduped: dedupedCount,
+        errors: errorsCount,
+        duration_ms: durationMs,
+      },
+    });
+  }
 
   return ok(
     { scanned, alarmed: alarmedCount, deduped: dedupedCount, errors: errorsCount },

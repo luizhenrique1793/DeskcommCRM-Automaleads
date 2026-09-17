@@ -75,14 +75,16 @@ export function useMessagesRealtime(conversationId: string | null) {
     enabled: !!conversationId,
   });
 
-  // A REDE DE SEGURANÇA — mesmo mecanismo do board/dossiê, reutilizado, nunca
-  // reinventado. Cura a mesma classe de morte silenciosa que
-  // `tests/prova-raio-do-silencio.ts` mediu na conversa aberta: canal
-  // `SUBSCRIBED`, entrega morta, tela parada até um F5.
-  //
-  // Assinatura: contagem de mensagens + id da mais recente por `created_at` —
-  // sensível a mensagem nova entrando (o que o canal deveria trazer),
-  // insensível a reordenação de páginas já carregadas.
+  /**
+   * A REDE DE SEGURANÇA — mesmo mecanismo do board/dossiê, reutilizado, nunca
+   * reinventado. Cura a mesma classe de morte silenciosa que
+   * `tests/prova-raio-do-silencio.ts` mediu na conversa aberta: canal
+   * `SUBSCRIBED`, entrega morta, tela parada até um F5.
+   *
+   * Assinatura: contagem de mensagens + id da mais recente por `created_at` —
+   * sensível a mensagem nova entrando (o que o canal deveria trazer),
+   * insensível a reordenação de páginas já carregadas.
+   */
   const seguranca = useRefetchDeSeguranca<InfiniteData<MessagesResponse>>({
     queryKey,
     assinatura: (d) => {

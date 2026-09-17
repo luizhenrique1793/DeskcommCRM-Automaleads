@@ -32,6 +32,7 @@ function mockAuthzOk(role: "agent" | "admin" = "admin") {
     full_name: null,
     avatar_url: null,
     is_platform_admin: false,
+    idioma: "pt-BR" as const,
     organizations: [{ organization_id: ORG_ID, organization_name: "Org", role }],
   };
   vi.mocked(requireRole).mockResolvedValue({
@@ -304,3 +305,10 @@ describe("POST /api/v1/ai/routers", () => {
     expect(audit).not.toHaveBeenCalled();
   });
 });
+
+// Este teste isola o handler; autoridade de suporte é exercitada na suíte própria.
+vi.mock("@/lib/impersonate/support", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/lib/impersonate/support")>(),
+  requireSupportWrite: vi.fn(async () => null),
+  authenticatedSessionId: vi.fn(async () => "f2200000-0000-4000-8000-000000000099"),
+}));

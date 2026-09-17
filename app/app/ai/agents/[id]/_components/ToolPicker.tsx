@@ -21,6 +21,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { apiClient } from "@/lib/api/client";
+import { useT } from "@/hooks/i18n/useT";
 import {
   PACOTES,
   riscoMeta,
@@ -73,10 +74,11 @@ const CLASSE_RISCO: Record<ToolRisk, string> = {
 };
 
 function BadgeRisco({ risco }: { risco: ToolRisk }) {
+  const t = useT();
   const meta = riscoMeta(risco);
   return (
-    <Badge variant="outline" className={`text-[11px] ${CLASSE_RISCO[risco]}`} title={meta.explicacao}>
-      {meta.rotulo}
+    <Badge variant="outline" className={`text-[11px] ${CLASSE_RISCO[risco]}`} title={t(meta.explicacao)}>
+      {t(meta.rotulo)}
     </Badge>
   );
 }
@@ -97,6 +99,7 @@ function FichaCapacidade({
   disabled?: boolean;
   mostrarNomeTecnico?: boolean;
 }) {
+  const t = useT();
   return (
     <label
       data-testid={`capacidade-${capacidade.name}`}
@@ -108,21 +111,21 @@ function FichaCapacidade({
     >
       <input
         type="checkbox"
-        className="mt-1 h-4 w-4 shrink-0 rounded border-border accent-primary"
+        className="mt-1 h-4 w-4 shrink-0 rounded-md border-border accent-primary"
         checked={marcada}
         onChange={onToggle}
         disabled={disabled || bloqueada}
-        aria-label={capacidade.rotulo}
+        aria-label={t(capacidade.rotulo)}
       />
       <span className="flex-1 space-y-1">
         <span className="flex flex-wrap items-center gap-2">
-          <span className="text-sm font-medium">{capacidade.rotulo}</span>
+          <span className="text-sm font-medium">{t(capacidade.rotulo)}</span>
           <BadgeRisco risco={capacidade.risco} />
-          <span className="text-xs text-muted-foreground">· {capacidade.o_que_toca}</span>
+          <span className="text-xs text-muted-foreground">· {t(capacidade.o_que_toca)}</span>
         </span>
-        <span className="block text-xs text-muted-foreground">{capacidade.explicacao}</span>
+        <span className="block text-xs text-muted-foreground">{t(capacidade.explicacao)}</span>
         {mostrarNomeTecnico ? (
-          <code className="block font-mono text-[11px] text-muted-foreground/70">
+          <code className="block font-mono text-[11px] text-muted-foreground">
             {capacidade.name}
           </code>
         ) : null}
@@ -132,6 +135,7 @@ function FichaCapacidade({
 }
 
 export function ToolPicker({ value, onChange, disabled }: Props) {
+  const t = useT();
   const [avancado, setAvancado] = React.useState(false);
   const [recusa, setRecusa] = React.useState<string | null>(null);
 
@@ -189,9 +193,9 @@ export function ToolPicker({ value, onChange, disabled }: Props) {
       const excedente = exigidas - TETO_TOOLS_POR_AGENTE;
       aplicar(
         proximo,
-        `Ligar este pacote passaria de ${TETO_TOOLS_POR_AGENTE} capacidades (faltam ${excedente} ${
-          excedente === 1 ? "vaga" : "vagas"
-        }). Desligue um pacote que você usa menos antes.`,
+        `${t("Ligar este pacote passaria de")} ${TETO_TOOLS_POR_AGENTE} ${t("capacidades (faltam")} ${excedente} ${
+          excedente === 1 ? t("vaga") : t("vagas")
+        }${t("). Desligue um pacote que você usa menos antes.")}`,
         exigidas,
       );
     } else {
@@ -210,17 +214,17 @@ export function ToolPicker({ value, onChange, disabled }: Props) {
       [...catalogo.map((c) => c.name), ...orfas].filter(
         (n) => value.includes(n) || n === name,
       ),
-      `Você já ligou ${TETO_TOOLS_POR_AGENTE} capacidades. Desligue uma antes de ligar outra.`,
+      `${t("Você já ligou")} ${TETO_TOOLS_POR_AGENTE} ${t("capacidades. Desligue uma antes de ligar outra.")}`,
     );
   }
 
   if (query.isLoading) {
-    return <p className="text-sm text-muted-foreground">Carregando as capacidades…</p>;
+    return <p className="text-sm text-muted-foreground">{t("Carregando as capacidades…")}</p>;
   }
   if (query.isError) {
     return (
       <p className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
-        Não foi possível carregar as capacidades. Recarregue a página.
+        {t("Não foi possível carregar as capacidades. Recarregue a página.")}
       </p>
     );
   }
@@ -231,14 +235,14 @@ export function ToolPicker({ value, onChange, disabled }: Props) {
       <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border/60 bg-muted/30 p-3">
         <p className="text-sm">
           <strong data-testid="consumo-teto">
-            {value.length} de {TETO_TOOLS_POR_AGENTE}
+            {value.length} {t("de")} {TETO_TOOLS_POR_AGENTE}
           </strong>{" "}
-          capacidades ligadas
+          {t("capacidades ligadas")}
         </p>
         <p className="text-xs text-muted-foreground">
           {cheio
-            ? "Limite atingido. Desligue algo para ligar outra coisa."
-            : "Acima disso o agente erra na hora de escolher o que usar."}
+            ? t("Limite atingido. Desligue algo para ligar outra coisa.")
+            : t("Acima disso o agente erra na hora de escolher o que usar.")}
         </p>
       </div>
 
@@ -277,7 +281,7 @@ export function ToolPicker({ value, onChange, disabled }: Props) {
                   checked={estado === "ligado"}
                   onCheckedChange={(v) => alternarPacote(pacote.id, v)}
                   disabled={disabled || vazio}
-                  aria-label={pacote.rotulo}
+                  aria-label={t(pacote.rotulo)}
                 />
                 <div className="flex-1 space-y-1">
                   <div className="flex flex-wrap items-center gap-2">
@@ -285,17 +289,17 @@ export function ToolPicker({ value, onChange, disabled }: Props) {
                       htmlFor={`pacote-${pacote.id}`}
                       className="cursor-pointer text-sm font-medium"
                     >
-                      {pacote.rotulo}
+                      {t(pacote.rotulo)}
                     </label>
                     {estado === "parcial" ? (
                       <Badge variant="outline" className="text-[11px]">
-                        parcial
+                        {t("parcial")}
                       </Badge>
                     ) : null}
                   </div>
-                  <p className="text-xs text-muted-foreground">{pacote.explicacao}</p>
+                  <p className="text-xs text-muted-foreground">{t(pacote.explicacao)}</p>
                   <p className="text-xs text-muted-foreground" data-testid={`contagem-${pacote.id}`}>
-                    {textoDaContagem(total, ligadas)}
+                    {textoDaContagem(total, ligadas, t)}
                   </p>
                 </div>
               </div>
@@ -307,7 +311,7 @@ export function ToolPicker({ value, onChange, disabled }: Props) {
                   className="space-y-1 rounded-md border border-destructive/30 bg-destructive/5 p-2"
                 >
                   <p className="text-xs font-medium text-destructive">
-                    Só ligando uma a uma — o pacote não liga por você:
+                    {t("Só ligando uma a uma — o pacote não liga por você:")}
                   </p>
                   {criticas.map((name) => {
                     const capacidade = porNome.get(name);
@@ -340,7 +344,7 @@ export function ToolPicker({ value, onChange, disabled }: Props) {
           onClick={() => setAvancado((v) => !v)}
           className="text-sm font-medium text-primary underline-offset-4 hover:underline"
         >
-          {avancado ? "Esconder a lista completa" : "Escolher uma a uma (modo avançado)"}
+          {avancado ? t("Esconder a lista completa") : t("Escolher uma a uma (modo avançado)")}
         </button>
 
         {avancado ? (
@@ -349,8 +353,9 @@ export function ToolPicker({ value, onChange, disabled }: Props) {
             className="space-y-1 rounded-md border border-border/60 p-3"
           >
             <p className="pb-1 text-xs text-muted-foreground">
-              Cada linha é uma capacidade. O nome em cinza é como ela aparece para quem
-              integra o sistema por fora.
+              {t(
+                "Cada linha é uma capacidade. O nome em cinza é como ela aparece para quem integra o sistema por fora.",
+              )}
             </p>
             {catalogo.map((capacidade) => {
               const marcada = value.includes(capacidade.name);
@@ -377,10 +382,11 @@ export function ToolPicker({ value, onChange, disabled }: Props) {
         >
           <p>
             {orfas.length === 1
-              ? "Uma capacidade ligada não existe mais"
-              : `${orfas.length} capacidades ligadas não existem mais`}{" "}
-            nesta versão do sistema ({orfas.join(", ")}). Elas continuam salvas, mas o
-            agente não consegue usá-las.
+              ? t("Uma capacidade ligada não existe mais")
+              : `${orfas.length} ${t("capacidades ligadas não existem mais")}`}{" "}
+            {t("nesta versão do sistema (")}
+            {orfas.join(", ")}
+            {t("). Elas continuam salvas, mas o agente não consegue usá-las.")}
           </p>
           <button
             type="button"
@@ -392,7 +398,7 @@ export function ToolPicker({ value, onChange, disabled }: Props) {
             }}
             className="font-medium underline underline-offset-4 disabled:opacity-50"
           >
-            Desligar {orfas.length === 1 ? "essa capacidade" : "essas capacidades"}
+            {t("Desligar")} {orfas.length === 1 ? t("essa capacidade") : t("essas capacidades")}
           </button>
         </div>
       ) : null}

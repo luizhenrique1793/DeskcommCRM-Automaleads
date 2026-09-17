@@ -21,7 +21,9 @@ import { describe, expect, it } from "vitest";
  * apareça no seletor idioma que realmente muda a tela.
  */
 import { traduzir } from "@/lib/i18n/dicionario";
-import { IDIOMAS, IDIOMA_PADRAO, normalizarIdioma } from "@/lib/i18n/idiomas";
+import { IDIOMAS, IDIOMA_PADRAO, normalizarIdioma, parseAcceptLanguage } from "@/lib/i18n/idiomas";
+import { NAV_DESTINATIONS, NAV_GROUPS } from "@/lib/navigation/registry";
+import { DICIONARIO } from "@/lib/i18n/dicionario";
 
 describe("traduzir", () => {
   it("devolve o espanhol quando existe", () => {
@@ -67,6 +69,30 @@ describe("normalizar o idioma que veio do perfil", () => {
   });
 });
 
+describe("Accept-Language de quem ainda não tem sessão", () => {
+  // As telas públicas (login, signup, convite, legal) não têm `user` pra
+  // consultar — sem isto, um visitante em espanhol via anônimo cai sempre em
+  // português, mesmo que o navegador dele diga `es` na frente da lista.
+  it("acha o primeiro idioma suportado na ORDEM de preferência, não no maior q", () => {
+    expect(parseAcceptLanguage("en;q=0.9,es;q=0.8")).toBe("es");
+  });
+
+  it("reconhece a família do idioma, não só a tag exata", () => {
+    expect(parseAcceptLanguage("es-MX,es;q=0.9,en;q=0.8")).toBe("es");
+    expect(parseAcceptLanguage("pt-PT,pt;q=0.9")).toBe("pt-BR");
+  });
+
+  it("sem nenhum idioma suportado na lista, devolve null (cai no padrão depois)", () => {
+    expect(parseAcceptLanguage("en-US,en;q=0.9,fr;q=0.8")).toBeNull();
+  });
+
+  it("cabeçalho ausente ou vazio devolve null", () => {
+    expect(parseAcceptLanguage(null)).toBeNull();
+    expect(parseAcceptLanguage(undefined)).toBeNull();
+    expect(parseAcceptLanguage("")).toBeNull();
+  });
+});
+
 describe("os elos que somem sem barulho", () => {
   it("o idioma CHEGA ao cliente, e por contexto PRÓPRIO", () => {
     // Buscá-lo numa consulta própria faria a tela aparecer em português e
@@ -75,12 +101,27 @@ describe("os elos que somem sem barulho", () => {
     expect(readFileSync("lib/auth/server.ts", "utf8")).toMatch(
       /user\.user_metadata\?\.locale as string \| undefined/,
     );
+    // E a CADEIA: preferência da pessoa → idioma da ORGANIZAÇÃO → padrão.
+    //
+    // O elo do meio é o que costuma sumir: `organizations.locale` tinha
+    // seletor na tela, era gravado no banco e não era lido por NINGUÉM —
+    // medido por varredura, as únicas referências eram a escrita e a releitura
+    // para preencher o próprio formulário. Sem este caso, ele volta a ser
+    // decorativo no dia em que alguém "simplificar" o resolvedor.
+    const servidor = readFileSync("lib/auth/server.ts", "utf8");
+    expect(servidor, "a membership deixou de trazer o idioma da organização").toMatch(
+      /organizations\(display_name, locale\)/,
+    );
+    expect(servidor, "o idioma da sessão parou de cair na organização").toMatch(
+      /locale \?\? \(await localeDaOrgAtiva\(memberships\)\)/,
+    );
+    expect(readFileSync("lib/auth/types.ts", "utf8")).toMatch(/idioma: Idioma/);
     // E o provider de idioma é SEPARADO do de autenticação. A primeira versão
     // lia o idioma do `AuthProvider` e derrubou 32 casos: dezenas de testes
     // fazem `vi.mock` daquele módulo, e um RÓTULO passou a depender de quem
     // sabe permissão. Traduzir é apresentação.
     const layout = readFileSync("app/app/layout.tsx", "utf8");
-    expect(layout).toMatch(/<IdiomaProvider locale=\{user\.locale\}>/);
+    expect(layout).toMatch(/<IdiomaProvider locale=\{user\.idioma\}>/);
     // O IMPORT, não a palavra: o cabeçalho do arquivo EXPLICA por que não
     // depende da autenticação, e a primeira versão deste caso ficava vermelha
     // por causa do próprio comentário que documenta a decisão.
@@ -121,5 +162,32 @@ describe("os elos que somem sem barulho", () => {
     ]) {
       expect(readFileSync(arquivo, "utf8"), arquivo).toMatch(/const t = useT\(\);/);
     }
+  });
+});
+
+describe("o dicionário acompanha o registro de navegação", () => {
+  it("todo item da barra lateral tem tradução", () => {
+    // ⚠️ ESTE CRUZAMENTO NÃO EXISTIA, e a falta dele é do tipo que não
+    // vermelheia: a CHAVE do dicionário é o próprio texto em português, então
+    // renomear um rótulo no registro não quebra nada — `traduzir()` devolve a
+    // chave ausente como português e o espanhol daquele item some da barra
+    // lateral sem aviso. Foi o risco real ao renomear "Kanban"→"Funis" e
+    // "Funis"→"Etapas do funil" nesta rodada.
+    // Nome próprio não se traduz: cair para o português É o comportamento
+    // certo para eles. A lista é curta de propósito — cada entrada aqui é uma
+    // renúncia consciente, não um lugar para esconder rótulo esquecido.
+    const NOMES_PROPRIOS = ["Nuvemshop"];
+    const semTraducao = NAV_DESTINATIONS.filter((d) => d.sidebar)
+      .filter((d) => !NOMES_PROPRIOS.includes(d.label))
+      .filter((d) => !(d.label in DICIONARIO));
+    expect(
+      semTraducao.map((d) => d.label),
+      "item de menu sem entrada em lib/i18n/dicionario.ts — o espanhol dele cai para o português",
+    ).toEqual([]);
+  });
+
+  it("todo grupo da barra lateral tem tradução", () => {
+    const semTraducao = NAV_GROUPS.filter((g) => !(g.label in DICIONARIO));
+    expect(semTraducao.map((g) => g.label)).toEqual([]);
   });
 });

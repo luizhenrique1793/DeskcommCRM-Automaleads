@@ -11,7 +11,18 @@ export interface Conversation {
   channel: string;
   status: string;
   status_changed_at: string;
+  service_revision?: number;
+  service_closed_at?: string | null;
+  service_started_at?: string | null;
+  current_demanda_id?: string | null;
   assigned_to_user_id: string | null;
+  /**
+   * Cópia desnormalizada do nome de quem atende (migration 0202), escrita por
+   * `fn_conversation_assign` no mesmo UPDATE que grava `assigned_to_user_id`.
+   * `null` quando não atribuída, ou quando o backfill/lookup não alcançou —
+   * ver `lib/users/com-nome-do-atendente.ts` para o fallback desse caso raro.
+   */
+  assigned_to_user_name: string | null;
   assignee_kind: string | null;
   assigned_at: string | null;
   last_inbound_at: string | null;
@@ -31,6 +42,12 @@ export interface Conversation {
    * como aparecer só quando faz sentido, e a rota ficaria sem porta.
    */
   bot_silenced_until: string | null;
+  /**
+   * Campo CALCULADO pelo banco (migration 0203) — não é coluna, e por isso não vem
+   * em `select=*`: quem o quiser tem de pedi-lo por nome. Opcional porque a
+   * resposta de uma versão anterior, ainda em cache do react-query, não o tem.
+   */
+  comando_da_conversa?: string | null;
   last_handoff_at: string | null;
   created_at: string;
   updated_at: string;
@@ -54,7 +71,11 @@ export interface Message {
   media_mime: string | null;
   media_size_bytes: number | null;
   media_storage_path: string | null;
-  sent_via: "user" | "ai" | "system";
+  // Espelha o CHECK do banco (messages_sent_via_check): 'crm', 'external_device',
+  // 'automation', 'ai', 'user', 'system'. O tipo listava só três e o TypeScript
+  // aceitava os demais só porque o dado vem do Supabase sem cast — a tela então
+  // não conseguia nem NOMEAR o valor para exibi-lo (ver MessageBubble).
+  sent_via: "user" | "ai" | "system" | "external_device" | "automation" | "crm";
   sent_by_user_id: string | null;
   sent_at: string;
   delivered_at: string | null;
@@ -68,6 +89,8 @@ export interface Message {
   edited_at: string | null;
   /** Quando o AUTOR apagou para todos. A linha fica; o texto não é mostrado. */
   revoked_at: string | null;
+  /** A mensagem que esta responde (citação). `null` = envio solto. */
+  reply_to_message_id: string | null;
   created_at: string;
 }
 

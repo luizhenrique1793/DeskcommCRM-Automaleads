@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { apiClient } from "@/lib/api/client";
 import { showApiError } from "@/components/feedback/ApiErrorToast";
+import { useT } from "@/hooks/i18n/useT";
 import type { AgentPatch } from "@/lib/ai/guardrails-schema";
 
 export interface AgentRow {
@@ -20,6 +21,16 @@ export interface AgentRow {
   kind?: "rag_bot" | "mcp_agent" | null;
   priority?: number | null;
   published_version_id?: string | null;
+  paused_at?: string | null;
+  operation_mode?: "automatic" | "assisted";
+  operation_revision?: number;
+  /**
+   * Provedor e modelo da versão PUBLICADA — o que de fato responde. Vem por join
+   * na lista, e é opcional porque nem todo chamador precisa dele. Sem isto, a
+   * tela só tinha `ai_agents.model`, que para `mcp_agent` é o valor do cadastro
+   * e nunca é atualizado ao publicar.
+   */
+  versao_publicada?: { provider: string; model: string } | null;
   archived_at?: string | null;
   created_at: string;
   updated_at: string;
@@ -49,6 +60,7 @@ export function useAgent(id: string, opts?: { initialData?: AgentRow }) {
 }
 
 export function useUpdateAgent(id: string) {
+  const t = useT();
   const qc = useQueryClient();
   return useMutation({
     mutationKey: ["ai", "agents", id, "update"],
@@ -90,7 +102,7 @@ export function useUpdateAgent(id: string) {
     onSuccess: (data) => {
       qc.setQueryData(agentQueryKey(id), data);
       qc.invalidateQueries({ queryKey: ["ai", "agents", "list"] });
-      toast.success("Salvo");
+      toast.success(t("Salvo"));
     },
   });
 }

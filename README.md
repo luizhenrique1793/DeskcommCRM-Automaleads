@@ -2,6 +2,11 @@
 
 🇧🇷 Português · [🇺🇸 English](README.en.md) · [🇪🇸 Español](README.es.md)
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/deskcomm-logo-dark.svg">
+  <img src="docs/brand/deskcomm-logo.svg" alt="Deskcomm CRM" width="420">
+</picture>
+
 # 🛠️ DeskcommCRM — o Sistema Operacional de Vendas com IA, open source, pro WhatsApp
 
 **Agentes de IA que atendem, qualificam e vendem no WhatsApp — dentro de um CRM open source rodando no seu servidor.**
@@ -118,14 +123,37 @@ sucesso" um site mudo. Detalhes em [`hostgator-setup-kit/README.md`](hostgator-s
 ### Primeiro acesso
 
 Abra `https://<seu-domínio>` (o cadeado leva ~1 min pra aparecer), entre com o admin, e tenha o
-**Google Authenticator** ou **Authy** à mão — o primeiro login de admin exige MFA. No onboarding,
+**Google Authenticator** ou **Authy** à mão *se* você quiser ligar a verificação em duas etapas — ela é **opcional** e fica em Configurações › Segurança; o primeiro login **não** a exige. No onboarding,
 escaneie o QR code com o WhatsApp do seu número.
 
 ### 🤖 Prefere que uma IA instale pra você?
 
-Jogue a pasta `hostgator-setup-kit/` no chat do **Claude Code** rodando dentro da VPS e diga
-*"instala o DeskcommCRM pra mim"*. Ele lê o [`CLAUDE.md`](hostgator-setup-kit/CLAUDE.md) do kit
-— que traz o passo a passo e as armadilhas já mapeadas — e conduz tudo em português.
+O repositório traz **guias do assistente** que carregam sozinhos no Claude Code, Codex, Cursor,
+OpenCode ou Antigravity: instalar, montar um cliente por nicho, analisar métricas, afinar o prompt
+do agente e contribuir. Para tê-los em **qualquer pasta** — inclusive antes de clonar, no seu
+computador —, rode uma vez:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/melgarafael/DeskcommCRM/main/scripts/instalar-guias.sh | bash
+```
+
+Depois abra uma sessão nova do seu assistente e diga *"quero instalar o CRM na minha VPS"*: pedir o
+assunto em português aciona o guia certo em qualquer um dos cinco. Para chamar um guia pelo nome,
+cada um tem o seu jeito — `/deskcomm-instalar` no Claude Code, no Cursor e no Antigravity;
+`$deskcomm-instalar` no Codex; no OpenCode, peça pelo nome, em linguagem natural.
+
+Os guias **não** se atualizam sozinhos: rodar o mesmo comando de novo traz a versão nova. Para
+desfazer:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/melgarafael/DeskcommCRM/main/scripts/instalar-guias.sh | bash -s -- --remover
+```
+
+Com o repositório já clonado, os guias vêm dentro dele (`.agents/skills/`) e nem isso é preciso. Se
+você rodou o comando mesmo assim, saiba que no Claude Code o guia instalado vale mais que o do clone
+— e fica na versão do dia em que rodou, até rodar de novo (ou desfazer).
+Também funciona o jeito antigo: jogar só a pasta `hostgator-setup-kit/` no chat do **Claude Code**
+dentro da VPS — ele lê o [`CLAUDE.md`](hostgator-setup-kit/CLAUDE.md) do kit e conduz tudo em português.
 
 ---
 
@@ -168,8 +196,11 @@ pra isso existe `--force`, de propósito.
 
 **Coisas normais que você vai ver:** um monte de `already exists` / `multiple primary keys` na
 parte do banco — **é esperado e inofensivo**, são coisas que já existiam. O script filtra esse
-ruído e mostra `✓ banco atualizado`. Se aparecer `⚠ avisos que não são os esperados`, aí sim
-guarde a mensagem.
+ruído e mostra `✓ banco atualizado`. Se o banco estiver ocupado com o CRM atendendo, ele aplica de
+novo sozinho (até 3 passadas) e conta isso na tela — isso vale a partir da atualização seguinte à
+que instalar esta correção. Se aparecer `⚠ Apareceram avisos no banco que NÃO são os esperados`, aí sim guarde a
+mensagem: o **fim** da saída diz o que fazer em cada caso (repetir com `--force` quando foi o banco
+ocupado, declarar `SUPABASE_DB_ADMIN_URL` quando foi permissão). Restaurar o backup é o último recurso.
 
 **Deu ruim?** `bash hostgator-setup-kit/restore.sh` volta pro backup.
 **Quer só diagnosticar?** `bash hostgator-setup-kit/healthcheck.sh`.
@@ -283,6 +314,14 @@ docker compose up -d        # WAHA local (opcional em dev sem WhatsApp)
 # O schema real vive no baseline.sql, o mesmo que o install.sh aplica na VPS.
 # `supabase db push` "passa" e deixa o banco vazio.
 supabase link --project-ref <seu-ref>
+
+# Num projeto Supabase NOVO, habilite antes as extensões que o schema usa —
+# sem elas o baseline para em `type public.vector does not exist`.
+psql "$SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -c \
+  'create extension if not exists vector with schema public;
+   create extension if not exists citext with schema public;
+   create extension if not exists pg_trgm with schema public;'
+
 psql "$SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f supabase/baseline.sql
 
 pnpm dev
@@ -321,21 +360,29 @@ DeskcommCRM/
 ## 🧪 Testes
 
 ```bash
-pnpm typecheck     # tsc --noEmit (estrito)
+pnpm typecheck     # tsc --noEmit -p tsconfig.typecheck.json (inclui tests/)
 pnpm lint          # eslint next/core-web-vitals
 pnpm test:unit     # Vitest (NÃO inclui tests/invariants/**)
 pnpm test:db       # Postgres efêmero + baseline install/update + invariantes
 pnpm test:e2e      # Playwright (requer dev server)
 ```
 
-**Quatro checks são obrigatórios** pra mergear na `main` — todos verificados na branch protection, não só no papel:
+**Estes checks são obrigatórios** pra mergear na `main`. A lista abaixo já disse "quatro" e depois "cinco" — **meça, não confie nela**:
+
+```bash
+gh api repos/melgarafael/DeskcommCRM/branches/main/protection \
+  --jq '.required_status_checks.contexts|join(", ")'
+# em 2026-08-14: verify, build-and-size, invariants, e2e, imagens-ok
+```
+
 
 | Check | O que faz |
 |---|---|
 | `verify` | typecheck + lint + `lint:channels` + `test:unit` + `test:shell` |
-| `invariants` | sobe um Postgres limpo, aplica o `baseline.sql` em modo **install** (`ON_ERROR_STOP=1`) e depois em modo **update** (provando idempotência), e roda **618 invariantes em 98 arquivos** — RBAC, atribuição, escopo, roteamento, follow-up, webhooks e automações |
+| `invariants` | sobe um Postgres limpo, aplica o `baseline.sql` em modo **install** e depois em modo **update** — as duas passadas com `ON_ERROR_STOP=1`, que é o que torna a segunda uma prova de idempotência e não só um "terminou" —, e roda os invariantes de RBAC, atribuição, escopo, roteamento, follow-up, webhooks e automações |
 | `build-and-size` | `pnpm build` em Node 22 |
-| `e2e` | sobe Supabase local, aplica o `baseline.sql` e roda **44 das 45 specs** Playwright pelo frontend |
+| `e2e` | sobe Supabase local, aplica o `baseline.sql` e roda **48 das 49 specs** Playwright pelo frontend |
+| `imagens-ok` | reprova quando qualquer uma das três imagens Docker (`app`, `worker`, `scheduler`) não constrói — é o artefato que o self-hoster instala |
 
 A única spec fora do `e2e` é `vps-fresh-onboarding` — ela precisa de WAHA + Redis + Resend + Nuvemshop de verdade. Ela é a **P0** da nossa doutrina de QA visual, então `e2e` verde **não** prova a jornada de instalação fresca; essa se prova numa VPS.
 
@@ -383,9 +430,12 @@ git commit -m "feat(escopo): descrição"
 # abre PR — o template já traz o checklist de Definition of Done
 ```
 
-Essa linha é a lista **completa** dos gates obrigatórios, de propósito: rodar só metade e descobrir o
-resto como surpresa vermelha depois de horas de espera é a pior primeira experiência que este
-repositório sabe entregar.
+Essas duas linhas são **tudo o que dá para rodar na sua máquina**, de propósito: rodar só metade e
+descobrir o resto como surpresa vermelha depois de horas de espera é a pior primeira experiência
+que este repositório sabe entregar.
+
+Dois gates obrigatórios **não** cabem aí e só rodam no CI: o `e2e` (precisa de Supabase local) e
+o `imagens-ok` (constrói as três imagens Docker). Verde na sua máquina não é verde no merge.
 
 **Definition of Done:** typecheck zero, lint zero, testes relevantes verdes, RLS testada se toca tabela tenant-aware, audit log emitido em mutações, migration versionada **+ apêndice no `baseline.sql`** se muda schema (senão a mudança não chega em quem se auto-hospeda). Detalhes em [`CLAUDE.md`](CLAUDE.md#definition-of-done).
 

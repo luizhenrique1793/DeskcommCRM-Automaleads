@@ -23,19 +23,22 @@ import { audit } from "@/lib/audit";
 import { loadAuthUser, resolveActiveOrg } from "@/lib/auth/server";
 import { ROLE_RANK } from "@/lib/auth/types";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { mensagemDoEscopo, validarEscopoDaVersao } from "@/lib/ai/agents/escopo";
 import {
   agentMcpCreateSchema,
+  agentMcpPatchSchema,
+  PUBLISH_ERROR_CODES,
   versionCreateSchema,
   versionPatchSchema,
-  PUBLISH_ERROR_CODES,
 } from "@/lib/ai/agents/validation";
 import { publishAgentVersion } from "@/lib/ai/agents/publish";
+import { escolherVersoesDaTela } from "@/lib/ai/agents/versoes-da-tela";
 import { VALID_TOOL_IDS } from "@/lib/mcp/tools";
 
 const UUID_RX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const VERSION_COLUMNS =
-  "id, organization_id, agent_id, version_number, system_prompt, provider, model, credential_id, tool_ids, trigger_config, channel_session_id, max_steps, token_budget, cost_budget_cents, history_message_window, history_token_window, handoff_keywords, handoff_tool_enabled, cases_enabled, split_messages, split_max_chars, typing_indicator_enabled, followup, operator_enabled, operator_model, operator_tool_ids, status, published_at, superseded_at, created_at, created_by,pipeline_ids";
+  "id, organization_id, agent_id, version_number, system_prompt, provider, model, credential_id, tool_ids, trigger_config, channel_session_id, max_steps, token_budget, cost_budget_cents, history_message_window, history_token_window, handoff_keywords, handoff_tool_enabled, cases_enabled, split_messages, split_max_chars, typing_indicator_enabled, followup, operator_enabled, operator_model, operator_tool_ids, status, published_at, superseded_at, created_at, created_by,pipeline_ids,knowledge_source_ids,provisioning_origin";
 
 type ActionResult<T = void> =
   | { ok: true; data?: T }
@@ -56,9 +59,66 @@ async function ensureAdmin() {
 // saveAgentDraftAction
 // ---------------------------------------------------------------------------
 
+/**
+ * Grava as colunas de cadastro em `ai_agents` — e só quando alguma mudou.
+ *
+ * Uma rodada que não mudou nada não é mutação, e auditar todo "Salvar rascunho"
+ * encheria `api_audit_log` de linha sem efeito. A comparação é contra a linha
+ * lida no mesmo request.
+ */
+async function gravarCadastroDoAgente(
+  admin: ReturnType<typeof createAdminClient>,
+  args: {
+    agentId: string;
+    orgId: string;
+    actorUserId: string;
+    requestId: string;
+    atual: { name?: unknown; description?: unknown; priority?: unknown };
+    pedido: { name?: string; description?: string | null; priority?: number };
+  },
+): Promise<{ erro: string } | { mudou: string[] }> {
+  const patch: Record<string, unknown> = {};
+  for (const campo of ["name", "description", "priority"] as const) {
+    const novo = args.pedido[campo];
+    if (novo === undefined) continue;
+    if ((args.atual[campo] ?? null) === (novo ?? null)) continue;
+    patch[campo] = novo ?? null;
+  }
+  if (Object.keys(patch).length === 0) return { mudou: [] };
+
+  // Service role bypassa RLS: o filtro de organização é manual e obrigatório.
+  const { error } = await admin
+    .from("ai_agents")
+    .update({ ...patch, updated_at: new Date().toISOString() })
+    .eq("id", args.agentId)
+    .eq("organization_id", args.orgId);
+  if (error) return { erro: error.message };
+
+  void audit({
+    action: "ai_agent.updated",
+    actorUserId: args.actorUserId,
+    organizationId: args.orgId,
+    resourceType: "ai_agent",
+    resourceId: args.agentId,
+    requestId: args.requestId,
+    metadata: { fields: Object.keys(patch) },
+  });
+  return { mudou: Object.keys(patch) };
+}
+
 export async function saveAgentDraftAction(
   agentId: string,
   payload: unknown,
+  /**
+   * Nome, descrição e ordem de preferência — as três colunas que moram em
+   * `ai_agents` e que `ai_agent_versions` NÃO tem. Elas viajavam só na criação;
+   * em modo edição, `toVersionPayload` era o único construtor do envio e não as
+   * incluía. A pessoa digitava o nome, via "Rascunho vN salvo.", publicava com
+   * sucesso — e o cartão da lista seguia com o nome antigo, porque nada daquilo
+   * era mentira: tudo se referia à VERSÃO, a única coisa realmente gravada.
+   * (issue #463)
+   */
+  cadastro?: unknown,
 ): Promise<ActionResult<{ version_id: string; version_number: number }>> {
   if (!UUID_RX.test(agentId)) return { ok: false, error: "invalid_request" };
   const guard = await ensureAdmin();
@@ -73,6 +133,18 @@ export async function saveAgentDraftAction(
       details: parsed.error.flatten(),
     };
   }
+  // Validado ANTES de qualquer escrita, junto do resto. Se o cadastro fosse
+  // conferido depois, uma ordem inválida devolveria erro com a versão já
+  // gravada; se fosse GRAVADO antes, um escopo inválido devolveria erro com o
+  // nome já trocado — a lista mostrando o novo e o editor o velho.
+  // `agentMcpPatchSchema` é a régua que a rota REST já usa: uma quarta régua
+  // para o mesmo campo é o defeito seguinte.
+  const cadastroParsed =
+    cadastro === undefined ? null : agentMcpPatchSchema.safeParse(cadastro);
+  if (cadastroParsed && !cadastroParsed.success) {
+    return { ok: false, error: "validation_failed", details: cadastroParsed.error.flatten() };
+  }
+
   const v = parsed.data;
   const requestId = randomUUID();
   const admin = createAdminClient();
@@ -80,23 +152,68 @@ export async function saveAgentDraftAction(
   // Sanity: o agent existe e é da org? não está arquivado?
   const { data: agent } = await admin
     .from("ai_agents")
-    .select("id, kind, archived_at")
+    .select("id, kind, archived_at, name, description, priority, published_version_id")
     .eq("id", agentId)
     .eq("organization_id", activeOrg.orgId)
     .maybeSingle();
   if (!agent) return { ok: false, error: "not_found" };
   if (agent.archived_at) return { ok: false, error: "agent_archived" };
 
-  // Procura draft existente (latest por version_number)
-  const { data: existingDraft } = await admin
+  // O escopo aponta para coisas que EXISTEM nesta organização. Marcar um
+  // material apagado (ou de outra organização) produz uma configuração muda: a
+  // tela mostra a marcação, o assistente não acha nada, e ninguém vê erro.
+  const escopo = await validarEscopoDaVersao(admin, activeOrg.orgId, {
+    pipeline_ids: v.pipeline_ids,
+    knowledge_source_ids: v.knowledge_source_ids,
+  });
+  if (!escopo.ok) {
+    return { ok: false, error: "validation_failed", message: mensagemDoEscopo(escopo) };
+  }
+
+  // Em QUAL rascunho esta escrita cai — pela MESMA régua que a tela usa para
+  // decidir qual versão abrir (`escolherVersoesDaTela`, chamada em `page.tsx`).
+  // Uma segunda régua aqui é o defeito, não uma economia de consulta.
+  //
+  // Era "o rascunho de maior version_number, sem perguntar se ainda vale", e as
+  // duas respostas divergiam no rascunho SUPERADO — o rascunho ANTERIOR à
+  // publicada, estado que `revertToVersionAction` cria toda vez que alguém com
+  // trabalho em andamento reverte pelo Histórico. Medido com [v5 draft, v6
+  // publicada]: a tela responde `draft = null` (e chama a v5 de
+  // `draftObsoleto`), o servidor respondia `draft = v5`. Dois estragos de uma
+  // vez:
+  //
+  //   1. O trabalho ia para uma versão que a tela não reabre e o botão não
+  //      publica (`props.draft` é nulo enquanto o rascunho for superado). Aviso
+  //      verde "Rascunho v5 salvo.", recarrega, e a tela volta a mostrar a v6 —
+  //      o mesmo desfecho do defeito que o PR #502 consertou, por outra porta.
+  //   2. O rascunho superado é um RETRATO. A tela promete "ele continua no
+  //      Histórico" (`AgentForm.tsx`, `title` do badge) e o `VersionHistory` o
+  //      lista. Regravá-lo trocava o conteúdo daquela linha por um texto que
+  //      ninguém rascunhou ali, sem erro e sem volta — e o gatilho
+  //      `fn_ai_agent_version_content_immutable` não pega este caso, porque ele
+  //      congela conteúdo de `status <> 'draft'` e o rascunho superado ainda é
+  //      `draft`.
+  const { data: versoes } = await admin
     .from("ai_agent_versions")
-    .select("id, version_number")
+    .select("id, version_number, status")
     .eq("organization_id", activeOrg.orgId)
     .eq("agent_id", agentId)
-    .eq("status", "draft")
-    .order("version_number", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+    .order("version_number", { ascending: false });
+
+  const { draft: existingDraft } = escolherVersoesDaTela(
+    versoes ?? [],
+    // MEDIDA, não palpite. O ponteiro é o que o motor executa (`agent-config.ts`
+    // faz `join … on v.id = a.published_version_id`); `status = 'published'` é
+    // rótulo, e os dois já divergem em produção. `?? null` é obrigatório e não
+    // enfeite: no schema a coluna é `uuid` NULL sem default (procure por
+    // `"published_version_id" "uuid"` em `supabase/baseline.sql`; a FK é `on
+    // delete set null`), então `null` é o dado "não há publicada" —
+    // enquanto `undefined` faria a régua cair no palpite. Medido com [v8
+    // published, v7 draft, v6 published] e ponteiro em v6: pela medida o
+    // rascunho vigente é a v7; pelo palpite não há rascunho vigente nenhum, e
+    // cada salvamento nasceria uma versão nova.
+    agent.published_version_id ?? null,
+  );
 
   if (existingDraft) {
     // PATCH na draft existente — não infla a sequência de versions.
@@ -127,12 +244,33 @@ export async function saveAgentDraftAction(
       metadata: { agent_id: agentId, fields: Object.keys(update) },
     });
 
+    if (cadastroParsed?.success) {
+      const r = await gravarCadastroDoAgente(admin, {
+        agentId,
+        orgId: activeOrg.orgId,
+        actorUserId: authUser.id,
+        requestId,
+        atual: agent,
+        pedido: cadastroParsed.data,
+      });
+      // As duas escritas não são atômicas. O desfecho tem de dizer o que
+      // gravou: um toast verde genérico aqui reproduz o defeito com outra cara.
+      if ("erro" in r) {
+        return {
+          ok: false,
+          error: "internal_error",
+          message: `O rascunho foi salvo, mas o cadastro do agente não: ${r.erro}`,
+        };
+      }
+      if (r.mudou.length > 0) revalidatePath("/app/ai/agents");
+    }
+
     revalidatePath(`/app/ai/agents/${agentId}`);
     return {
       ok: true,
       data: {
         version_id: existingDraft.id,
-        version_number: (existingDraft as { version_number: number }).version_number,
+        version_number: existingDraft.version_number,
       },
     };
   }
@@ -174,6 +312,7 @@ export async function saveAgentDraftAction(
         operator_model: v.operator_model,
         operator_tool_ids: v.operator_tool_ids,
         pipeline_ids: v.pipeline_ids,
+        knowledge_source_ids: v.knowledge_source_ids,
         split_messages: v.split_messages,
         split_max_chars: v.split_max_chars,
         typing_indicator_enabled: v.typing_indicator_enabled,
@@ -194,6 +333,25 @@ export async function saveAgentDraftAction(
         requestId,
         metadata: { agent_id: agentId, version_number: created.version_number },
       });
+      if (cadastroParsed?.success) {
+        const r = await gravarCadastroDoAgente(admin, {
+          agentId,
+          orgId: activeOrg.orgId,
+          actorUserId: authUser.id,
+          requestId,
+          atual: agent,
+          pedido: cadastroParsed.data,
+        });
+        if ("erro" in r) {
+          return {
+            ok: false,
+            error: "internal_error",
+            message: `O rascunho foi salvo, mas o cadastro do agente não: ${r.erro}`,
+          };
+        }
+        if (r.mudou.length > 0) revalidatePath("/app/ai/agents");
+      }
+
       revalidatePath(`/app/ai/agents/${agentId}`);
       return { ok: true, data: { version_id: created.id, version_number: created.version_number } };
     }
@@ -257,6 +415,13 @@ export async function publishAgentAction(
     .insert({
       organization_id: activeOrg.orgId,
       event_type: "ai_agent.published",
+      // `entity_kind` é NOT NULL sem default (`baseline.sql`): sem esta linha o
+      // insert viola a constraint e o evento de publicação NUNCA é gravado. E o
+      // insert é `void` + `.then()`, então a violação cai num `console.error`
+      // que ninguém lê — o Sistema Vivo perde o registro em silêncio. Visto no
+      // log do CI de hoje: `null value in column "entity_kind" ... violates
+      // not-null constraint`.
+      entity_kind: "ai_agent",
       payload: {
         agent_id: result.agent_id,
         version_id: result.version_id,
@@ -349,7 +514,9 @@ export async function revertToVersionAction(
     credential_id: string;
     tool_ids: string[];
     trigger_config: Record<string, unknown> | null;
-    channel_session_id: string;
+    // Nulo desde a 0239: a versão de origem pode ser um rascunho de quem ainda
+    // não conectou o WhatsApp, e duplicá-la copia o "sem número" adiante.
+    channel_session_id: string | null;
     max_steps: number;
     token_budget: number;
     cost_budget_cents: number;
@@ -362,6 +529,7 @@ export async function revertToVersionAction(
     operator_model: string | null;
     operator_tool_ids: string[];
     pipeline_ids: string[];
+    knowledge_source_ids: string[];
     split_messages: boolean;
     split_max_chars: number;
     typing_indicator_enabled: boolean;
@@ -407,7 +575,10 @@ export async function revertToVersionAction(
         operator_tool_ids: src.operator_tool_ids,
         // O revert leva o escopo junto: voltar para uma versão e NÃO voltar a
         // permissão dela seria publicar uma configuração que nunca existiu.
+        // Vale igual para o acervo: reverter e o assistente esquecer o material
+        // que aquela versão consultava é publicar uma configuração inventada.
         pipeline_ids: src.pipeline_ids,
+        knowledge_source_ids: src.knowledge_source_ids ?? [],
         split_messages: src.split_messages,
         split_max_chars: src.split_max_chars,
         typing_indicator_enabled: src.typing_indicator_enabled,
@@ -455,6 +626,13 @@ export async function revertToVersionAction(
     .insert({
       organization_id: activeOrg.orgId,
       event_type: "ai_agent.published",
+      // `entity_kind` é NOT NULL sem default (`baseline.sql`): sem esta linha o
+      // insert viola a constraint e o evento de publicação NUNCA é gravado. E o
+      // insert é `void` + `.then()`, então a violação cai num `console.error`
+      // que ninguém lê — o Sistema Vivo perde o registro em silêncio. Visto no
+      // log do CI de hoje: `null value in column "entity_kind" ... violates
+      // not-null constraint`.
+      entity_kind: "ai_agent",
       payload: {
         agent_id: result.agent_id,
         version_id: result.version_id,
@@ -557,6 +735,14 @@ export async function createMcpAgentAction(
     split_messages: v.split_messages,
     split_max_chars: v.split_max_chars,
     typing_indicator_enabled: v.typing_indicator_enabled,
+    // O corpo ACEITAVA estes cinco e o INSERT os descartava: criar o assistente
+    // pela tela com papel Operador, escopo de funil ou material marcado produzia
+    // uma versão com tudo no default do banco — desligado e vazio.
+    operator_enabled: v.operator_enabled,
+    operator_model: v.operator_model,
+    operator_tool_ids: v.operator_tool_ids,
+    pipeline_ids: v.pipeline_ids,
+    knowledge_source_ids: v.knowledge_source_ids,
     status: "draft",
     created_by: authUser.id,
   });

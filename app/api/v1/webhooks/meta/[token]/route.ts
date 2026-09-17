@@ -15,14 +15,27 @@
  * e um app serve N WABAs de N organizações. O token amarra o payload a UMA org
  * antes de qualquer escrita — sem ele, quem conhecesse o App Secret escreveria em
  * qualquer tenant.
+ *
+ * ─── De onde vêm as duas credenciais (issue #850, migration 0257) ─────────────
+ *
+ * Do BANCO (`platform_meta_app`), não do ambiente: as duas são da INSTALAÇÃO
+ * inteira, não da organização — é isto que faz o 2º número conectar sem ninguém
+ * voltar na VPS para editar `.env` e reiniciar. O `.env` continua sendo o PISO
+ * (rollback, e clone que ainda não aplicou a migration) e as duas fontes NÃO se
+ * misturam: segredo de um lado com verify token do outro é um app que não existe,
+ * e a falha é um 401 calado que ninguém liga a configuração. A precedência, o TTL
+ * e esse motivo estão escritos em `lib/channels/meta/app.ts`.
  */
 import { randomUUID } from "node:crypto";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { fail } from "@/lib/api/wrappers";
+import { appDaMeta } from "@/lib/channels/meta/app";
+import { lerEnvelopeMeta } from "@/lib/channels/meta/envelope";
 import { parseMetaWebhook, verificationChallenge, verifyMetaSignature } from "@/lib/channels/meta/webhook";
 import { ingestMetaInbound } from "@/lib/channels/meta/ingest";
 import { metaSessionByWebhookToken } from "@/lib/channels/meta/session";
+import { logger } from "@/lib/logger";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export const dynamic = "force-dynamic";
@@ -37,10 +50,12 @@ export async function GET(req: NextRequest, ctx: RouteCtx): Promise<NextResponse
   const session = await metaSessionByWebhookToken(token);
   if (!session) return new NextResponse("not found", { status: 404 });
 
-  const challenge = verificationChallenge(
-    req.nextUrl.searchParams,
-    process.env.META_WEBHOOK_VERIFY_TOKEN ?? "",
-  );
+  // Do BANCO (platform_meta_app, migration 0257), com o `.env` como piso: é a
+  // credencial da INSTALAÇÃO inteira, não da organização — e um clone que ainda
+  // não aplicou a migration continua verificado pelo ambiente. Não lança nunca;
+  // a precedência e o porquê estão em `lib/channels/meta/app.ts`.
+  const { verifyToken } = await appDaMeta();
+  const challenge = verificationChallenge(req.nextUrl.searchParams, verifyToken ?? "");
   if (challenge === null) return new NextResponse("forbidden", { status: 403 });
 
   // Texto puro, sem wrapper — ver o cabeçalho.
@@ -58,19 +73,43 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<NextRespons
   if (!session) return fail("not_found", "unknown webhook token", 404, { requestId });
 
   const rawBody = await req.text();
-  const appSecret = process.env.META_APP_SECRET ?? "";
-  if (!verifyMetaSignature(rawBody, req.headers.get("x-hub-signature-256"), appSecret)) {
+  // Do mesmo lugar que o handshake: BANCO primeiro, `.env` como piso (0257). Sem
+  // segredo nenhum configurado a verificação devolve `false` e a entrega morre em
+  // 401 — que é o desfecho de hoje, e não um 500.
+  const { appSecret } = await appDaMeta();
+  if (!verifyMetaSignature(rawBody, req.headers.get("x-hub-signature-256"), appSecret ?? "")) {
     return fail("unauthorized", "invalid_signature", 401, { requestId });
   }
 
-  let envelope: unknown;
-  try {
-    envelope = JSON.parse(rawBody);
-  } catch {
-    return fail("invalid_request", "invalid_json", 400, { requestId });
+  // ─── O contrato do fio, ANTES do parser ───────────────────────────────────
+  //
+  // Isto era `JSON.parse(rawBody)` seguido de um `as`: cast, que não confere
+  // nada em execução. `parseMetaWebhook` então faz `for (const entry of
+  // envelope.entry ?? [])` — e `for...of` sobre um número LANÇA. Não há
+  // try/catch em volta: a exceção subia sem ninguém tratá-la (o framework
+  // responde 5xx) e a Meta reentregava em backoff um corpo que nunca melhora.
+  //
+  // 400 e não 200: o 200 generoso desta rota existe para EVENTO QUE NÃO NOS
+  // INTERESSA (a Meta reentrega o que não recebe 2xx), e um payload fora do
+  // contrato não é isso — é o fio ter mudado, que ninguém pode descobrir tarde.
+  // O schema é loose e todo campo é opcional, então chegar aqui exige um campo
+  // que a gente LÊ vir com o tipo errado. Ver lib/channels/meta/envelope.ts.
+  const leitura = lerEnvelopeMeta(rawBody);
+  if (!leitura.ok) {
+    if (leitura.motivo === "json_invalido") {
+      return fail("invalid_request", "invalid_json", 400, { requestId });
+    }
+    logger.error("[meta.webhook] payload fora do contrato do canal", {
+      request_id: requestId,
+      campos: leitura.campos,
+    });
+    return fail("validation_failed", "payload fora do contrato do canal", 400, {
+      requestId,
+      details: { campos: leitura.campos },
+    });
   }
 
-  const eventos = parseMetaWebhook(envelope as Parameters<typeof parseMetaWebhook>[0]);
+  const eventos = parseMetaWebhook(leitura.envelope);
   const admin = createAdminClient();
   const now = new Date().toISOString();
   /**
@@ -90,7 +129,12 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<NextRespons
       // A metade que faltava: mensagem do contato vira linha no inbox, move lead,
       // acorda o agente — e carimba `last_inbound_at`, que é o que ABRE a janela
       // de 24h que o gate da Fase 4 calcula.
-      const r = await ingestMetaInbound(admin, e);
+      // A organização vem do TOKEN DO PATH, nunca do corpo: é a mesma fonte que
+      // decide onde os dois updates abaixo escrevem. Sem ela a ingestão
+      // resolvia a sessão só pelo `phone_number_id` do payload — e duas
+      // organizações com o mesmo número faziam a mensagem ser descartada para
+      // as duas, com 200 na resposta (issue #236).
+      const r = await ingestMetaInbound(admin, e, { organizationId: session.organizationId });
       desfechos.push(r.status);
       if (r.status === "failed" || r.status === "no_session") {
         // 2xx continua (a Meta re-entregaria em loop), mas a falha NÃO fica muda:

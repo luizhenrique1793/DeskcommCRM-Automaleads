@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { EntradaDeMensagem } from "@/lib/channels/pos-entrada";
+import { acelerarPipelineDeEventos } from "@/lib/dev/kick-local-pipeline";
 
 /**
  * OS EFEITOS QUE TRANSFORMAM UMA MENSAGEM EM TRABALHO.
@@ -36,6 +37,10 @@ vi.mock("@/lib/leads/nascimento-do-lead", () => ({
 }));
 vi.mock("@/lib/logger", () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+}));
+vi.mock("@/lib/dev/kick-local-pipeline", () => ({
+  acelerarPipelineDeEventos: vi.fn(async () => {}),
+  kickLocalPipeline: vi.fn(async () => {}),
 }));
 
 /** A sequência do que ACONTECEU — é o que os casos de ordem inspecionam. */
@@ -105,6 +110,7 @@ beforeEach(() => {
   audit.mockClear();
   garantirLeadDaConversa.mockClear();
   garantirLeadDaConversa.mockResolvedValue({ criado: true, leadId: "lead-1" } as never);
+  vi.mocked(acelerarPipelineDeEventos).mockClear();
 });
 
 describe("a ordem dos três efeitos", () => {
@@ -156,6 +162,38 @@ describe("opt-out", () => {
     expect(sequencia, "bloqueou por uma palavra que só CONTÉM o termo").not.toContain(
       "update:contacts",
     );
+  });
+
+  it.each([
+    "tem como parar a dor?",
+    "posso sair antes das 15h?",
+    "preciso sair mais cedo da consulta",
+    "quero parar o tratamento por enquanto",
+    "dá pra parar o sangramento em casa?",
+  ])("NÃO bloqueia quem usa a palavra falando de outra coisa: %s", async (texto) => {
+    // A palavra ISOLADA não é o sinal — a INTENÇÃO de parar de receber mensagem é.
+    // Medido numa clínica: "tem como parar a dor?" bloqueava o paciente na ingestão,
+    // antes do modelo, e todo envio seguinte era vetado. Ele sumia sem ninguém ver.
+    await rodar({ texto });
+    expect(sequencia, `bloqueou "${texto}", que não é pedido de descadastro`).not.toContain(
+      "update:contacts",
+    );
+  });
+
+  it.each([
+    "pode parar de mandar mensagem",
+    "para de me mandar isso",
+    "não quero mais receber nada de vocês",
+    "me tira dessa lista",
+    "quero cancelar a inscrição",
+  ])("bloqueia o pedido de descadastro escrito por extenso: %s", async (texto) => {
+    // O outro lado do mesmo defeito: a regex antiga só via a palavra solta, então
+    // "não quero mais receber" — opt-out inequívoco — passava batido.
+    await rodar({ texto });
+    expect(ultimoUpdate, `não bloqueou "${texto}"`).toMatchObject({
+      is_blocked: true,
+      blocked_reason: "stop_keyword",
+    });
   });
 
   it("mensagem sem texto não bloqueia ninguém", async () => {
@@ -237,6 +275,7 @@ describe("nascimento do lead", () => {
 describe("os dois canais usam o mesmo passo", () => {
   const ZERNIO = readFileSync("lib/channels/zernio/ingest.ts", "utf8");
   const WAHA = readFileSync("lib/waha/ingest.ts", "utf8");
+  const META = readFileSync("lib/channels/meta/ingest.ts", "utf8");
 
   it("o canal intermediado chama nos DOIS caminhos de inserção", () => {
     // A ingestão resolve a conversa por dois caminhos — thread conhecida e
@@ -255,6 +294,10 @@ describe("os dois canais usam o mesmo passo", () => {
     expect(WAHA).toMatch(/await aplicarEfeitosPosEntrada\(admin, \{/);
   });
 
+  it("o canal oficial também acorda o follow-up no mesmo passo", () => {
+    expect(META).toMatch(/await aplicarEfeitosPosEntrada\(admin, \{/);
+  });
+
   it("e não guarda mais uma cópia privada da regra de opt-out", () => {
     // Duas cópias divergem na primeira vez que alguém acrescentar um termo — e
     // a que diverge é sempre a que ninguém lembra que existe.
@@ -263,8 +306,39 @@ describe("os dois canais usam o mesmo passo", () => {
     );
   });
 
+  it("acorda o follow-up do contato ANTES do drain genérico", async () => {
+    await rodar();
+    expect(acelerarPipelineDeEventos).toHaveBeenCalledWith(
+      admin,
+      expect.objectContaining({
+        organizationId: "org-1",
+        contactId: "contato-1",
+        messageId: "msg-1",
+        texto: "oi, tudo bem?",
+      }),
+    );
+  });
+
+  it("avança o follow-up ANTES de acordar o agente", async () => {
+    vi.mocked(acelerarPipelineDeEventos).mockImplementation(async () => {
+      sequencia.push("acelerar-followup");
+    });
+    await rodar();
+    const followup = sequencia.indexOf("acelerar-followup");
+    const agente = sequencia.indexOf("rpc:ai_agent.dispatch_requested");
+    expect(followup).toBeGreaterThanOrEqual(0);
+    expect(agente).toBeGreaterThan(followup);
+  });
+
   it("o vocabulário do opt-out vive num lugar só", () => {
-    const compartilhado = readFileSync("lib/channels/pos-entrada.ts", "utf8");
-    expect(compartilhado).toMatch(/export const STOP_RX/);
+    // O lugar mudou — de uma regex exportada daqui para o módulo de decisão
+    // `lib/opt-out/deteccao.ts` — porque o runtime tinha a própria regra e a
+    // divergência entre as duas era o defeito: a daqui, que grava o bloqueio,
+    // era a mais grosseira das duas.
+    const ingestao = readFileSync("lib/channels/pos-entrada.ts", "utf8");
+    expect(ingestao).toMatch(/from "@\/lib\/opt-out\/deteccao"/);
+    expect(ingestao, "a ingestão voltou a ter regra própria de opt-out").not.toMatch(
+      /STOP\|PARAR\|SAIR\|UNSUBSCRIBE/,
+    );
   });
 });

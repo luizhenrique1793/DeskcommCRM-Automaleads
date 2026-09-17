@@ -26,6 +26,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { env } from "@/lib/env";
 import { alvoDe, classificarFalhaDeAlcance, type FalhaDeAlcance } from "@/lib/net/alcance";
+import { validarConfigRedisRest } from "@/lib/redis-config";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -37,7 +38,8 @@ type MotivoDeFalha =
   | FalhaDeAlcance
   | "credencial_recusada"
   | "resposta_inesperada"
-  | "nao_configurado";
+  | "nao_configurado"
+  | "configuracao_invalida";
 
 type Check = {
   status: CheckStatus;
@@ -103,8 +105,36 @@ async function checkRedis(): Promise<Check> {
   const t0 = Date.now();
   const url = env.UPSTASH_REDIS_REST_URL;
   const token = env.UPSTASH_REDIS_REST_TOKEN;
-  if (!url || !token) {
-    return { status: "degraded", latency_ms: 0, error: "not_configured", reason: "nao_configurado" };
+
+  /**
+   * A FORMA do valor vem antes da ida à rede, e o motivo é o que quem opera faz
+   * a seguir.
+   *
+   * Um `.env` com as aspas sobrando (`URL="https://srh:80"`) hoje chega até o
+   * `fetch`, falha, e o `reason` que sai é o de alcance — indistinguível do
+   * contêiner do Redis realmente parado. As duas leituras mandam o operador
+   * para lugares opostos: uma para reiniciar um serviço que está de pé, a outra
+   * para o editor. `configuracao_invalida` separa as duas SEM ida à rede.
+   *
+   * Só "não configurado" segue `degraded`: é integração que ninguém contratou.
+   * Configurado errado é `down` — o produto conta com o Redis e não o tem.
+   *
+   * O texto continua carregando o endereço de propósito: `semAlvo()` o redige
+   * para quem não tem o segredo interno, e quem tem precisa ver QUAL valor está
+   * malformado — dizer só "inválido" sem dizer qual não conserta nada.
+   */
+  const config = validarConfigRedisRest(url, token);
+  if (!config.ok) {
+    if (config.reason === "nao_configurado") {
+      return { status: "degraded", latency_ms: 0, error: "not_configured", reason: "nao_configurado" };
+    }
+    return {
+      status: "down",
+      latency_ms: 0,
+      error: `configuracao_invalida: UPSTASH_REDIS_REST_URL=${url}`,
+      reason: "configuracao_invalida",
+      target: alvoDe(url),
+    };
   }
   try {
     // Protocolo REST do Upstash (compatível com serverless-redis-http): comando no
@@ -193,10 +223,42 @@ function segredoInternoConfere(req: NextRequest): boolean {
   });
 }
 
-/** Sem o segredo, o endereço não sai — o resto do diagnóstico sai igual. */
+/**
+ * Sem o segredo, o endereço não sai — nem pelo `target`, nem pelo `error`.
+ *
+ * O `target` sempre foi escondido de propósito: esta rota é PÚBLICA (o `GET` não
+ * exige nada; o segredo interno só destrava o `?verbose=1`), e o cabeçalho deste
+ * arquivo chama o endereço de WAHA e Redis do cliente de superfície de ataque.
+ * Mas o `error` saía cru ao lado dele, e ele carrega o mesmo endereço numa das
+ * formas mais comuns de configuração errada.
+ *
+ * Medido, com valores que passam pelo Zod de `lib/env.ts` — porque só
+ * `NEXT_PUBLIC_SUPABASE_URL` é `.url()` (linha 69); `WAHA_API_BASE_URL` (140) e
+ * `UPSTASH_REDIS_REST_URL` (155) são `required()` puro, sem validação de forma:
+ *
+ *   "redis-interno.hostgator-vps.com"
+ *     -> e.message = "Failed to parse URL from redis-interno.hostgator-vps.com"
+ *   `"https://redis-interno.hostgator-vps.com"`  (aspas sobrando no .env)
+ *     -> e.message = "Failed to parse URL from \"https://redis-interno...\""
+ *
+ * Ou seja: exatamente os dois serviços cujo endereço a rota esconde por decisão
+ * escrita, e exatamente a instalação self-host que erra o `.env` — o caso já
+ * catalogado nesta casa como ".env sem aspas". O `error` publicava pela porta
+ * que a redação do `target` fechou.
+ *
+ * Contra-exemplo medido, para o escopo ficar honesto: um endereço com esquema
+ * válido e host inalcançável devolve `"fetch failed"`, e o host mora em
+ * `e.cause`, que esta rota nunca devolveu. O vazamento é da forma MALFORMADA,
+ * não de toda falha — e é por isso que a troca é de redação, não de remoção.
+ *
+ * O que NÃO se perde: `reason` (`classificarFalhaDeAlcance`) continua saindo
+ * inteiro, então quem monitora de fora segue distinguindo dns, recusa, tempo
+ * esgotado e credencial recusada. E quem tem o segredo continua vendo o texto
+ * original, porque `verbose=1` não passa por aqui.
+ */
 function semAlvo(check: Check): Check {
-  const { target: _oculto, ...resto } = check;
-  return resto;
+  const { target: _oculto, error, ...resto } = check;
+  return error === undefined ? resto : { ...resto, error: "erro_ao_consultar" };
 }
 
 export async function GET(req: NextRequest) {
@@ -224,7 +286,16 @@ export async function GET(req: NextRequest) {
     {
       data: {
         status,
-        version: process.env.npm_package_version ?? "0.1.0",
+        // APP_VERSION é injetada no build da imagem (ARG no Dockerfile) e vale
+        // "1.2.3" numa release, ou o SHA curto fora de tag.
+        //
+        // Antes isto era `process.env.npm_package_version ?? "0.1.0"`, e a
+        // variável só existe quando o processo nasce de um `npm`/`pnpm run`. O
+        // CMD da imagem é `node server.js`: TODA instalação do mundo reportava
+        // "0.1.0". Um campo que responde o valor errado com confiança é pior que
+        // um campo ausente — ele desliga a pergunta em vez de deixá-la aberta.
+        // Por isso o fallback agora é "desconhecido", e não um número plausível.
+        version: process.env.APP_VERSION || "desconhecido",
         timestamp: new Date().toISOString(),
         checks,
       },

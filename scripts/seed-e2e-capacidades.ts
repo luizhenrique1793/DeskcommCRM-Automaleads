@@ -107,7 +107,31 @@ async function main(): Promise<void> {
     .limit(1)
     .maybeSingle();
 
-  const TOOLS_LIGADAS = ["crm_get_lead", "crm_move_lead_stage", "crm_list_leads"];
+  const TOOLS_LIGADAS = [
+    // As três originais primeiro: o caso do teto desliga `TOOLS_DO_SEED[2]` para
+    // liberar exatamente uma vaga, e a ordem é o que mantém esse índice válido.
+    "crm_get_lead",
+    "crm_move_lead_stage",
+    "crm_list_leads",
+    // ⚠️ AS CINCO ABAIXO ENTRARAM COM O TETO INDO DE 20 PARA 25, e não são enfeite.
+    //
+    // A jornada do teto (issue #162) só existe se o cenário ESTOURAR: eram 3 do
+    // seed + 18 de "Atender" = 21 contra teto 20, e a tela recusava dizendo
+    // "faltam 1 vaga". Com teto 25 essas mesmas 21 passam, a recusa nunca acontece
+    // e o caso vira um clique que sempre dá certo — verde sem medir nada.
+    //
+    // Oito reproduzem a MESMA aritmética no teto novo: 8 + 18 = 26 > 25, recusa
+    // por 1 vaga; desligar uma deixa 7 + 18 = 25, que é o teto exato e passa.
+    //
+    // As escolhidas ficam FORA do pacote "Atender" de propósito — se alguma
+    // estivesse dentro, a união seria menor que a soma e a conta acima não valeria.
+    // Quatro são a família de agenda, que é o assunto do defeito que subiu o teto.
+    "crm_find_free_slots",
+    "crm_list_appointments",
+    "crm_book_appointment",
+    "crm_reschedule_appointment",
+    "crm_list_pipelines",
+  ];
 
   // REPÕE TODAS AS VERSÕES DRAFT DESTE AGENTE, não só a de maior número.
   //
@@ -186,8 +210,10 @@ async function main(): Promise<void> {
     .eq("organization_id", orgId)
     .eq("agent_id", agentId);
   const idsAntigos = (runsAntigos ?? []).map((r) => r.id as string);
+  // Só os runs saem. `api_audit_log` não aceita DELETE de service_role (migration
+  // 0258), e não precisa: `fn_agent_tool_usage` conta a auditoria pelo JOIN com
+  // `ai_agent_runs`, então a linha cujo run foi apagado deixa de contar na tela.
   if (idsAntigos.length > 0) {
-    await admin.from("api_audit_log").delete().in("request_id", idsAntigos);
     await admin.from("ai_agent_runs").delete().in("id", idsAntigos);
   }
 

@@ -13,7 +13,19 @@
  * (bot de resposta). NENHUM dos dois passa `tools` ao SDK. O agente do CRM, que
  * opera por ferramentas, roda por outro caminho — `lib/agent-engine/edge/llm/
  * providers.ts` (credencial BYOK por organização) e `buildModel()` em
- * `lib/ai/runtime/agent.ts` —, e nenhum deles conhece a OpenRouter.
+ * `lib/ai/runtime/agent.ts`.
+ *
+ * ⚠️ Esta última frase dizia "e nenhum deles conhece a OpenRouter", e envelheceu
+ * em duas etapas — exatamente o apodrecimento que o parágrafo acima previa:
+ *   1. `providers.ts` passou a registrar `openrouter` (a virada que o penúltimo
+ *      teste deste arquivo já reconhece e vigia);
+ *   2. `buildModel()` ficou para trás mais um tempo, com três casos, e o ensaio
+ *      da aba "Teste" morria em `unsupported_provider` para um agente que o
+ *      worker atendia normalmente. Agora conhece os quatro, e quem vigia isso é
+ *      `tests/unit/provedores-x-registry.test.ts`, que chama a função para cada
+ *      id da lista canônica.
+ * A chave também não chegava ao worker: `OPENROUTER_API_KEY` faltava no schema
+ * de `lib/agent-engine/env.ts` e o Zod a removia no boot.
  *
  * Isso importa porque muda QUAL risco o usuário corre. Um modelo sem tool
  * calling sólido é catastrófico num turno com ferramentas (responde texto
@@ -36,7 +48,15 @@ const RAIZ = resolve(__dirname, "../..");
 function chamadoresDoResolver(): string[] {
   const saida = execFileSync(
     "git",
-    ["grep", "-l", "resolveLanguageModel", "--", "lib", "workers", "app", "scripts"],
+    // `--color=never` não é decoração: `git grep` não colore quando não há TTY,
+    // MAS colore assim mesmo se o dev tiver `color.ui=always` no ~/.gitconfig — e
+    // aí cada caminho volta embrulhado em ANSI, o `split("\n")` devolve
+    // "\u001b[35mlib/ai/...\u001b[m", e nenhum `readFileSync` acha o arquivo.
+    // Medido nas três combinações:
+    //   sem config            -> ANSI: false
+    //   -c color.ui=always    -> ANSI: true   <- o teste quebra aqui
+    //   + --color=never       -> ANSI: false
+    ["grep", "--color=never", "-l", "resolveLanguageModel", "--", "lib", "workers", "app", "scripts"],
     { cwd: RAIZ, encoding: "utf8" },
   );
   return saida

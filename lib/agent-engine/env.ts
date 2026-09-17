@@ -29,16 +29,45 @@ const envSchema = z.object({
   // OpenAI e a chave no `.env` continuava sem credencial utilizável, e a única
   // saída era cadastrar BYOK pela tela — sem nada dizendo isso.
   OPENAI_API_KEY: z.string().min(1).optional(),
+  // A TERCEIRA irmã, e a que mais doía faltar: OpenRouter é a opção **[1]** do
+  // menu do instalador, a que ele chama de caminho mais simples. O ramo
+  // `provider === 'openrouter'` existe em `resolveOrgLlmConfig` e
+  // `llmEdgeConfigFromEnv` já lia `env.OPENROUTER_API_KEY` — mas o parâmetro
+  // declara a chave como opcional (typecheck passa sem ela) e `loadEnv` devolve
+  // `parsed.data`, e o Zod remove o que o schema não declara. A chave estava no
+  // `.env`, sumia no boot do worker, e TODO turno morria em
+  // `LlmNotConfiguredError` mandando cadastrar credencial pela tela.
+  // Consertar a irmã da OpenAI e deixar esta é o modo de falha desta família:
+  // ao mexer aqui, confira as três de uma vez.
+  OPENROUTER_API_KEY: z.string().min(1).optional(),
   // Modelo default do agente quando a org não define o dela (knob, nunca constante).
   AGENT_DEFAULT_MODEL: z.string().min(1).default('claude-sonnet-4-5'),
   // Teto de conexões por pool do pg. Sem valor = pg decide (default 10).
   DB_POOL_MAX: z.coerce.number().int().positive().optional(),
-  // Knobs da fila — defaults conservadores, documentados no .env.example.
+  // Knobs da fila. (Esta linha já afirmou "documentados no .env.example" quando
+  // NENHUMA chave QUEUE_ estava lá — o autor da issue #258 teve de ler o
+  // código-fonte para achar o intervalo que estava lhe custando a cota. O que
+  // cada knob FAZ é dito aqui, que é semântica e não envelhece; onde mexer e o
+  // que medir está em docs/runbooks/custo-e-cota-do-supabase.md.)
   QUEUE_MAX_CONCURRENCY: z.coerce.number().int().positive().default(8),
   QUEUE_VISIBILITY_TIMEOUT_MS: z.coerce.number().int().positive().default(600_000),
   // Porta do /healthz (bind 0.0.0.0 no container; 0 = porta efêmera em teste).
   HEALTH_PORT: z.coerce.number().int().min(0).max(65_535).default(8787),
-  QUEUE_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(250),
+  // TETO de espera do laço da fila: com a fila vazia é quanto ele dorme entre uma
+  // consulta ao relógio e a próxima; com job agendado, ele acorda no vencimento e
+  // este valor só limita a soneca. Era 250 e a fila era consultada abrindo uma
+  // transação de claim inteira — 5 statements, ~17/s para sempre numa instalação
+  // que não atende ninguém (issue #258: 8,09 GB/mês de egress medidos contra uma
+  // cota de 5 GB do plano free do Supabase). O 2000 mantém o SIGNIFICADO da chave
+  // para quem já a configurou, cabe 4× dentro do INBOUND_DEBOUNCE_MS (8000) e fica
+  // abaixo do idleTimeoutMillis do pool (10s), acima do qual cada rodada reconecta.
+  QUEUE_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(2_000),
+  // Ritmo do "havia trabalho e eu não peguei" — cap QUEUE_MAX_CONCURRENCY cheio ou
+  // lane do contato ocupada. Aqui há job vencido esperando vaga, então recolher o
+  // ritmo custaria throughput no pico sem economizar nada no ocioso: é o único
+  // estado que segue nos 250 ms de sempre. Separar os dois é o que impede o valor
+  // que o operador escolheu para economizar de governar também o caminho ocupado.
+  QUEUE_CLAIM_RETRY_INTERVAL_MS: z.coerce.number().int().positive().default(250),
   QUEUE_REAPER_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
   SHUTDOWN_GRACE_MS: z.coerce.number().int().positive().default(30_000),
   // Watchdog de sessão (Fase 4A-2) — o ÚNICO ponto do engine que fala com o
@@ -51,10 +80,30 @@ const envSchema = z.object({
   WATCHDOG_REDRIVE_MIN_AGE_MS: z.coerce.number().int().positive().default(30_000),
   WATCHDOG_REDRIVE_BATCH_SIZE: z.coerce.number().int().positive().default(10),
   WATCHDOG_REDRIVE_SPACING_MS: z.coerce.number().int().positive().default(4_000),
+  // Ponte de eventos WaCalls (spec 18) — chamada de voz, opt-in por org. Sem
+  // WACALLS_API_BASE_URL a ponte fica OFF (warn), mesmo princípio do watchdog
+  // WAHA acima.
+  WACALLS_API_BASE_URL: z.string().url().optional(),
+  WACALLS_API_TOKEN: z.string().trim().min(1).optional(),
+  WACALLS_BRIDGE_MAX_BACKOFF_MS: z.coerce.number().int().positive().default(30_000),
   // Dono ÚNICO dos eventos ai_agent.dispatch_requested (mesma chave do app):
   // 'engine' (default) = o drain deste worker consome; 'native' = o dispatcher
   // EPIC-13 consome e o drain daqui NÃO liga. Nunca os dois.
   AGENT_DISPATCH_CONSUMER: z.enum(['engine', 'native']).default('engine'),
+  // Kill switch do teto de gasto de IA. `on` (ausente = on) não liga nada:
+  // respeita o que cada organização escolheu. A chave só AFROUXA — 'avisar'
+  // rebaixa bloqueio a aviso, 'off' (e as grafias falsas comuns) cala tudo.
+  //
+  // ⚠️ ESTA LINHA É O QUE FAZ A ALAVANCA CHEGAR A QUEM GASTA. `loadEnv` devolve
+  // `parsed.data`, e o Zod REMOVE o que o schema não declara: a chave estaria no
+  // `.env`, sumiria no boot do worker, e o operador que puxasse a alavanca veria
+  // a IA continuar bloqueada sem nenhuma pista do porquê. É a mesma família de
+  // defeito das três chaves de provedor acima — a quarta irmã.
+  //
+  // `z.string()` cru e NUNCA `z.enum`: um valor inesperado aqui derrubaria o
+  // worker no boot, e derrubar o worker é o oposto do que um kill switch faz.
+  // Quem normaliza é `normalizarChaveDeOrcamento` (edge/llm/orcamento.ts).
+  AI_BUDGET_ENFORCEMENT: z.string().min(1).optional(),
   // Modo do gate de disclosure: 'inject' (default conservador) ou 'veto'.
   DISCLOSURE_MODE: z.enum(['inject', 'veto']).default('inject'),
   // Resposta 'queued' (sessão ≠ WORKING): job reagendado com este atraso, SEM
@@ -66,6 +115,14 @@ const envSchema = z.object({
   CRM_DRAIN_IDLE_INTERVAL_MS: z.coerce.number().int().positive().default(15_000),
   // Evento 'processing' órfão (crash do worker) volta a 'pending' após isto.
   CRM_EVENT_REAP_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),
+  // Drain dos HANDLERS do event_log (mídia, branding, follow-up…), à parte do
+  // CRM_DRAIN_* acima: aquele é o dispatch do agente e fala Postgres direto;
+  // este roda os handlers de `register-handlers.ts` pelo admin client.
+  // Até 2026-08-25 este laço não existia e os handlers só rodavam pelo cron
+  // `event-log-drain` (1×/min) — ver o cabeçalho de lib/event-log/drain-loop.ts.
+  EVENT_LOG_DRAIN_INTERVAL_MS: z.coerce.number().int().positive().default(2_000),
+  EVENT_LOG_DRAIN_IDLE_INTERVAL_MS: z.coerce.number().int().positive().default(10_000),
+  EVENT_LOG_DRAIN_BATCH_SIZE: z.coerce.number().int().positive().default(50),
   // Coalescência de rajada inbound: mensagens do MESMO contato dentro desta
   // janela viram UM job (responder em rajada é gatilho de ban). 0 = sem debounce.
   INBOUND_DEBOUNCE_MS: z.coerce.number().int().min(0).default(8_000),
@@ -119,6 +176,9 @@ const envSchema = z.object({
   FOLLOWUP_AI_MODEL: z.string().min(1).optional(),
   // Loop do agente — teto de steps de tool-calls por run.
   AGENT_MAX_STEPS: z.coerce.number().int().positive().default(8),
+  // Teto de mensagens FÍSICAS enviadas ao lead por turno (send_message + send_template
+  // somados, bolhas incluídas) — nenhum gate de before-send limita CONTAGEM, só ritmo.
+  MAX_SENDS_PER_TURN: z.coerce.number().int().positive().default(3),
   // Circuit breaker de tools por run.
   TOOL_BREAKER_EXACT_WARN: z.coerce.number().int().positive().default(2),
   TOOL_BREAKER_EXACT_BLOCK: z.coerce.number().int().positive().default(5),
@@ -144,6 +204,12 @@ const envSchema = z.object({
   FLYWHEEL_BATCH_LIMIT: z.coerce.number().int().positive().default(10),
   // Contenção de egress — hosts EXTRA além do Supabase/WAHA (CSV). Fail-closed.
   EGRESS_EXTRA_ALLOWED_HOSTS: z.string().optional(),
+  // Elegibilidade da IA (gate opt-in `channel_sessions.metadata.ai_gate=allowlist`):
+  // janela de validade da autorização de um contato. Fora dela, submissão antiga
+  // não reativa a IA; o turno autorizado renova o carimbo enquanto a conversa
+  // está viva. Só tem efeito nos canais com o gate ligado — canal 'open' (o
+  // default) nunca consulta autorização.
+  AI_ALLOWLIST_TTL_DAYS: z.coerce.number().int().positive().default(21),
 });
 
 export type Env = z.infer<typeof envSchema>;

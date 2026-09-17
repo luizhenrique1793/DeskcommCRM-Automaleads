@@ -4,6 +4,7 @@ import { requireAuth, resolveActiveOrg } from "@/lib/auth/server";
 import { ROLE_RANK } from "@/lib/auth/types";
 import { createClient } from "@/lib/supabase/server";
 import { PipelinesClient, type PipelineRow } from "./_client";
+import { traduzir } from "@/lib/i18n/dicionario";
 
 export const dynamic = "force-dynamic";
 
@@ -24,11 +25,11 @@ export default async function PipelinesSettingsPage() {
   const user = await requireAuth();
   const activeOrg = await resolveActiveOrg(user);
   if (!activeOrg) redirect("/app");
-  if (!user.is_platform_admin && ROLE_RANK[activeOrg.role] < ROLE_RANK.manager) {
+  if (!(user.is_platform_admin && !user.support) && ROLE_RANK[activeOrg.role] < ROLE_RANK.manager) {
     redirect("/403");
   }
   const podeEditarConfig =
-    user.is_platform_admin || ROLE_RANK[activeOrg.role] >= ROLE_RANK.admin;
+    (user.is_platform_admin && !user.support) || ROLE_RANK[activeOrg.role] >= ROLE_RANK.admin;
 
   const supabase = await createClient();
   const { data } = await supabase
@@ -39,14 +40,20 @@ export default async function PipelinesSettingsPage() {
     .order("position");
 
   const pipelines = (data ?? []) as PipelineRow[];
+  const idioma = user.idioma;
 
   return (
     <div className="flex h-full flex-col gap-6 p-6">
       <header>
-        <h1 className="text-2xl font-semibold tracking-tight">Funis</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">
+          {traduzir("Etapas do funil", idioma)}
+        </h1>
         <p className="text-sm text-muted-foreground">
-          Para onde o agente leva o card em cada passo do atendimento
-          {podeEditarConfig ? ", vocabulário, custom fields e motivos de perda" : ""}.
+          {traduzir("Para onde o agente leva o card em cada passo do atendimento", idioma)}
+          {podeEditarConfig
+            ? traduzir(", vocabulário, custom fields e motivos de perda", idioma)
+            : ""}
+          .
         </p>
       </header>
       <PipelinesClient pipelines={pipelines} podeEditarConfig={podeEditarConfig} />

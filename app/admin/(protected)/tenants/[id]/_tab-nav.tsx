@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useT } from "@/hooks/i18n/useT";
 
 interface TabItem {
   label: string;
@@ -15,6 +16,7 @@ interface TabNavProps {
 }
 
 export function TabNav({ basePath, tabs }: TabNavProps) {
+  const t = useT();
   const pathname = usePathname();
 
   return (
@@ -34,7 +36,7 @@ export function TabNav({ basePath, tabs }: TabNavProps) {
             className={[
               "px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors",
               tab.disabled
-                ? "cursor-not-allowed text-muted-foreground/40 border-transparent"
+                ? "cursor-not-allowed text-muted-foreground border-transparent"
                 : isActive
                   ? "border-foreground text-foreground"
                   : "border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground/40",
@@ -42,10 +44,10 @@ export function TabNav({ basePath, tabs }: TabNavProps) {
               .filter(Boolean)
               .join(" ")}
           >
-            {tab.label}
+            {t(tab.label)}
             {tab.disabled && (
               <span className="ml-1.5 text-[10px] font-normal opacity-60">
-                em breve
+                {t("em breve")}
               </span>
             )}
           </Link>

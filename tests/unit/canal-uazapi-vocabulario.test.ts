@@ -123,12 +123,12 @@ describe("banco e TypeScript falam o mesmo vocabulário", () => {
 
   it("a migration versionada existe junto do apêndice — clone atualiza pelas duas vias", () => {
     const mig = readFileSync(
-      "supabase/migrations/20260813180000_0156_uazapi_channel_provider.sql",
+      "supabase/migrations/20260813180000_0266_uazapi_channel_provider.sql",
       "utf8",
     );
     expect(mig).toContain("uazapi_instance_id");
     expect(readFileSync("supabase/migrations/MANIFEST.md", "utf8")).toContain(
-      "0156_uazapi_channel_provider",
+      "0266_uazapi_channel_provider",
     );
   });
 });

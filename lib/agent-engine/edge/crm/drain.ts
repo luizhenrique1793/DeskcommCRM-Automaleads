@@ -15,9 +15,12 @@
 import { z } from 'zod';
 import type pg from 'pg';
 
+import { insertInboxItem } from '../../db/repository';
 import type { Logger } from '../../obs/logger';
 import { enqueueJob } from '../../queue/queue';
+import { avisoDeEventoMorto, IA_QUE_NAO_RESPONDEU } from '@/lib/event-log/aviso-de-evento-morto';
 import { TIPOS_DERIVAVEIS, DERIVACAO_TERMINADA } from '@/lib/messaging/media/derivable';
+import { decidirElegibilidadeDaConversa } from '@/lib/ai/elegibilidade/consulta-pg';
 
 const DRAIN_CONSUMER = 'agent-engine';
 
@@ -46,14 +49,19 @@ export interface DrainKnobs {
   debounceMs: number;
   /** Evento 'processing' órfão volta a 'pending' após isto. */
   reapTimeoutMs: number;
+  /**
+   * Janela de validade da autorização de IA de um contato (gate 'allowlist').
+   * Só consultada em canal com `metadata.ai_gate = 'allowlist'`. Ausente nos
+   * testes que não exercitam o gate — o default de 21 dias em ms é aplicado.
+   */
+  allowlistTtlMs?: number;
 }
 
+/** Default de `allowlistTtlMs` (21 dias) para testes que omitem o knob. */
+const ALLOWLIST_TTL_MS_PADRAO = 21 * 24 * 60 * 60 * 1000;
+
 /** Um tick do drain: claima um lote de eventos e os transforma em jobs. */
-export async function drainTick(
-  pool: pg.Pool,
-  knobs: DrainKnobs,
-  log: Logger,
-): Promise<number> {
+export async function drainTick(pool: pg.Pool, knobs: DrainKnobs, log: Logger): Promise<number> {
   // Reaper de eventos órfãos — barato (update indexado), roda a cada tick.
   await pool.query(
     `update event_log set status = 'pending', updated_at = now()
@@ -97,10 +105,9 @@ export async function drainTick(
         );
         continue;
       }
-      await pool.query(
-        `update event_log set status = 'done', updated_at = now() where id = $1`,
-        [event.id],
-      );
+      await pool.query(`update event_log set status = 'done', updated_at = now() where id = $1`, [
+        event.id,
+      ]);
     } catch (err) {
       const message = (err instanceof Error ? err.message : String(err)).slice(0, 300);
       const terminal = event.attempts >= 5;
@@ -112,9 +119,59 @@ export async function drainTick(
         [event.id, terminal ? 'dead' : 'pending', message],
       );
       log.error('drain: evento falhou', { event_id: event.id, terminal, error: message });
+      if (terminal) await avisarDespachoMorto(pool, event, message, log);
     }
   }
   return events.length;
+}
+
+/**
+ * O DESPACHO DA IA QUE MORRE AVISA A CENTRAL — como o dreno de handlers já avisa.
+ *
+ * `lib/event-log/drain.ts` passou a abrir `event_dead` quando desiste de um
+ * evento; este dreno marca `dead` o `ai_agent.dispatch_requested` pelo mesmo
+ * critério (5 tentativas) e seguia sem avisar ninguém. É o pior dos dois
+ * silêncios: o efeito que não aconteceu é a resposta ao cliente.
+ *
+ * Mesmo texto do outro dreno, mas dedupe POR TÍTULO (`kind_e_titulo`), só
+ * enquanto houver um aberto: um `event_dead` de mídia ou de automação aberto não
+ * engole este, que é o único que diz que um cliente ficou sem resposta (ver
+ * `aviso-de-evento-morto.ts`, "as duas famílias"). SQL de uma instrução
+ * (`insertInboxItem`, `insert … where not exists`) em vez de consulta seguida
+ * de insert. Mil despachos mortos numa pane abrem um aviso, não mil: medido em
+ * `tests/invariants/evento-morto-nao-inunda-a-central.test.ts`; o aviso de
+ * outra família aberto não cala este: medido em
+ * `tests/invariants/aviso-da-ia-nao-some-atras-de-outro-evento-morto.test.ts`.
+ *
+ * Fire-and-forget: falhar ao avisar não pode derrubar o tick, que ainda tem o
+ * resto do lote para drenar.
+ */
+async function avisarDespachoMorto(
+  pool: pg.Pool,
+  event: EventRow,
+  motivo: string,
+  log: Logger,
+): Promise<void> {
+  const { title, body } = avisoDeEventoMorto({
+    eventType: 'ai_agent.dispatch_requested',
+    // `attempts` já foi incrementado no claim: é a contagem com esta tentativa.
+    tentativas: event.attempts,
+    motivo,
+    efeito: IA_QUE_NAO_RESPONDEU,
+  });
+  try {
+    await insertInboxItem(
+      pool,
+      event.organization_id,
+      { kind: 'event_dead', severity: 'critical', title, body },
+      'kind_e_titulo',
+    );
+  } catch (err) {
+    log.error('drain: aviso de despacho morto falhou', {
+      event_id: event.id,
+      error: (err instanceof Error ? err.message : String(err)).slice(0, 300),
+    });
+  }
 }
 
 /** Quanto esperar entre uma checagem e outra da derivação de mídia. */
@@ -123,8 +180,18 @@ const ESPERA_DERIVACAO_MS = 4_000;
  * Teto da espera. Passado isto o turno segue SEM o texto derivado: melhor uma
  * resposta tarde e sem transcrição do que cliente esperando para sempre porque
  * a derivação travou.
+ *
+ * Era 45s até 2026-09-03, quando um áudio real (cliente "Alfran") levou ~86s
+ * para transcrever: o turno estourou o teto, respondeu "não consegui ouvir
+ * seu áudio" às 14:25:46, e a transcrição correta só ficou pronta às 14:26:04
+ * — 18s tarde demais, e o cliente teve que digitar a pergunta de novo.
+ * Medição de p50/p90/p99 de conclusão de transcrição nos últimos 7 dias desta
+ * instalação: 14s / 407s / 2538s — a cauda longa (minutos) é de retry após
+ * falha transitória, não do Whisper em si, e nenhum teto razoável a cobre sem
+ * o cliente esperando minutos pela primeira resposta. 120s cobre o caso comum
+ * de transcrição lenta (como o do Alfran) sem impor essa espera longa.
  */
-const TETO_ESPERA_DERIVACAO_MS = 45_000;
+const TETO_ESPERA_DERIVACAO_MS = 120_000;
 
 type DesfechoEvento = 'processado' | 'adiar';
 
@@ -179,8 +246,16 @@ async function processEvent(
   // Também cobre a instalação recém-feita que ainda não configurou agente
   // nenhum: hoje ela pagaria por cada mensagem recebida.
   //
-  // Roteador COM membros ou COM fallback continua passando: ali existe quem
-  // atenda, e o caminho genérico de "classificou e não bateu" segue valendo.
+  // Roteador com membro PUBLICADO ou fallback PUBLICADO continua passando: ali
+  // existe quem atenda, e o caminho genérico de "classificou e não bateu" segue
+  // valendo.
+  //
+  // Este parágrafo dizia "roteador COM membros ou COM fallback", e a diferença
+  // não é de redação: pausar um agente não apaga a linha dele em
+  // `ai_router_members` nem zera `ai_routers.fallback_agent_id`. Medir a
+  // EXISTÊNCIA da linha deixava o portão aberto para um roteador cujos membros
+  // foram todos pausados — exatamente o caso que o parágrafo acima diz estar
+  // cobrindo, entrando pela outra porta.
   const { rows: capacidade } = await pool.query<{
     tem_agente: boolean;
     tem_roteador: boolean;
@@ -197,8 +272,29 @@ async function processEvent(
          where r.organization_id = $1 and r.is_active
            and r.channel_session_id = $2
            and (
-             r.fallback_agent_id is not null
-             or exists (select 1 from ai_router_members m where m.router_id = r.id)
+             -- O fallback e os membros contam pelo que PODEM EXECUTAR, não por
+             -- existirem. A versão anterior media fallback_agent_id is not null
+             -- e a existência de LINHA em ai_router_members — e as duas
+             -- sobrevivem à pausa do agente, que só limpa published_version_id.
+             -- Um roteador cujos membros foram todos pausados continuava
+             -- abrindo o portão: a organização pagava o classificador e o turno
+             -- inteiro por mensagem recebida, para responder pelo genérico.
+             -- O predicado aqui é o MESMO que loadConversationAgentConfigById
+             -- aplica na hora de executar (agent-config.ts) — é o que garante
+             -- que o portão não promete um agente que o resolvedor vai recusar.
+             exists (
+               select 1 from ai_agents fa
+               join ai_agent_versions fv on fv.id = fa.published_version_id
+               where fa.id = r.fallback_agent_id and fa.organization_id = $1
+                 and fa.archived_at is null and fv.status = 'published'
+             )
+             or exists (
+               select 1 from ai_router_members m
+               join ai_agents ma on ma.id = m.agent_id
+               join ai_agent_versions mv on mv.id = ma.published_version_id
+               where m.router_id = r.id and ma.organization_id = $1
+                 and ma.archived_at is null and mv.status = 'published'
+             )
            )
        ) as tem_roteador`,
     [event.organization_id, p.channel_session_id],
@@ -210,6 +306,88 @@ async function processEvent(
       channel_session_id: p.channel_session_id,
     });
     return 'processado';
+  }
+
+  // ANTI-BACKLOG (toda instalação, sem knob): a mensagem que disparou este
+  // evento ainda é a última inbound da conversa? Se já veio inbound mais nova,
+  // ESTE evento está superado — a mensagem nova tem o próprio evento, e o turno
+  // dela lê o histórico inteiro (esta mensagem inclusa). Sem isto, um worker que
+  // ficou parado (deploy, OOM na VPS) acorda e drena o backlog em ordem de
+  // `created_at`, disparando um turno para CADA mensagem antiga — a IA
+  // respondendo conversa de dias atrás. Vira done, sem job, sem gasto.
+  //
+  // R7: o desempate. `order by sent_at desc, id desc` cai no `id` — uuid
+  // aleatório, não cronológico — sempre que dois inbound compartilham `sent_at`
+  // (relógio do provider repetido, ou duas mensagens na mesma janela sem
+  // timestamp). "A última" saía por sorteio e podia eleger a ANTIGA, disparando
+  // o turno dela. `coalesce(sent_at, created_at)` (defensivo — `sent_at` é
+  // `not null default now()` hoje, mas o padrão do repo, ver migration 0027, não
+  // confia nisso) com desempate por `created_at` (ordem de INGESTÃO, uma
+  // mensagem por webhook) dá recência determinística.
+  const { rows: ultimaInbound } = await pool.query<{ id: string }>(
+    `select id from messages
+     where organization_id = $1 and conversation_id = $2 and direction = 'inbound'
+     order by coalesce(sent_at, created_at) desc, created_at desc, id desc
+     limit 1`,
+    [event.organization_id, p.conversation_id],
+  );
+  if (ultimaInbound[0] !== undefined && ultimaInbound[0].id !== p.inbound_message_id) {
+    log.info('drain: evento superado por inbound mais recente — turno pulado (sem gasto)', {
+      event_id: event.id,
+      inbound_message_id: p.inbound_message_id,
+      ultima_inbound_id: ultimaInbound[0].id,
+    });
+    return 'processado';
+  }
+
+  // GATE DE ELEGIBILIDADE (opt-in por canal — `metadata.ai_gate = 'allowlist'`).
+  // Num canal 'open' (o default), `decidirElegibilidade` devolve `permite:true`
+  // com motivo 'gate_aberto' e nada muda. Num canal 'allowlist', a IA só assume
+  // se o CONTATO estiver autorizado por uma origem elegível (Respondi, campanha,
+  // automação, retomada manual) e dentro da janela. Bloqueio por allowlist =
+  // done, sem job, sem gasto — a conversa fica para atendimento humano.
+  //
+  // `force_human` / silêncio / dono humano bloqueiam em QUALQUER modo, e é o
+  // TURNO quem garante isso — aqui a decisão só se antecipa para não enfileirar.
+  //
+  // Repare no `!canAssist` do `if` abaixo: com agente assistido publicado no
+  // canal o gate é desligado INTEIRO nesta ponta, de propósito (o rascunho é o
+  // produto do modo assistido, barrar aqui o mataria). A frase que este
+  // comentário trazia — "o turno revalida" — era falsa justamente nesse caso: o
+  // ramo assistido de `createInboundTurnHandler` devolvia antes das guardas de
+  // `runAgentTurn`. As duas checagens agora vivem dentro daquele ramo
+  // (`inbound-turn.ts`, `operationMode === 'assisted'`), e é lá que a defesa em
+  // profundidade realmente acontece.
+  // This is a capability check, never a selection by priority. The canonical
+  // router chooses once in the worker, then automatic eligibility is rechecked.
+  const {rows:assistance}=await pool.query<{available:boolean}>(`select exists(
+    select 1 from ai_agents a join ai_agent_versions v on v.organization_id=a.organization_id and v.id=a.published_version_id
+    where a.organization_id=$1 and a.archived_at is null and a.operation_mode='assisted' and v.status='published'
+    and(v.channel_session_id=$2 or exists(select 1 from ai_routers r where r.organization_id=a.organization_id and r.channel_session_id=$2 and r.is_active and(r.fallback_agent_id=a.id or exists(select 1 from ai_router_members m where m.organization_id=r.organization_id and m.router_id=r.id and m.agent_id=a.id))))) as available`,[event.organization_id,p.channel_session_id]);
+  const canAssist=assistance[0]?.available===true;
+  try {
+    const elegib = await decidirElegibilidadeDaConversa(pool, {
+      organizationId: event.organization_id,
+      conversationId: p.conversation_id,
+      agora: new Date(),
+      ttlMs: knobs.allowlistTtlMs ?? ALLOWLIST_TTL_MS_PADRAO,
+    });
+    if (!canAssist && elegib !== null && !elegib.permite) {
+      log.info('drain: conversa não elegível para IA — turno pulado (sem gasto)', {
+        event_id: event.id,
+        conversation_id: p.conversation_id,
+        motivo: elegib.motivo,
+      });
+      return 'processado';
+    }
+  } catch (err) {
+    // Falha da consulta de elegibilidade NÃO derruba o drain e NÃO bloqueia o
+    // turno: um lead real pode estar esperando. Degrada para o fluxo antigo
+    // (enfileira) — o turno tem a segunda checagem.
+    log.warn('drain: checagem de elegibilidade falhou — seguindo para o turno', {
+      event_id: event.id,
+      error: (err instanceof Error ? err.message : String(err)).slice(0, 160),
+    });
   }
 
   // Mídia ainda virando texto: ESPERAR. Sem isto o turno era despachado no mesmo
@@ -249,11 +427,24 @@ async function processEvent(
 
   // Coalescência: já existe job PENDING futuro deste contato → esta mensagem
   // entra de carona (o turno lê o histórico completo). Evento vira done.
+  //
+  // ⚠️ `run_after > now()` sozinho casa com um job em HOLD (`enforceHolds`,
+  // session-watchdog.ts) — que usa `run_after = 'infinity'` como marcador, e
+  // 'infinity' É maior que `now()`. Um job em hold por sessão MORTA (WhatsApp
+  // reconectado, sessão antiga arquivada) nunca libera — a condição de
+  // liberação exige a MESMA sessão antiga voltar a 'WORKING', o que não
+  // acontece nunca. Sem esta exclusão, TODA mensagem nova do mesmo contato —
+  // inclusive na sessão NOVA — coalescia nesse job morto para sempre: o
+  // cliente escrevia, o evento saía "done" sem erro nenhum, e nenhum turno
+  // rodava. Medido em produção (2026-09-14): 6 mensagens ao longo de 7h,
+  // zero resposta, zero job novo — só o coalescing silencioso repetido no
+  // mesmo job com `held_run_after` no payload.
   if (knobs.debounceMs > 0) {
     const { rows: pendingRows } = await pool.query<{ id: string }>(
       `select id from job_queue
        where organization_id = $1 and contact_id = $2
          and kind = 'inbound_turn' and status = 'pending' and run_after > now()
+         and not (payload ? 'held_run_after')
        limit 1`,
       [event.organization_id, p.contact_id],
     );
@@ -303,10 +494,14 @@ export async function runDrainLoop(
     const waitMs = drained > 0 ? knobs.intervalMs : knobs.idleIntervalMs;
     await new Promise<void>((resolve) => {
       const timer = setTimeout(resolve, waitMs);
-      signal.addEventListener('abort', () => {
-        clearTimeout(timer);
-        resolve();
-      }, { once: true });
+      signal.addEventListener(
+        'abort',
+        () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        { once: true },
+      );
     });
   }
 }

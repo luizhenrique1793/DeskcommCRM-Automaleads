@@ -12,17 +12,15 @@ import {
 import { ChartBar } from "@/lib/ui/icons";
 import type { UsageTenantRow } from "@/app/api/v1/admin/usage/route";
 import type { UsageRange } from "@/hooks/useAdminUsage";
+import { formatCentsUSD } from "@/lib/money";
+import { useT } from "@/hooks/i18n/useT";
 
 // ---------------------------------------------------------------------------
 // Formatters
 // ---------------------------------------------------------------------------
 
-function fmtBRL(cents: number): string {
-  return (cents / 100).toLocaleString("pt-BR", {
-    style: "currency",
-    currency: "BRL",
-  });
-}
+// DÓLAR: o número é `llm_calls.cost_cents`, e `pricing.ts` cota o provedor em USD.
+const fmtUSD = formatCentsUSD;
 
 function fmtNum(n: number): string {
   return n.toLocaleString("pt-BR");
@@ -37,6 +35,7 @@ function exportCSV(tenants: UsageTenantRow[], range: UsageRange): void {
     "organization_id",
     "tenant",
     "slug",
+    "agente",
     "mensagens",
     "conversas",
     "invocacoes_ai",
@@ -48,6 +47,7 @@ function exportCSV(tenants: UsageTenantRow[], range: UsageRange): void {
     t.organization_id,
     `"${t.tenant_name.replace(/"/g, '""')}"`,
     t.tenant_slug,
+    t.agent_name ? `"${t.agent_name.replace(/"/g, '""')}"` : "",
     t.messages_count,
     t.conversations_count,
     t.ai_invocations_count,
@@ -75,13 +75,14 @@ interface UsageTableProps {
 }
 
 export function UsageTable({ tenants, range }: UsageTableProps) {
+  const t = useT();
   if (tenants.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center gap-3 rounded-md border py-16 text-center text-muted-foreground">
         <ChartBar size={36} weight="duotone" className="opacity-40" aria-hidden />
-        <p className="text-sm font-medium">Nenhum tenant encontrado</p>
+        <p className="text-sm font-medium">{t("Nenhum tenant encontrado")}</p>
         <p className="max-w-xs text-xs opacity-70">
-          Não há dados de uso no período selecionado.
+          {t("Não há dados de uso no período selecionado.")}
         </p>
       </div>
     );
@@ -90,16 +91,14 @@ export function UsageTable({ tenants, range }: UsageTableProps) {
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <h2 className="text-sm font-medium text-muted-foreground">
-          Uso por tenant
-        </h2>
+        <h2 className="text-sm font-medium text-muted-foreground">{t("Uso por tenant")}</h2>
         <Button
           variant="outline"
           size="sm"
           onClick={() => exportCSV(tenants, range)}
           className="gap-1.5 text-xs"
         >
-          Exportar CSV
+          {t("Exportar CSV")}
         </Button>
       </div>
 
@@ -108,11 +107,12 @@ export function UsageTable({ tenants, range }: UsageTableProps) {
           <TableHeader>
             <TableRow>
               <TableHead>Tenant</TableHead>
-              <TableHead className="text-right">Mensagens</TableHead>
-              <TableHead className="text-right">Conversas</TableHead>
-              <TableHead className="text-right">Invoc. AI</TableHead>
+              <TableHead>{t("Agente")}</TableHead>
+              <TableHead className="text-right">{t("Mensagens")}</TableHead>
+              <TableHead className="text-right">{t("Conversas")}</TableHead>
+              <TableHead className="text-right">{t("Invoc. AI")}</TableHead>
               <TableHead className="text-right">Tokens</TableHead>
-              <TableHead className="text-right">Custo AI</TableHead>
+              <TableHead className="text-right">{t("Custo AI")}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -120,26 +120,31 @@ export function UsageTable({ tenants, range }: UsageTableProps) {
               <TableRow key={row.organization_id}>
                 <TableCell>
                   <div className="flex flex-col gap-0.5">
-                    <span className="font-medium text-sm">{row.tenant_name}</span>
-                    <Badge variant="secondary" className="w-fit text-[10px] px-1.5 py-0">
+                    <span className="text-sm font-medium">{row.tenant_name}</span>
+                    <Badge variant="secondary" className="w-fit px-1.5 py-0 text-[10px]">
                       {row.tenant_slug}
                     </Badge>
                   </div>
                 </TableCell>
-                <TableCell className="text-right tabular-nums text-sm">
+                <TableCell className="text-sm">
+                  {row.agent_name ?? (
+                    <span className="text-muted-foreground">{t("Nenhum agente publicado")}</span>
+                  )}
+                </TableCell>
+                <TableCell className="text-right text-sm tabular-nums">
                   {fmtNum(row.messages_count)}
                 </TableCell>
-                <TableCell className="text-right tabular-nums text-sm">
+                <TableCell className="text-right text-sm tabular-nums">
                   {fmtNum(row.conversations_count)}
                 </TableCell>
-                <TableCell className="text-right tabular-nums text-sm">
+                <TableCell className="text-right text-sm tabular-nums">
                   {fmtNum(row.ai_invocations_count)}
                 </TableCell>
-                <TableCell className="text-right tabular-nums text-sm">
+                <TableCell className="text-right text-sm tabular-nums">
                   {fmtNum(row.ai_tokens_total)}
                 </TableCell>
-                <TableCell className="text-right tabular-nums text-sm font-medium">
-                  {fmtBRL(row.ai_cost_cents)}
+                <TableCell className="text-right text-sm font-medium tabular-nums">
+                  {fmtUSD(row.ai_cost_cents)}
                 </TableCell>
               </TableRow>
             ))}

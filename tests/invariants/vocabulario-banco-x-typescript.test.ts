@@ -187,6 +187,89 @@ const PARES: Array<{
     arquivo: "hooks/followup/useFollowupQueue.ts",
     simbolo: "FollowupEnrollmentStatus",
   },
+  {
+    tabela: "ai_budgets",
+    coluna: "enforcement_mode",
+    // lib/agent-engine/edge/llm/orcamento.ts → ModoDeOrcamento.
+    //
+    // Nasce com um erro de classificação já cometido: a 0159 e o MANIFEST
+    // declararam `ai_budgets_enforcement_mode_check` como "cross-coluna / de
+    // domínio, não de vocabulário", e por isso a coluna ficou de fora daqui. É
+    // falso — `check (enforcement_mode in ('off','avisar','bloquear'))` é
+    // vocabulário puro de conjunto, e o par em TypeScript não só existe como
+    // roda no caminho quente (é ele que decide se a IA responde).
+    //
+    // A OUTRA constraint da mesma coluna, `ai_budgets_bloquear_precisa_de_teto`
+    // (`enforcement_mode <> 'bloquear' or monthly_limit_cents >= 100`), essa sim
+    // é cross-coluna: `literaisSeDefine` a recusa por não casar
+    // `col = ANY (ARRAY[...])`, então continua havendo UMA definidora só e o
+    // extrator não precisa escolher.
+    arquivo: "lib/agent-engine/edge/llm/orcamento.ts",
+    simbolo: "ModoDeOrcamento",
+  },
+  {
+    tabela: "followup_flow_pointers",
+    coluna: "surface",
+    // lib/followup/api-schemas.ts → FOLLOWUP_FLOW_SURFACES (tupla `as const`).
+    // O type alias `FollowupFlowSurface = (typeof …)[number]` não carrega
+    // literais no fonte — o extrator lê a const, que é a fonte em runtime
+    // (`z.enum` / UI) e a que o CHECK do banco precisa espelhar.
+    arquivo: "lib/followup/api-schemas.ts",
+    simbolo: "FOLLOWUP_FLOW_SURFACES",
+  },
+  {
+    tabela: "webhook_lead_captures",
+    coluna: "outcome",
+    // lib/schemas/lead-captures.ts → DESFECHOS_DA_CAPTACAO.
+    //
+    // A tela pinta um badge por valor ("Virou lead" / "Reenvio" / "Não entrou")
+    // e filtra por ele. Um desfecho novo só no CHECK viraria linha sem rótulo e
+    // opção de filtro que não existe; só no TypeScript viraria `23514` num
+    // INSERT que roda dentro da rota PÚBLICA de captação — e ali o registro é
+    // fire-and-forget, ou seja, o histórico simplesmente não apareceria.
+    arquivo: "lib/schemas/lead-captures.ts",
+    simbolo: "DESFECHOS_DA_CAPTACAO",
+  },
+  {
+    tabela: "automation_rule_runs",
+    coluna: "status",
+    // hooks/webhooks/useAutomationRules.ts → AutomationRunStatus.
+    //
+    // O par aponta para o tipo da TELA porque é ela quem precisa conhecer TODOS
+    // os estados: `statusBadgeLabel` mapeia cada um para um texto em português,
+    // e um valor sem entrada cai no rótulo de "Parcial" — dizendo que algo
+    // falhou quando nada foi sequer tentado.
+    //
+    // Nasce com a 0175, que acrescentou `adiado` (a espera é um estado; sem ele
+    // a aba Atividade não mostrava NADA enquanto a regra aguardava a janela).
+    arquivo: "hooks/webhooks/useAutomationRules.ts",
+    simbolo: "AutomationRunStatus",
+  },
+  {
+    tabela: "crm_tasks",
+    coluna: "priority",
+    // lib/tarefas/tipos.ts → PRIORIDADES_DA_TAREFA. Nasce com o par no mesmo
+    // commit da migration 0210, que é a lição desta lista: todos os que
+    // divergiram divergiram por terem nascido sozinhos.
+    arquivo: "lib/tarefas/tipos.ts",
+    simbolo: "PRIORIDADES_DA_TAREFA",
+  },
+  {
+    tabela: "crm_tasks",
+    coluna: "status",
+    // lib/tarefas/tipos.ts → SITUACOES_DA_TAREFA.
+    arquivo: "lib/tarefas/tipos.ts",
+    simbolo: "SITUACOES_DA_TAREFA",
+  },
+  {
+    tabela: "team_invites",
+    coluna: "role",
+    // lib/schemas/team.ts → ROLES (tupla `as const`). O `z.enum(ROLES)` das
+    // rotas de convite e o CHECK da migration 0238 espelham a mesma lista;
+    // nasce com o par no mesmo commit da migration — a lição desta lista.
+    arquivo: "lib/schemas/team.ts",
+    simbolo: "ROLES",
+  },
 ];
 
 /** Tira um nível de parênteses externos, se ele envolver a expressão inteira. */
@@ -310,12 +393,49 @@ function literaisDoUnionType(arquivo: string, simbolo: string): string[] {
     );
   }
 
-  const decl = new RegExp(`type\\s+${simbolo}\\s*=([^;]*);`, "s").exec(fonte);
+  // ⚠️ COMENTÁRIOS SAEM ANTES DE PROCURAR A DECLARAÇÃO, e a ordem é o conserto.
+  //
+  // A versão anterior recortava `type X =([^;]*);` do fonte CRU e só então
+  // limpava comentários. Como `[^;]*` para no primeiro ponto e vírgula, um `;`
+  // escrito dentro de um comentário NO MEIO do union truncava a lista — e os
+  // membros abaixo dele sumiam sem que nada estourasse.
+  //
+  // Não é hipotético: aconteceu com `InboxKind`, num comentário que explicava a
+  // diferença entre dois kinds — "um relata que algo ACONTECEU e a IA segue; o
+  // outro, que ela parou". A extração parou em `segue`, devolveu 19 dos 21
+  // membros, e o par reprovou dizendo que o TypeScript não declarava
+  // `budget_warning` nem `other`. Os dois estavam lá, seis linhas abaixo.
+  //
+  // O modo de falha é o pior possível para um gate: ele acusa o CÓDIGO por um
+  // defeito do INSTRUMENTO, com uma mensagem convincente, e manda o próximo
+  // consertar o que estava certo. A guarda de "zero literais" logo abaixo não
+  // pega este caso — a lista truncada não é vazia.
+  //
+  // Prosa em português tem ponto e vírgula. O extrator é que não podia depender
+  // de a prosa não ter.
+  const semComentarios = fonte.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, " ");
+
+  // DUAS FORMAS, e as duas são vocabulário legítimo neste repo:
+  //
+  //   type X = "a" | "b";                 ← union puro
+  //   const X = ["a", "b"] as const;      ← tupla congelada
+  //
+  // A segunda existe porque o Zod precisa do ARRAY em runtime (`z.enum(X)`), e
+  // escrever o union ao lado seria a terceira lista — exatamente o que este
+  // invariante existe para proibir. O extrator lia só a primeira e mandava
+  // "ENSINE O EXTRATOR"; esta é a lição aprendida, e não uma exceção aberta:
+  // as duas formas caem no MESMO caminho de comparação abaixo.
+  const decl =
+    new RegExp(`type\\s+${simbolo}\\s*=([^;]*);`, "s").exec(semComentarios) ??
+    new RegExp(`const\\s+${simbolo}\\s*=\\s*(\\[[^\\]]*\\])\\s*as\\s+const`, "s").exec(
+      semComentarios,
+    );
   if (!decl) {
     throw new Error(
-      `extrator de vocabulário: não achei \`type ${simbolo} = ...;\` em ${arquivo}. ` +
-        `Se o tipo virou \`const ... as const\` ou mudou de nome, ENSINE O EXTRATOR — ` +
-        `deixar isto falhar em silêncio devolveria lista vazia e o par passaria sem ler nada.`,
+      `extrator de vocabulário: não achei \`type ${simbolo} = ...;\` nem ` +
+        `\`const ${simbolo} = [...] as const\` em ${arquivo}. Se o símbolo mudou de nome ou ` +
+        `de forma, ENSINE O EXTRATOR — deixar isto falhar em silêncio devolveria lista vazia ` +
+        `e o par passaria sem ler nada.`,
     );
   }
 

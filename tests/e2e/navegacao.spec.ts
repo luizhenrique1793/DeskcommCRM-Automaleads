@@ -8,24 +8,34 @@
  *
  * Pré-requisito: `.e2e-creds.json` (gerado por scripts/seed-e2e-credentials.ts).
  */
-import * as fs from "node:fs";
+import { mkdirSync } from "node:fs";
 import * as path from "node:path";
 
 import { test, expect, type Page } from "@playwright/test";
 
-import { generateTotp, msUntilNextTotpWindow } from "./utils/totp";
+import { lerCreds, loginComoAdmin } from "./helpers/login-admin";
+import { afirmarAdminDeTenantPuro } from "./utils/precondicao";
 
-interface E2ECreds {
-  password: string;
-  users: Record<string, { id: string; email: string; role: string }>;
-  admin_totp?: { factor_id: string; secret: string };
-}
-
-const CREDS_PATH = path.join(process.cwd(), ".e2e-creds.json");
-const creds = JSON.parse(fs.readFileSync(CREDS_PATH, "utf8")) as E2ECreds;
+let creds = lerCreds();
 const EVIDENCE = path.join(process.cwd(), ".superpowers", "evidence");
 
-fs.mkdirSync(EVIDENCE, { recursive: true });
+mkdirSync(EVIDENCE, { recursive: true });
+
+// ── Precondição de identidade ────────────────────────────────────────────────
+// O menu é `sidebarGroups(isPlatformAdmin, role)` (`registry.ts:510-519`), então
+// a suspeita natural é que promover o `e2e-admin` a dono do servidor inflasse o
+// sidebar que esta spec mede item a item.
+//
+// ⚠️ MEDIDO, e a suspeita não se confirma: `canSee` (`registry.ts:503-507`) é
+// `isPlatformAdmin || ROLE_RANK[role] >= ROLE_RANK[minRole]`; `ROLE_RANK.admin`
+// é 5, o TETO, e o maior `minRole` do registro é `"admin"`. Para um admin de
+// tenant o menu é IDÊNTICO promovido ou não — as asserções de `toHaveText`
+// abaixo não mudariam. Guardar a identidade aqui continua valendo (é a spec de
+// navegação; qualquer destino futuro exclusivo do dono apareceria primeiro
+// nela), mas registrar a diferença entre "muda" e "poderia mudar" é o ponto.
+test.beforeAll(async () => {
+  await afirmarAdminDeTenantPuro(creds.users.admin!.email);
+});
 
 async function login(page: Page, email: string): Promise<void> {
   await page.goto("/login");
@@ -35,35 +45,43 @@ async function login(page: Page, email: string): Promise<void> {
   await page.waitForURL(/\/app\//);
 }
 
-/** MFA é obrigatório para admin (CLAUDE.md), e Canais exige admin. */
 async function loginAdmin(page: Page): Promise<void> {
-  const secret = creds.admin_totp?.secret;
-  expect(secret, "seed deve gravar admin_totp em .e2e-creds.json").toBeTruthy();
-
-  await page.goto("/login");
-  await page.locator("#email").fill(creds.users.admin!.email);
-  await page.locator("#password").fill(creds.password);
-  await page.getByRole("button", { name: /entrar/i }).click();
-  await page.waitForURL(/\/login\/mfa/);
-
-  for (let tentativa = 0; tentativa < 2; tentativa++) {
-    // Não gerar código a menos de 3s da virada da janela: ele expira em trânsito.
-    if (msUntilNextTotpWindow() < 3_000) {
-      await page.waitForTimeout(msUntilNextTotpWindow() + 200);
-    }
-    await page.locator('input[aria-label="Dígito 1"]').click();
-    await page.keyboard.type(generateTotp(secret!), { delay: 40 });
-    try {
-      await page.waitForURL(/\/app\//, { timeout: 8_000 });
-      return;
-    } catch {
-      await page.waitForTimeout(msUntilNextTotpWindow() + 200);
-    }
-  }
-  throw new Error("MFA falhou depois de 2 tentativas de TOTP");
+  creds = await loginComoAdmin(page, creds);
 }
 
 const sidebar = (page: Page) => page.getByRole("navigation", { name: "Navegação principal" });
+
+async function expectSemOverflowHorizontal(page: Page, contexto: string): Promise<void> {
+  const m = await page.evaluate(() => ({
+    // ⚠️ `body.scrollWidth`, NÃO `documentElement`. `app/globals.css` põe
+    // `overflow-x: clip` em `html` E em `body` (é `clip` e não `hidden` porque
+    // `hidden` derruba o sticky da barra — ver barra-lateral-nao-flutua).
+    // Com `hidden`, o `scrollWidth` do `documentElement` era GRAMPEADO no
+    // `clientWidth`: a conta dava zero mesmo com um filho de 3000px dentro.
+    // Medido com o chromium do repo, viewport 390x844, filho de 3000px —
+    // `visible` → 2610, `hidden` → 0, e `body.scrollWidth` = 3000 nos DOIS
+    // casos. A medida fica no `body` para não voltar a ser incapaz de falhar.
+    //
+    // A asserção existia e era incapaz de falhar. Trocar a medida é o conserto;
+    // o caso de sabotagem ao lado é o que prova que a nova consegue.
+    scrollWidth: document.body.scrollWidth,
+    clientWidth: document.documentElement.clientWidth,
+  }));
+
+  expect(
+    m.scrollWidth,
+    `${contexto}: documentElement.scrollWidth (${m.scrollWidth}) não pode passar do clientWidth (${m.clientWidth})`,
+  ).toBeLessThanOrEqual(m.clientWidth + 1);
+}
+
+// `loginComoAdmin` espera a virada da janela TOTP entre logins consecutivos
+// (o servidor recusa código repetido), e essa espera sozinha pode consumir os
+// 30 s do teto global do playwright.config.ts. Toda spec da casa que usa o
+// helper sobe o teto — 240 s em `agente-novo-e-uso`, `agente-papeis-operador`,
+// `escopo-de-funil-do-agente` e `capacidades-do-agente`; 90 s em
+// `prova-painel-provedores`. Esta era a única que faltava, e por isso dois
+// testes que já estavam verdes passaram a estourar 30 s.
+test.describe.configure({ timeout: 120_000 });
 
 test.describe("navegação agrupada", () => {
   test("o sidebar tem hierarquia: grupos na ordem de uso", async ({ page }) => {
@@ -86,12 +104,53 @@ test.describe("navegação agrupada", () => {
     });
   });
 
-  test("chega em Funis pelo CRM, sem passar por Configurações", async ({ page }) => {
+  test("chega nas Etapas do funil pelo CRM, sem passar por Configurações", async ({ page }) => {
     await loginAdmin(page);
 
-    // O caso que originou tudo: o usuário não sabia que Funis existia.
-    await sidebar(page).getByRole("link", { name: "Funis" }).click();
-    await page.waitForURL(/pipelines/);
+    // O caso que originou tudo: o usuário não sabia que esta tela existia.
+    //
+    // ⚠️ O ITEM MUDOU DE NOME, e o nome antigo ("Funis") passou para o VIZINHO —
+    // a lista de funis, em /app/kanban. Um teste que continuasse clicando em
+    // "Funis" seguiria verde medindo a outra tela; por isso a asserção de URL
+    // abaixo é específica (`settings/tenant/pipelines`) e não o antigo
+    // /pipelines/, que casa com as duas.
+    //
+    // ⚠️ E O CAMINHO MUDOU: com Tarefas (PR #546), o CRM chegou a cinco telas e
+    // o menu passou a rolar em 900px. A resposta foi o hub do grupo, como o
+    // comentário de densidade do `Sidebar.tsx` já mandava — então esta tela
+    // agora mora atrás de "Ver tudo em CRM". Este teste percorre o caminho
+    // INTEIRO em vez de checar um link: hub → tela. Que a porta existe no grupo
+    // certo do sidebar é o unitário `sidebar-grupos` que prende.
+    await sidebar(page).getByRole("link", { name: "Ver tudo em CRM" }).click();
+    await page.waitForURL(/\/app\/crm$/);
+    await expect(page.getByRole("heading", { name: "O dia a dia da venda" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Preparar a venda" })).toBeVisible();
+
+    await page.screenshot({ path: path.join(EVIDENCE, "nav-hub-crm.png"), fullPage: true });
+
+    await page.getByRole("link", { name: /Etapas do funil/ }).click();
+    await page.waitForURL(/settings\/tenant\/pipelines/);
+    await expect(page.getByRole("heading", { name: "Etapas do funil", level: 1 })).toBeVisible();
+  });
+
+  test("e Produtos, que saiu do menu, continua alcançável pelo mesmo hub", async ({ page }) => {
+    // Tirar do sidebar não pode virar tela órfã: DoD 14 cobra porta, e a porta
+    // passou a ser o hub. Sem este caso, o item "some do menu" ficaria provado
+    // e o "continua alcançável" ficaria só escrito no comentário.
+    await loginAdmin(page);
+
+    await expect(sidebar(page).getByRole("link", { name: "Produtos" })).toHaveCount(0);
+
+    await sidebar(page).getByRole("link", { name: "Ver tudo em CRM" }).click();
+    await page.waitForURL(/\/app\/crm$/);
+    await page.getByRole("link", { name: /Produtos/ }).click();
+    await page.waitForURL(/\/app\/products/);
+  });
+
+  test("e a lista de funis é o item vizinho, com nome próprio", async ({ page }) => {
+    await loginAdmin(page);
+    await sidebar(page).getByRole("link", { name: "Funis", exact: true }).click();
+    await page.waitForURL(/\/app\/kanban/);
     await expect(page.getByRole("heading", { name: "Funis", level: 1 })).toBeVisible();
   });
 
@@ -177,6 +236,35 @@ test.describe("navegação agrupada", () => {
 
     expect(m.titulosFora, "grupo inteiro invisível é o problema que viemos resolver").toBe(0);
     expect(m.rola, "em 900px o menu inteiro tem de caber sem scroll").toBe(false);
+  });
+
+  test.describe("mobile", () => {
+    test.use({ viewport: { width: 390, height: 844 } });
+
+    test("em 390px, o sidebar vira gaveta e não cria overflow horizontal", async ({ page }) => {
+      await loginAdmin(page);
+
+      await expect(sidebar(page), "o sidebar desktop fica fora da árvore acessível no mobile").toHaveCount(0);
+      await expectSemOverflowHorizontal(page, "shell mobile após login");
+
+      await page.getByRole("button", { name: "Abrir navegação" }).click();
+      await expect(sidebar(page)).toBeVisible();
+      await expectSemOverflowHorizontal(page, "shell mobile com drawer aberto");
+      await page.screenshot({
+        path: path.join(EVIDENCE, "nav-mobile-390-drawer-aberta.png"),
+        fullPage: true,
+      });
+
+      await sidebar(page).getByRole("link", { name: "Funis", exact: true }).click();
+      await page.waitForURL(/\/app\/kanban/);
+      await expect(page.getByRole("dialog")).toHaveCount(0);
+      await expectSemOverflowHorizontal(page, "shell mobile após navegar pelo drawer");
+
+      await page.screenshot({
+        path: path.join(EVIDENCE, "nav-mobile-390-sem-overflow.png"),
+        fullPage: true,
+      });
+    });
   });
 
   test("Configurações fica fixo no rodapé, fora da área que rola", async ({ page }) => {

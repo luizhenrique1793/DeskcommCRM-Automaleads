@@ -26,6 +26,7 @@ interface Builder {
   select(colunas: string): Builder;
   eq(coluna: string, valor: string): Builder;
   is(coluna: string, valor: null): Builder;
+  in(coluna: string, valores: readonly string[]): Builder;
   order(coluna: string, opts: { ascending: boolean }): Builder;
   then(resolve: (v: Resposta) => unknown): Promise<unknown>;
 }
@@ -53,6 +54,10 @@ function fakeDb(respostas: Resposta[]) {
       },
       is(coluna, valor) {
         trilha.push(`is(${coluna}=${String(valor)})`);
+        return b;
+      },
+      in(coluna, valores) {
+        trilha.push(`in(${coluna}=[${[...valores].join("|")}])`);
         return b;
       },
       order(coluna, opts) {
@@ -122,6 +127,62 @@ describe("listSelectableChannels", () => {
     const canais = await listSelectableChannels(db, "org-1");
 
     expect(canais[0]?.display_name).toBe("5511999999999");
+  });
+
+  it("canal sem apelido NÃO é batizado com o identificador do transporte", async () => {
+    // ⚠️ O caso acima zerava `waha_session_name` junto, então nunca exercitou o
+    // degrau que tinha o defeito. Medido percorrendo o produto: o seletor
+    // "Número conectado" do editor de agente oferecia a opção `org_2dd5e6ea`
+    // — o identificador que NÓS geramos para o transporte, exposto como se
+    // fosse o nome do número da pessoa.
+    const { db } = fakeDb([
+      {
+        data: [
+          {
+            ...LINHA,
+            display_name: null,
+            phone_number: null,
+            waha_session_name: "org_2dd5e6ea_aaa",
+          },
+        ],
+        error: null,
+      },
+      { data: [], error: null },
+    ]);
+
+    const canais = await listSelectableChannels(db, "org-1");
+
+    expect(canais[0]?.display_name).not.toContain("org_");
+    expect(canais[0]?.display_name).toBe("Número sem nome");
+  });
+
+  it("a linha de chamada de voz não é oferecida como canal de mensagem", async () => {
+    // O seletor lê `channel_sessions`, e a sessão de voz mora lá também. Sem o
+    // filtro por provider ela apareceria como "Número conectado" no editor de
+    // agente, no roteador e no onboarding — e um agente amarrado a ela nunca
+    // receberia mensagem nenhuma, com o onboarding declarando sucesso.
+    //
+    // Este caso guarda o FILTRO, não a saída: com a fixture devolvendo só a
+    // linha de mensagem, apagar o `.in()` da fonte deixaria a saída idêntica e
+    // a suíte verde. É a consulta montada que precisa provar a intenção.
+    const { db, chamadas } = fakeDb([{ data: [LINHA], error: null }, { data: [], error: null }]);
+    await listSelectableChannels(db, "org-1");
+
+    const consulta = chamadas[0]?.join(" ") ?? "";
+    expect(consulta).toContain("in(provider=");
+    expect(consulta).toContain("waha");
+    expect(consulta).not.toContain("wacalls");
+  });
+
+  it("o apelido continua vencendo tudo", async () => {
+    const { db } = fakeDb([
+      {
+        data: [{ ...LINHA, display_name: "Vendas", waha_session_name: "org_x" }],
+        error: null,
+      },
+      { data: [], error: null },
+    ]);
+    expect((await listSelectableChannels(db, "org-1"))[0]?.display_name).toBe("Vendas");
   });
 });
 

@@ -61,6 +61,7 @@ interface DbOpts {
   sessions?: Linha[];
   /** Demais tabelas, por nome — é o que a contagem de impacto lê. */
   rows?: Record<string, Linha[]>;
+  readError?: (table: string) => { code?: string; message: string } | null;
   /** Erro do banco na n-ésima escrita (1-based), como o PostgREST devolveria. */
   writeError?: (n: number, table: string) => { code?: string; message: string } | null;
 }
@@ -89,6 +90,9 @@ function makeDb(opts: DbOpts = {}): Registro {
 
   class Q implements PromiseLike<unknown> {
     private filtros: Array<[string, unknown]> = [];
+    private inclusoes: Array<[string, unknown[]]> = [];
+    private limite: number | undefined;
+    private ordenacao: { col: string; ascending: boolean } | undefined;
     private head = false;
     private contar = false;
     private single = false;
@@ -112,7 +116,16 @@ function makeDb(opts: DbOpts = {}): Registro {
       this.filtros.push([col, val]);
       return this;
     }
-    order(): this {
+    in(col: string, values: unknown[]): this {
+      this.inclusoes.push([col, values]);
+      return this;
+    }
+    order(col: string, options?: { ascending?: boolean }): this {
+      this.ordenacao = { col, ascending: options?.ascending !== false };
+      return this;
+    }
+    limit(n: number): this {
+      this.limite = n;
       return this;
     }
     maybeSingle(): this {
@@ -122,12 +135,18 @@ function makeDb(opts: DbOpts = {}): Registro {
 
     private casam(): Linha[] {
       const linhas = tabelas[this.table] ?? [];
-      return linhas.filter((l) => this.filtros.every(([c, v]) => (l[c] ?? null) === v));
+      return linhas.filter((l) => this.filtros.every(([c, v]) => (l[c] ?? null) === v)
+        && this.inclusoes.every(([c, values]) => values.includes(l[c])));
     }
 
     private executar(): { data: unknown; error: unknown; count?: number } {
       if (this.op === "select") {
-        const achadas = this.casam();
+        const error = opts.readError?.(this.table);
+        if (error) return { data: null, error };
+        let achadas = this.casam();
+        const order = this.ordenacao;
+        if (order) achadas.sort((a, b) => String(a[order.col]).localeCompare(String(b[order.col])) * (order.ascending ? 1 : -1));
+        if (this.limite !== undefined) achadas = achadas.slice(0, this.limite);
         if (this.contar) return { data: null, error: null, count: achadas.length };
         if (this.head) return { data: null, error: null };
         return { data: this.single ? (achadas[0] ?? null) : achadas, error: null };
@@ -182,6 +201,7 @@ function authOk(): void {
     full_name: null,
     avatar_url: null,
     is_platform_admin: false,
+    idioma: "pt-BR" as const,
     organizations: [{ organization_id: ORG, organization_name: "Org", role: "admin" }],
   };
   vi.mocked(requireRole).mockResolvedValue({
@@ -202,7 +222,7 @@ function wahaOk(registro: Registro) {
     deleteSession: vi.fn(async () => {
       registro.eventos.push("waha:delete");
     }),
-    getSessionQr: vi.fn(async () => ({ status: "WORKING", me: { id: "5531999998888@c.us" } })),
+    getVerifiedSession: vi.fn(async () => ({ name: "org_2222_abc", status: "WORKING", me: { id: "5531999998888@c.us" } })),
   };
   vi.mocked(getWahaClient).mockReturnValue(cliente as never);
   return cliente;
@@ -387,14 +407,52 @@ describe("DELETE /api/v1/channel-sessions/[id]", () => {
     expect(audit).not.toHaveBeenCalled();
   });
 
-  it("transporte recusa a revogação → 502 e NENHUMA escrita", async () => {
+  it("transporte recusa a revogação → 502, preserva canal e registra FAILED", async () => {
     authOk();
     const db = makeDb();
     const waha = wahaOk(db);
     waha.logoutSession.mockRejectedValue(new Error("waha_logout_500"));
     const { DELETE } = await import("./route");
     expect((await DELETE(reqDelete(), ctx())).status).toBe(502);
-    expect(db.escritas).toEqual([]);
+    expect(waha.logoutSession).toHaveBeenCalledWith("org_2222_abc");
+    expect(waha.deleteSession).not.toHaveBeenCalled();
+    expect(db.escritas).toHaveLength(1);
+    expect(db.escritas[0]).toMatchObject({ tipo: "update", table: "channel_sessions",
+      patch: { status: "FAILED", status_reason: "connection_repair_required" } });
+    expect(db.escritas[0]?.patch).not.toHaveProperty("archived_at");
+    expect(db.escritas[0]?.filtros).toContainEqual(["organization_id", ORG]);
+    expect(audit).not.toHaveBeenCalled();
+  });
+
+  it("lease vigente da mesma org e canal bloqueia exclusão sem efeito", async () => {
+    authOk();
+    const db = makeDb({ rows: { channel_connection_requests: [
+      { id: "expired", organization_id: ORG, channel_session_id: CANAL, state: "processing", lease_until: new Date(Date.now() - 60000).toISOString() },
+      { id: "busy", organization_id: ORG, channel_session_id: CANAL, state: "processing", lease_until: new Date(Date.now() + 60000).toISOString() },
+    ] } });
+    const waha = wahaOk(db); const { DELETE } = await import("./route");
+    const res = await DELETE(reqDelete(), ctx());
+    expect(res.status).toBe(409);expect((await res.json()).error.code).toBe("connection_in_progress");
+    expect(db.escritas).toEqual([]);expect(waha.logoutSession).not.toHaveBeenCalled();expect(waha.deleteSession).not.toHaveBeenCalled();
+  });
+
+  it.each(["other_tenant", "other_channel", "failed", "expired"])("recibo %s não bloqueia a exclusão autorizada", async (scenario) => {
+    authOk();
+    const receipt = { id: "r1", organization_id: scenario === "other_tenant" ? OUTRA_ORG : ORG,
+      channel_session_id: scenario === "other_channel" ? USER : CANAL,
+      state: scenario === "failed" ? "failed" : "processing",
+      lease_until: new Date(Date.now() + (scenario === "expired" ? -60000 : 60000)).toISOString() };
+    const db = makeDb({ rows: { channel_connection_requests: [receipt] } });
+    const waha = wahaOk(db);const { DELETE } = await import("./route");
+    expect((await DELETE(reqDelete(), ctx())).status).toBe(200);
+    expect(waha.logoutSession).toHaveBeenCalledWith("org_2222_abc");expect(waha.deleteSession).toHaveBeenCalledWith("org_2222_abc");
+  });
+
+  it("erro ao consultar reserva retorna503 sem revogar nem escrever", async () => {
+    authOk();const db = makeDb({ readError: (table) => table === "channel_connection_requests" ? { message: "DB unavailable" } : null });
+    const waha = wahaOk(db);const { DELETE } = await import("./route");
+    expect((await DELETE(reqDelete(), ctx())).status).toBe(503);
+    expect(db.escritas).toEqual([]);expect(waha.logoutSession).not.toHaveBeenCalled();expect(waha.deleteSession).not.toHaveBeenCalled();
   });
 
   it("canal de outra organização → 404, nenhuma escrita, nenhuma revogação", async () => {
@@ -420,12 +478,29 @@ describe("DELETE /api/v1/channel-sessions/[id]", () => {
 });
 
 describe("GET /api/v1/channel-sessions/[id]", () => {
+  it("erro de identidade/transporte não publica status nem grava saúde", async () => {
+    authOk();const db = makeDb();const waha = wahaOk(db);
+    waha.getVerifiedSession.mockRejectedValue(new Error("session_identity_mismatch"));
+    const { GET } = await import("./route");
+    const res = await GET(reqGet(), ctx());
+    expect(res.status).toBe(502);expect((await res.json()).error.code).toBe("connection_status_failed");
+    expect(waha.getVerifiedSession).toHaveBeenCalledWith("org_2222_abc");expect(db.escritas).toEqual([]);
+  });
+
   it("?impact=1 devolve o preflight — o diálogo sabe o desfecho ANTES do clique", async () => {
     authOk();
     const db = makeDb({
       rows: {
         conversations: [{ id: "c1", organization_id: ORG, channel_session_id: CANAL }],
         ai_routers: [{ id: "r1", organization_id: ORG, channel_session_id: CANAL }],
+        // Duas ligações semeadas de propósito: a contagem tem de vir do BANCO.
+        // Com `voice_calls: 0` na expectativa, a rota podia ter parado de contar
+        // e o caso continuaria verde — e o histórico de voz sumiria no cascade
+        // sem o diálogo avisar, que é exatamente o defeito que esta onda fecha.
+        voice_calls: [
+          { id: "v1", organization_id: ORG, channel_session_id: CANAL },
+          { id: "v2", organization_id: ORG, channel_session_id: CANAL },
+        ],
       },
     });
     wahaOk(db);
@@ -434,7 +509,7 @@ describe("GET /api/v1/channel-sessions/[id]", () => {
 
     expect(body.data.deletion_impact).toEqual({
       outcome: "archive",
-      history: { conversations: 1, messages: 0, agent_versions: 0 },
+      history: { conversations: 1, messages: 0, agent_versions: 0, voice_calls: 2 },
       configuration: { ai_routers: 1, channel_knobs: 0, before_send_traces: 0 },
     });
   });
@@ -496,7 +571,7 @@ describe("GET /api/v1/channel-sessions/[id]", () => {
 
     expect(res.status).toBe(200);
     // Nunca fala com o transporte do WAHA — canal oficial não tem sessão lá.
-    expect(waha.getSessionQr).not.toHaveBeenCalled();
+    expect(waha.getVerifiedSession).not.toHaveBeenCalled();
     // `waha_configured` aqui não é "é WAHA" — é "consegui tentar um health
     // check ao vivo" (o mesmo campo, reaproveitado pelo seam de adapter em
     // `checkHealth`; ver comentário na rota). Com `meta_phone_number_id`

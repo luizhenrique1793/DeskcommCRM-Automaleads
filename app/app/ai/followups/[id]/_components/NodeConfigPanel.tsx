@@ -2,15 +2,20 @@
 
 import { useState } from "react";
 
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { FlowNode } from "@/lib/followup/graph-schema";
 import type { RFNode, RFNodeData } from "@/lib/followup/graph-mappers";
+import { Trash } from "@/lib/ui/icons";
+import { useT } from "@/hooks/i18n/useT";
 
 import { ActionForm } from "./forms/ActionForm";
 import { ClassifyForm } from "./forms/ClassifyForm";
 import { ConditionForm } from "./forms/ConditionForm";
 import { EndForm } from "./forms/EndForm";
+import { MatchReplyForm } from "./forms/MatchReplyForm";
+import { RepeatForm } from "./forms/RepeatForm";
 import { WaitForm } from "./forms/WaitForm";
 import type { ConfigOf } from "./forms/shared";
 import { NODE_VISUALS } from "./nodes/nodeVisuals";
@@ -18,6 +23,7 @@ import { NODE_VISUALS } from "./nodes/nodeVisuals";
 interface Props {
   node: RFNode;
   onChange: (patch: Partial<RFNodeData>) => void;
+  onDelete: () => void;
   /** Ramos deste nó que já têm aresta — quem sabe isso é o canvas, que é dono do grafo. */
   ramosLigados?: string[];
 }
@@ -31,7 +37,8 @@ interface Props {
  * quando o candidato passa no schema — senão mostra erro inline e o canvas
  * mantém a última config válida (nunca um valor pela metade rio acima).
  */
-export function NodeConfigPanel({ node, onChange, ramosLigados }: Props) {
+export function NodeConfigPanel({ node, onChange, onDelete, ramosLigados }: Props) {
+  const t = useT();
   const type = node.type as FlowNode["type"];
   const visual = NODE_VISUALS[type];
   const Icon = visual.icon;
@@ -41,7 +48,7 @@ export function NodeConfigPanel({ node, onChange, ramosLigados }: Props) {
   const commitLabel = (value: string) => {
     setLabel(value);
     if (value.trim().length < 1 || value.length > 60) {
-      setLabelError("Rótulo precisa ter 1 a 60 caracteres.");
+      setLabelError(t("Rótulo precisa ter 1 a 60 caracteres."));
       return;
     }
     setLabelError(null);
@@ -55,15 +62,15 @@ export function NodeConfigPanel({ node, onChange, ramosLigados }: Props) {
           <span className={`flex h-6 w-6 items-center justify-center rounded-full ${visual.chipClassName}`}>
             <Icon size={14} aria-hidden />
           </span>
-          {visual.paletteLabel}
+          {t(visual.paletteLabel)}
         </h2>
         <p className="text-sm text-text-muted">
-          Alterações aplicam no rascunho ao digitar — salve na barra de publicação.
+          {t("Alterações aplicam no rascunho ao digitar — salve na barra de publicação.")}
         </p>
       </div>
 
       <div className="space-y-2">
-        <Label htmlFor="node-label">Rótulo</Label>
+        <Label htmlFor="node-label">{t("Rótulo")}</Label>
         <Input
           id="node-label"
           value={label}
@@ -76,8 +83,9 @@ export function NodeConfigPanel({ node, onChange, ramosLigados }: Props) {
       <div className="space-y-4 border-t border-border pt-4">
         {type === "trigger" && (
           <p className="text-sm text-text-muted">
-            Início do fluxo — sem configuração adicional. O disparo (manual, mudança de
-            etapa, silêncio ou fim de conversa) é definido nas configurações do fluxo.
+            {t(
+              "Início do fluxo — sem configuração adicional. O disparo (manual, mudança de etapa, silêncio ou fim de conversa) é definido nas configurações do fluxo.",
+            )}
           </p>
         )}
         {type === "wait" && (
@@ -96,12 +104,38 @@ export function NodeConfigPanel({ node, onChange, ramosLigados }: Props) {
             onChange={(config) => onChange({ config })}
           />
         )}
+        {type === "match_reply" && (
+          <MatchReplyForm
+            config={node.data.config as ConfigOf<"match_reply">}
+            onChange={(config) => onChange({ config })}
+          />
+        )}
+        {type === "repeat" && (
+          <RepeatForm
+            config={node.data.config as ConfigOf<"repeat">}
+            onChange={(config) => onChange({ config })}
+          />
+        )}
         {type === "action" && (
           <ActionForm config={node.data.config as ConfigOf<"action">} onChange={(config) => onChange({ config })} />
         )}
         {type === "end" && (
           <EndForm config={node.data.config as ConfigOf<"end">} onChange={(config) => onChange({ config })} />
         )}
+      </div>
+
+      <div className="mt-auto border-t border-border pt-4">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="w-full text-destructive"
+          data-testid="delete-node"
+          onClick={onDelete}
+        >
+          <Trash size={14} aria-hidden className="mr-1" />
+          {t("Excluir nó")}
+        </Button>
       </div>
     </div>
   );

@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { apiClient } from "@/lib/api/client";
 import { showApiError } from "@/components/feedback/ApiErrorToast";
+import { useT } from "@/hooks/i18n/useT";
 import type { BudgetStatus } from "@/lib/ai/budget/check";
 
 export type { BudgetStatus };
@@ -10,7 +11,14 @@ export type { BudgetStatus };
 export interface BudgetPatch {
   monthly_limit_cents?: number;
   alarm_threshold_pct?: number;
-  action_at_100pct?: "throttle" | "disable";
+  /**
+   * A INTENÇÃO, declarada — não inferida da forma do payload. É o campo que
+   * decide se o teto vincula alguém; sem ele, "escolhi um teto" e "nunca abri a
+   * tela" seriam o mesmo dado.
+   */
+  enforcement_mode?: "off" | "avisar" | "bloquear";
+  /** Renuncia às 72h de carência ao armar a parada. */
+  confirmar_imediato?: boolean;
 }
 
 interface SingleResponse {
@@ -38,6 +46,7 @@ export function useAiBudget(opts?: { initialData?: BudgetStatus }) {
 
 export function useUpdateBudget() {
   const qc = useQueryClient();
+  const t = useT();
   return useMutation({
     mutationKey: ["ai", "budget", "update"],
     mutationFn: async (patch: BudgetPatch) => {
@@ -56,8 +65,11 @@ export function useUpdateBudget() {
           ...(patch.alarm_threshold_pct !== undefined
             ? { alarm_threshold_pct: patch.alarm_threshold_pct }
             : {}),
-          ...(patch.action_at_100pct !== undefined
-            ? { action_at_100pct: patch.action_at_100pct }
+          // `confirmar_imediato` NÃO entra: ele não é estado, é a renúncia à
+          // carência naquele clique. O `enforcement_effective_at` que ele decide
+          // vem do servidor — otimizá-lo aqui seria a tela inventar uma data.
+          ...(patch.enforcement_mode !== undefined
+            ? { enforcement_mode: patch.enforcement_mode }
             : {}),
         };
         qc.setQueryData(aiBudgetQueryKey, optimistic);
@@ -72,7 +84,7 @@ export function useUpdateBudget() {
     },
     onSuccess: (data) => {
       qc.setQueryData(aiBudgetQueryKey, data);
-      toast.success("Orçamento atualizado");
+      toast.success(t("Orçamento atualizado"));
     },
   });
 }

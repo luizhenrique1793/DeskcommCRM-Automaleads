@@ -12,11 +12,11 @@ import { z } from "zod";
 import type { NextRequest } from "next/server";
 
 import { fail, ok } from "@/lib/api/wrappers";
-import { requireAuth, resolveActiveOrg } from "@/lib/auth/server";
-import { ROLE_RANK } from "@/lib/auth/types";
+import { requireRole } from "@/lib/auth/require-role";
 import { PONTO_POR_ID } from "@/lib/ai/pontos/registro";
 import { EXPLICACAO_DA_ORIGEM, type OrigemDaEscolha } from "@/lib/ai/pontos/resolver";
 import { createClient } from "@/lib/supabase/server";
+import { traduzir } from "@/lib/i18n/dicionario";
 
 export const dynamic = "force-dynamic";
 
@@ -39,6 +39,12 @@ const O_QUE_FAZER: Record<string, string> = {
     "O provedor está fora do ar ou demorou demais. Costuma se resolver sozinho; se persistir, troque de provedor nesse ponto.",
   modelo_sem_ferramentas:
     "O modelo escolhido não sabe usar as ferramentas do CRM. Troque por um que saiba, no painel de Provedores.",
+  // A única linha desta tabela em que o produto parou de propósito. Ela existe
+  // porque o `throw` do gate de orçamento caía FORA do `try` que grava a falha:
+  // a tela que nasceu para explicar o silêncio da IA nunca mostrava o único
+  // caso em que o silêncio é intencional.
+  orcamento_esgotado:
+    "A IA parou porque o gasto do mês atingiu o limite que você definiu. Ajuste o limite (ou desligue a parada) em Uso de IA › Orçamento.",
   erro_desconhecido:
     "Não conseguimos classificar esta falha. A mensagem original do provedor está abaixo.",
 };
@@ -67,12 +73,10 @@ const filtrosDaQuery = z.object({
 });
 
 export async function GET(req: NextRequest): Promise<Response> {
-  const user = await requireAuth();
-  const org = await resolveActiveOrg(user);
-  if (!org) return fail("no_active_org", "nenhuma organização ativa", 400);
-  if (ROLE_RANK[org.role] < ROLE_RANK.manager) {
-    return fail("forbidden", "requer papel de gerente ou superior", 403);
-  }
+  const authz = await requireRole("manager", { resource: "ai_runs" });
+  if (!authz.ok) return authz.response;
+  const t = (texto: string) => traduzir(texto, authz.user.idioma);
+  const { org } = authz;
 
   // Zod na query string, como a rota irmã de uso já faz. `Math.min(Number(…))`
   // não valida nada: `?limit=abc` virava `NaN` e `?limit=-5` passava direto,
@@ -80,7 +84,7 @@ export async function GET(req: NextRequest): Promise<Response> {
   // crua no corpo — resposta de servidor para um erro do cliente.
   const filtros = filtrosDaQuery.safeParse(Object.fromEntries(new URL(req.url).searchParams));
   if (!filtros.success) {
-    return fail("invalid_query", "filtros inválidos", 422, { details: filtros.error.issues });
+    return fail("invalid_query", t("filtros inválidos"), 422, { details: filtros.error.issues });
   }
   const { purpose, status, limit: limite } = filtros.data;
 

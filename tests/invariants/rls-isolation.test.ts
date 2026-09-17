@@ -99,6 +99,9 @@ beforeAll(() => {
       v_conv uuid;
       v_pipe uuid;
       v_stage uuid;
+      v_agent uuid;
+      v_version uuid;
+      v_boundary jsonb;
     begin
       foreach v_org in array array['${ORG_A}'::uuid, '${ORG_B}'::uuid] loop
         select id into v_sess from public.channel_sessions where organization_id = v_org limit 1;
@@ -120,6 +123,31 @@ beforeAll(() => {
         if not exists (select 1 from public.messages where organization_id = v_org) then
           insert into public.messages (organization_id, conversation_id, channel_session_id, contact_id, type, direction, body)
             values (v_org, v_conv, v_sess, v_contact, 'text', 'inbound', 'rls invariant probe');
+        end if;
+
+        -- 0227: sugestões contêm texto privado da conversa. Os dois tenants
+        -- recebem uma linha real, com todos os FKs e a fronteira canônica.
+        -- A prova abaixo usa JWT authenticated; não é só inspeção de policy.
+        if not exists (select 1 from public.ai_reply_drafts where organization_id = v_org) then
+          v_boundary := public.fn_service_begin(v_org, v_contact);
+          v_conv := (v_boundary->>'conversation_id')::uuid;
+          insert into public.ai_agents (organization_id, name, system_prompt, operation_mode)
+            values (v_org, 'RLS Invariant Assistant', 'RLS invariant private prompt', 'assisted')
+            returning id into v_agent;
+          insert into public.ai_agent_versions
+            (organization_id, agent_id, version_number, system_prompt, provider, model, channel_session_id, status)
+            values (v_org, v_agent, 1, 'RLS invariant private prompt', 'anthropic', 'rls-test-model', v_sess, 'published')
+            returning id into v_version;
+          update public.ai_agents set published_version_id = v_version
+            where organization_id = v_org and id = v_agent;
+          insert into public.ai_reply_drafts
+            (organization_id, conversation_id, contact_id, agent_id, agent_version_id,
+             channel_session_id, service_boundary, context_revision, operation_revision,
+             status, original_body)
+            values (v_org, v_conv, v_contact, v_agent, v_version, v_sess, v_boundary,
+              (select reply_context_revision from public.conversations where organization_id = v_org and id = v_conv),
+              (select operation_revision from public.ai_agents where organization_id = v_org and id = v_agent),
+              'pending', 'RLS invariant private reply');
         end if;
 
         select id into v_pipe from public.crm_pipelines
@@ -186,6 +214,57 @@ beforeAll(() => {
             (organization_id, contact_id, campo, valor_proposto, expires_at)
             values (v_org, v_contact, 'email', 'rls-invariant@exemplo.test', now() + interval '7 days');
         end if;
+
+        if not exists (select 1 from public.catalog_products where organization_id = v_org) then
+          insert into public.catalog_products
+            (organization_id, codigo, nome, preco_cents)
+            values (v_org, 'RLS-' || v_org::text, 'Produto de invariante', 100);
+        end if;
+
+        -- crm_tasks (migration 0210): o que o time combinou fazer, com prazo.
+        -- Entra COM o vínculo de lead porque a tarefa presa a um negócio é o
+        -- caso que cruza duas tabelas tenant-aware — se a policy vazasse, o
+        -- vizinho leria o combinado E o ponteiro para o funil dele.
+        -- (sem crase nesta prosa: o bloco inteiro é um template literal de JS.)
+        if not exists (select 1 from public.crm_tasks where organization_id = v_org) then
+          insert into public.crm_tasks (organization_id, title, lead_id)
+            values (v_org, 'RLS invariant task',
+                    (select id from public.crm_leads where organization_id = v_org limit 1));
+        end if;
+
+        -- voice_calls (0232): a chamada pendurada na sessão de canal da org.
+        -- O wacalls_call_id varia por organizacao porque a tabela tem
+        -- unique (organization_id, wacalls_call_id) — mesmo cuidado do endpoint
+        -- de push_subscriptions logo abaixo.
+        -- (sem crase nesta prosa: o bloco inteiro é um template literal de JS.)
+        if not exists (select 1 from public.voice_calls where organization_id = v_org) then
+          insert into public.voice_calls
+            (organization_id, channel_session_id, contact_id, wacalls_call_id,
+             direction, peer_phone, status)
+            values (v_org, v_sess, v_contact, 'rls-' || v_org::text,
+                    'inbound', '5511900000000', 'ended');
+        end if;
+
+        -- org_voice_calls (0236): o opt-in da chamada de voz, uma linha por
+        -- organizacao. A PK e o proprio organization_id, entao a semente e
+        -- idempotente por construcao — mas o if not exists fica pelo mesmo
+        -- motivo das vizinhas: o seed roda duas vezes, uma por org.
+        if not exists (select 1 from public.org_voice_calls where organization_id = v_org) then
+          insert into public.org_voice_calls (organization_id, enabled)
+            values (v_org, false);
+        end if;
+
+        if not exists (select 1 from public.push_subscriptions where organization_id = v_org) then
+          insert into public.push_subscriptions
+            (organization_id, user_id, endpoint, p256dh, auth)
+            values (
+              v_org,
+              case when v_org = '${ORG_A}'::uuid then '${USER_A}'::uuid else '${USER_B}'::uuid end,
+              'https://push.example.test/rls-' || v_org::text,
+              'p256dh-rls',
+              'auth-rls'
+            );
+        end if;
       end loop;
     end
     $seed$;
@@ -204,7 +283,7 @@ beforeAll(() => {
  * checagens de catálogo e devolve a org inteira do vizinho. Medido — ver o
  * cabeçalho do caso de `contact_field_proposals` abaixo.
  */
-const TABLES = [
+export const TABLES = [
   "conversations",
   "messages",
   "contacts",
@@ -223,6 +302,37 @@ const TABLES = [
   // sabotada para `... or true` a suíte seguia 31/31 verde num banco em que o vizinho
   // lia e escrevia. É o modo de falha que o aviso acima descreve, encontrado vivo.
   "org_guardrail_layers",
+  "push_subscriptions",
+  // migration 0204 — o catálogo de produtos da loja. A leitura é org-scoped sem
+  // gate de papel (o `agent` semeado aqui precisa ler para atender), e a ESCRITA
+  // exige `manager` — esse segundo eixo é medido em
+  // `tests/invariants/catalogo-so-gestor-muda-preco.test.ts`, não aqui.
+  "catalog_products",
+  // migration 0210 — as tarefas do CRM. A leitura é org-scoped sem gate de papel
+  // (o `viewer` precisa ver o que o time combinou); a ESCRITA exige `agent`, e
+  // esse segundo eixo NÃO é medido aqui — o usuário semeado é `agent`, então o
+  // controle positivo passaria por acerto. Quem mede a escrita é a rota, em
+  // `tests/unit/tarefas-rota-nao-tem-porta-dos-fundos.test.ts`.
+  "crm_tasks",
+  // 0227 — texto de sugestões: org + visibilidade da conversa por authenticated.
+  "ai_reply_drafts",
+  // 0232/0235 — chamada de voz. Guarda `peer_phone` (telefone da outra ponta) e
+  // `owner_user_id` (quem atendeu): vazar a linha entrega ao vizinho com quem a
+  // organização falou, quando, por quanto tempo e por meio de quem. A policy
+  // nasceu SEM o `for all` explícito, e o comportamento casava com o nome
+  // `_all` por default do Postgres, não por declaração — a 0235 a reescreve e
+  // este é o caso que mede a reescrita pelo desfecho.
+  "voice_calls",
+  // migration 0236 — o opt-in por organizacao da chamada de voz. Guarda quem
+  // aceitou o risco do segundo aparelho vinculado: vazar entre organizacoes
+  // diria a uma empresa quem, na outra, ligou a feature e quando.
+  "org_voice_calls",
+  // ⚠️ `webhook_lead_captures` (migration 0174) NÃO entra nesta lista, e a
+  // ausência é deliberada: a policy dela exige `manager`, e o usuário semeado
+  // aqui é `agent` — o controle positivo falharia por ACERTO, e a "correção"
+  // natural seria afrouxar a policy para caber no molde. A prova dela vive em
+  // `tests/invariants/historico-de-captacao-rls.test.ts`, que mede as duas
+  // direções MAIS o gate de papel (o `viewer` que não lê o formulário).
 ] as const;
 
 describe("RLS tenant isolation (fn_user_org_ids pattern)", () => {
@@ -243,6 +353,21 @@ describe("RLS tenant isolation (fn_user_org_ids pattern)", () => {
       expect(ownRows).toBeGreaterThanOrEqual(1);
     });
   }
+
+  it("ai_reply_drafts: org B lê sua sugestão e não lê a de A (direção inversa)", () => {
+    expect(countAs(USER_B,
+      `select count(*) from public.ai_reply_drafts where organization_id = '${ORG_B}';`,
+    )).toBeGreaterThanOrEqual(1);
+    expect(countAs(USER_B,
+      `select count(*) from public.ai_reply_drafts where organization_id = '${ORG_A}';`,
+    )).toBe(0);
+  });
+
+  it("ai_reply_drafts: os dois tenants têm linhas antes de testar as cercas", () => {
+    expect(Number(sql(
+      `select count(distinct organization_id) from public.ai_reply_drafts where organization_id in ('${ORG_A}','${ORG_B}');`,
+    ))).toBe(2);
+  });
 
   it("superuser sees both orgs (seed sanity: cross-tenant rows really exist)", () => {
     const total = Number(

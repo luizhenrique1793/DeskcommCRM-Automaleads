@@ -16,7 +16,15 @@
  */
 import type { Pool, PoolClient, QueryResult, QueryResultRow } from 'pg';
 
-export type JobKind = 'inbound_turn' | 'followup_turn' | 'watchdog' | 'flywheel' | 'case_reply_turn' | 'operator_turn';
+export type JobKind =
+  | 'inbound_turn'
+  | 'followup_turn'
+  | 'watchdog'
+  | 'flywheel'
+  | 'case_reply_turn'
+  | 'operator_turn'
+  | 'transactional_delivery'
+  | 'approved_reply';
 export type JobStatus = 'pending' | 'running' | 'done' | 'failed' | 'dead';
 
 export interface JobRow {
@@ -34,6 +42,8 @@ export interface JobRow {
   last_error: string | null;
   locked_by: string | null;
   locked_at: Date | null;
+  /** Texto original da aquisição; Date do driver perde microssegundos. */
+  claim_acquired_at?: string;
   created_at: Date;
 }
 
@@ -136,7 +146,7 @@ const CLAIM_SQL = `
   update job_queue
   set status = 'running', locked_by = $2, locked_at = now(), attempts = attempts + 1
   where id in (select id from runnable)
-  returning *`;
+  returning *, locked_at::text as claim_acquired_at`;
 
 /**
  * Claima até `batchSize` jobs respeitando o cap global (`maxConcurrency`): a soma de
@@ -146,6 +156,63 @@ const CLAIM_SQL = `
  * ponytail: cap é do daemon único; se um dia houver N daemons em bancos separados,
  * vira knob agregado por daemon.
  */
+/**
+ * Quantos MILISSEGUNDOS faltam até o próximo job ficar claimável — `null` quando
+ * não há nenhum `pending`. É o relógio que o loop consulta ANTES de abrir o claim.
+ *
+ * Um `select` só, sem `connect`, sem `begin` e sem advisory lock: o claim custa 5
+ * statements e 638 B de egress por rodada (medido no protocolo, fila vazia), e
+ * numa instalação ociosa ele rodava 4×/s para sempre — a issue #258. Este aqui
+ * custa 1 statement e 54 B, e é servido por `idx_job_queue_claim` (o parcial de
+ * `status='pending'` que já existe): Index Only Scan, 1 buffer, 0,010 ms medidos
+ * com 50 mil linhas na tabela — não degrada com o histórico.
+ *
+ * A garantia não é "o claim nunca perde um job por causa desta leitura". Ela é
+ * MAIS FRACA e é a verdadeira: como a leitura é uma FOTO (o `now()` dela é o
+ * instante da própria transação), um job que vence entre a foto e o despertar
+ * fica esperando — mas só até a próxima foto, porque nada no produto tira uma
+ * linha de `pending`+vencida. Ou seja: **a foto nunca esconde um job por mais de
+ * um `QUEUE_POLL_INTERVAL_MS`**. Medido: 1.300 estados de fronteira em fuzz
+ * diferencial contra o `claimJobs` real, zero casos de job escondido.
+ *
+ * Três armadilhas, todas com caso em tests/invariants/queue-relogio.test.ts:
+ *   - o `case when` é OBRIGATÓRIO: `greatest(NULL, 0)` no Postgres devolve 0, não
+ *     NULL — sem ele a fila VAZIA se disfarçaria de "job vencido" e o loop
+ *     voltaria a girar no ritmo curto, que é exatamente o defeito da issue;
+ *   - o clamp segura `run_after = 'infinity'`, que o hold do session-watchdog
+ *     grava (`session-watchdog.ts`), e que estouraria o `int4` do cast. Ele
+ *     clampa o TIMESTAMP, e não o resultado, e a ordem NÃO é estilo: em
+ *     Postgres 15 e 16 `'infinity'::timestamptz - now()` é um ERRO do servidor
+ *     (`cannot subtract infinite timestamps`), então um `least()` aplicado ao
+ *     resultado nunca chega a rodar. Medido nos dois: pg15 devolve o erro,
+ *     pg17 devolve `infinity`. Enquanto o piso declarado era pg17 isto era
+ *     latente; num Postgres 15 quebra o RELÓGIO do worker
+ *     (`workers/agent-worker/main.ts`), que é quem chama esta função.
+ *     Guardado por `tests/unit/aritmetica-de-timestamp-infinito.test.ts`;
+ *   - o `::int` faz o pg devolver `number`; sem ele viria `string` de `numeric`.
+ */
+export async function faltaParaOProximoJob(pool: Pool): Promise<number | null> {
+  const { rows } = await pool.query<{ falta_ms: number | null }>(
+    `select case
+              when min(run_after) is null then null
+              -- O clamp é do TIMESTAMP, não do resultado — e a ordem é o
+              -- conserto. Ver o parágrafo do 'infinity' no cabeçalho: em
+              -- Postgres 15 a SUBTRAÇÃO estoura antes de qualquer least()
+              -- ('cannot subtract infinite timestamps'), então clampar depois
+              -- protege só quem já está no 17.
+              else greatest(
+                     extract(epoch from (
+                       least(min(run_after), now() + interval '1 day') - now()
+                     )) * 1000,
+                     0
+                   )::int
+            end as falta_ms
+       from job_queue
+      where status = 'pending'`,
+  );
+  return rows[0]?.falta_ms ?? null;
+}
+
 export async function claimJobs(pool: Pool, opts: ClaimOptions): Promise<JobRow[]> {
   const client = await pool.connect();
   try {
@@ -187,6 +254,7 @@ export async function completeJob<T = void>(
   jobId: string,
   workerId: string,
   inSameCommit?: (tx: PoolClient) => Promise<T>,
+  acquiredAt?: string,
 ): Promise<T> {
   const client = await pool.connect();
   try {
@@ -194,8 +262,8 @@ export async function completeJob<T = void>(
     const result = (inSameCommit ? await inSameCommit(client) : undefined) as T;
     const done = await client.query(
       `update job_queue set status = 'done', locked_by = null, locked_at = null
-       where id = $1 and status = 'running' and locked_by = $2`,
-      [jobId, workerId],
+       where id = $1 and status = 'running' and locked_by = $2 and ($3::timestamptz is null or locked_at=$3)`,
+      [jobId, workerId, acquiredAt ?? null],
     );
     if (done.rowCount !== 1) {
       throw new Error(
@@ -216,19 +284,33 @@ export async function completeJob<T = void>(
  * Devolve o job à fila após falha (attempts já foi incrementado no claim). Excedeu
  * `max_attempts` → 'dead' + escalação humana em agent_inbox_items (kind='job_dead'), no
  * MESMO statement (atômico). Devolve null se o lease já não era deste worker.
+ *
+ * Backoff exponencial no retry (10s, 20s, 40s, 80s, capado em 120s — chave em
+ * `attempts`, já pós-incremento do claim): sem isso `run_after` fica intocado e
+ * o job cai `pending` já vencido, então o próximo `claimJobs` (poll de poucos
+ * segundos) o repega na hora. Contra um erro transitório de rate limit (TPM da
+ * OpenAI, por ex.) isso queima as 5 tentativas em menos de 1s — o rate limit não
+ * teve NENHUM tempo pra ceder entre uma tentativa e outra, e o job morre por um
+ * incidente que um minuto de espera resolveria sozinho. Caso real desta VPS,
+ * 2026-08-31: 49 jobs mortos em rajadas de poucos segundos, todos por TPM.
  */
 export async function failJob(
   db: Queryable,
   jobId: string,
   workerId: string,
   error: unknown,
+  acquiredAt?: string,
 ): Promise<JobRow | null> {
   const { rows } = await db.query<JobRow>(
     `with updated as (
        update job_queue
        set status = case when attempts >= max_attempts then 'dead' else 'pending' end,
+           run_after = case
+             when attempts >= max_attempts then run_after
+             else now() + (least(power(2, greatest(attempts - 1, 0)) * 10, 120) * interval '1 second')
+           end,
            locked_by = null, locked_at = null, last_error = $3
-       where id = $1 and status = 'running' and locked_by = $2
+       where id = $1 and status = 'running' and locked_by = $2 and ($4::timestamptz is null or locked_at=$4)
        returning *
      ),
      alert as (
@@ -247,7 +329,7 @@ export async function failJob(
        where status = 'dead'
      )
      select * from updated`,
-    [jobId, workerId, normalizeError(error)],
+    [jobId, workerId, normalizeError(error), acquiredAt ?? null],
   );
   return rows[0] ?? null;
 }
@@ -264,13 +346,14 @@ export async function cancelJob(
   jobId: string,
   workerId: string,
   reason: string,
+  acquiredAt?: string,
 ): Promise<JobRow | null> {
   const { rows } = await db.query<JobRow>(
     `update job_queue
      set status = 'failed', locked_by = null, locked_at = null, last_error = $3
-     where id = $1 and status = 'running' and locked_by = $2
+     where id = $1 and status = 'running' and locked_by = $2 and ($4::timestamptz is null or locked_at=$4)
      returning *`,
-    [jobId, workerId, normalizeError(reason)],
+    [jobId, workerId, normalizeError(reason), acquiredAt ?? null],
   );
   return rows[0] ?? null;
 }
@@ -285,7 +368,7 @@ export async function rescheduleJob(
   db: Queryable,
   jobId: string,
   workerId: string,
-  opts: { delayMs: number; reason: string },
+  opts: { delayMs: number; reason: string; acquiredAt?: string },
 ): Promise<JobRow | null> {
   const { rows } = await db.query<JobRow>(
     `update job_queue
@@ -293,9 +376,9 @@ export async function rescheduleJob(
          run_after = now() + ($3 * interval '1 millisecond'),
          attempts = greatest(attempts - 1, 0),
          last_error = $4
-     where id = $1 and status = 'running' and locked_by = $2
+     where id = $1 and status = 'running' and locked_by = $2 and ($5::timestamptz is null or locked_at=$5)
      returning *`,
-    [jobId, workerId, opts.delayMs, normalizeError(opts.reason)],
+    [jobId, workerId, opts.delayMs, normalizeError(opts.reason), opts.acquiredAt ?? null],
   );
   return rows[0] ?? null;
 }
@@ -312,7 +395,14 @@ export async function reapExpiredJobs(
   const { rows } = await db.query<{ id: string; status: JobStatus }>(
     `with expired as (
        update job_queue
-       set status = case when attempts >= max_attempts then 'dead' else 'pending' end,
+       set status = case
+         -- An accepted approved reply only needs local receipt recognition.
+         -- Exhausting send attempts must not discard that existing receipt.
+         when kind='approved_reply' and exists(
+           select 1 from send_ledger l where l.organization_id=job_queue.organization_id
+           and l.job_id=job_queue.id and l.seq=1 and l.status='accepted'
+         ) then 'pending'
+         when attempts >= max_attempts then 'dead' else 'pending' end,
            locked_by = null, locked_at = null,
            last_error = coalesce(last_error, 'visibility timeout excedido (worker morto?)')
        where status = 'running' and locked_at < now() - ($1 * interval '1 millisecond')
@@ -367,7 +457,10 @@ async function rollback(client: PoolClient, cause: unknown): Promise<void> {
   try {
     await client.query('rollback');
   } catch (rollbackErr) {
-    throw new AggregateError([cause, rollbackErr], 'rollback falhou após erro na transação da fila');
+    throw new AggregateError(
+      [cause, rollbackErr],
+      'rollback falhou após erro na transação da fila',
+    );
   }
 }
 

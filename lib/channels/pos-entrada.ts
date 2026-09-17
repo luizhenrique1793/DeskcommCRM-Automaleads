@@ -42,35 +42,41 @@ import { audit } from "@/lib/audit";
 import { garantirLeadDaConversa } from "@/lib/leads/nascimento-do-lead";
 import { logger } from "@/lib/logger";
 import type { createAdminClient } from "@/lib/supabase/admin";
+import { ehPedidoDeOptOut } from "@/lib/opt-out/deteccao";
+import { acelerarPipelineDeEventos } from "@/lib/dev/kick-local-pipeline";
+import { autorizarContatoParaIA } from "@/lib/ai/elegibilidade/autorizacao";
+import { casarCampanha, lerCampanhas } from "@/lib/ai/elegibilidade/campanha";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
 /**
- * As palavras que significam "não me escreva mais".
+ * Quem pediu para sair, sai — mas quem só usou a palavra, não.
  *
- * Mora aqui, e não em cada ingest, porque o vocabulário do opt-out é regra de
- * negócio (e de LGPD) do produto inteiro — não característica de um transporte.
- * Uma cópia por canal diverge na primeira vez que alguém acrescentar um termo.
+ * A regra mora em `lib/opt-out/deteccao.ts`, e não aqui, porque o vocabulário do
+ * opt-out é regra de negócio (e de LGPD) do produto inteiro — não característica
+ * de um transporte. Uma cópia por canal diverge na primeira vez que alguém
+ * acrescentar um termo, e foi exatamente o que aconteceu: o runtime tinha um
+ * detector calibrado enquanto ESTE caminho, o que grava o bloqueio, usava uma
+ * regex de palavra solta.
  *
- * ─── Por que NÃO é `\b`, que é o que estava aqui antes ─────────────────────
+ * ─── A história deste ponto, em duas correções ──────────────────────────────
  *
- * Porque em JavaScript `\b` é ASCII: a fronteira de palavra é `[A-Za-z0-9_]`, e
- * qualquer letra acentuada conta como NÃO-palavra. O efeito, na língua em que
- * os clientes escrevem:
+ * A primeira versão usava `\b`, que em JavaScript é ASCII: "amanhã ele sairá" e
+ * "pararão as obras" bloqueavam o contato, porque a letra acentuada vira
+ * fronteira. Trocou-se por lookarounds Unicode e a colagem parou de casar.
  *
- *   "amanhã ele sairá"      → `\bSAIR\b` CASA, porque o "á" vira fronteira
- *   "pararão as obras"      → `\bPARAR\b` CASA, pelo mesmo motivo
+ * Mas o falso positivo continuou, porque o alvo estava errado: a regex caçava a
+ * PALAVRA em qualquer posição da frase. Medido numa clínica em produção,
+ * "tem como parar a dor?" e "posso sair antes das 15h?" bloqueavam o paciente na
+ * ingestão — e todo envio seguinte voltava `contato_bloqueado`. Ele sumia sem
+ * ninguém saber. O mesmo erro escondia o outro lado: "não quero mais receber",
+ * que é opt-out inequívoco, passava batido.
  *
- * Ou seja, a versão anterior bloqueava em silêncio quem nunca pediu para sair —
- * e o contato deixava de receber sem que ninguém soubesse por quê. O falso
- * positivo é o pior dos dois erros possíveis aqui: quem pede para sair e não é
- * atendido reclama de novo; quem é bloqueado sem pedir simplesmente some.
- *
- * As lookarounds com `\p{L}\p{N}` fazem a fronteira ser Unicode: "PARAR" solto
- * casa, "pararão" não. Foi um teste deste arquivo que pegou isso — o defeito
- * vinha do canal por QR e ia ser copiado para o canal oficial.
+ * O que vale agora é a INTENÇÃO — verbo de cessação com objeto de comunicação,
+ * ou a palavra sozinha. O falso positivo continua sendo o pior dos dois erros
+ * possíveis aqui: quem pede para sair e não é atendido reclama de novo; quem é
+ * bloqueado sem pedir simplesmente some.
  */
-export const STOP_RX = /(?<![\p{L}\p{N}])(STOP|PARAR|SAIR|UNSUBSCRIBE)(?![\p{L}\p{N}])/iu;
 
 export interface EntradaDeMensagem {
   organizationId: string;
@@ -111,7 +117,80 @@ export async function aplicarEfeitosPosEntrada(
 ): Promise<void> {
   await aplicarOptOut(admin, entrada);
   await abrirDemanda(admin, entrada);
+  await avaliarCampanha(admin, entrada);
+  // A resposta do lead avança o follow-up AQUI. O despacho do agente (LLM)
+  // vem depois: no Hobby ele estoura o tempo da request e o próximo texto
+  // do fluxo ficava esperando o relógio.
+  await acelerarPipelineDeEventos(admin, {
+    organizationId: entrada.organizationId,
+    contactId: entrada.contactId,
+    messageId: entrada.messageId,
+    texto: entrada.texto,
+  });
   await pedirDespachoDoAgente(admin, entrada);
+}
+
+/**
+ * 2b · A mensagem casa uma campanha registrada? (caso 2 da elegibilidade)
+ *
+ * Campanhas de Meta/Google que levam direto para o WhatsApp: o lead chega com
+ * uma mensagem identificadora ("Quero saber mais sobre X"). Se ela casar uma
+ * campanha em `organizations.settings.campanhas_whatsapp`, o contato fica
+ * elegível para a IA. Só faz sentido consultar quando o canal tem o gate
+ * `allowlist` ligado — no gate 'open' a IA já responde todo mundo. Roda ANTES do
+ * despacho: o evento `ai_agent.dispatch_requested` desta mesma mensagem precisa
+ * já encontrar o contato autorizado.
+ *
+ * Best-effort: qualquer falha aqui vira log e o despacho segue (e cai no
+ * atendimento humano, o lado seguro).
+ */
+async function avaliarCampanha(admin: Admin, entrada: EntradaDeMensagem): Promise<void> {
+  if (!entrada.texto || entrada.texto.trim() === "") return;
+  try {
+    const { data: sess } = await admin
+      .from("channel_sessions")
+      .select("metadata")
+      .eq("organization_id", entrada.organizationId)
+      .eq("id", entrada.channelSessionId)
+      .maybeSingle();
+    const gate = (sess?.metadata as Record<string, unknown> | null)?.ai_gate;
+    if (gate !== "allowlist") return;
+
+    const { data: contato } = await admin
+      .from("contacts")
+      .select("ai_authorized_at")
+      .eq("organization_id", entrada.organizationId)
+      .eq("id", entrada.contactId)
+      .maybeSingle();
+    if (contato?.ai_authorized_at != null) return; // já elegível — não reescreve a origem
+
+    const { data: org } = await admin
+      .from("organizations")
+      .select("settings")
+      .eq("id", entrada.organizationId)
+      .maybeSingle();
+    const campanhas = lerCampanhas(org?.settings ?? null);
+    const casada = casarCampanha(entrada.texto, campanhas, entrada.channelSessionId);
+    if (casada === null) return;
+
+    await autorizarContatoParaIA(admin, {
+      organizationId: entrada.organizationId,
+      contactId: entrada.contactId,
+      reason: `campanha:${casada.id}`,
+      apenasSeNaoAutorizado: true,
+    });
+    logger.info("pos-entrada: contato autorizado para IA por campanha", {
+      organization_id: entrada.organizationId,
+      conversation_id: entrada.conversationId,
+      campanha: casada.id,
+    });
+  } catch (err) {
+    logger.warn("pos-entrada: avaliação de campanha falhou (o despacho segue)", {
+      organization_id: entrada.organizationId,
+      conversation_id: entrada.conversationId,
+      detail: err instanceof Error ? err.message.slice(0, 160) : "desconhecido",
+    });
+  }
 }
 
 /**
@@ -122,7 +201,7 @@ export async function aplicarEfeitosPosEntrada(
  * é justamente o que prova, depois, que o pedido chegou e foi respeitado.
  */
 async function aplicarOptOut(admin: Admin, entrada: EntradaDeMensagem): Promise<void> {
-  if (!entrada.texto || !STOP_RX.test(entrada.texto)) return;
+  if (!ehPedidoDeOptOut(entrada.texto)) return;
 
   try {
     const agora = new Date().toISOString();

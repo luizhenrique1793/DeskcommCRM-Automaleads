@@ -1,4 +1,5 @@
 "use client";
+import { useT } from "@/hooks/i18n/useT";
 import type { Message } from "@/lib/types/messaging";
 
 import { AudioPlayer } from "./AudioPlayer";
@@ -13,16 +14,19 @@ import { VideoMedia } from "./VideoMedia";
  * sempre dá pro atendente baixar o arquivo.
  */
 export function MediaRenderer({ message }: { message: Message }) {
+  const t = useT();
   const isOutbound = message.direction === "outbound";
   switch (message.type) {
     case "image":
-      return <ImageMedia messageId={message.id} alt="Imagem recebida" />;
+      return <ImageMedia messageId={message.id} alt={t("Imagem recebida")} />;
     case "sticker":
       return <StickerMedia messageId={message.id} />;
     case "audio":
       return <AudioPlayer messageId={message.id} isOutbound={isOutbound} />;
     case "video":
       return <VideoMedia messageId={message.id} />;
+    case "contact":
+      return null;
     default:
       return (
         <DocumentCard

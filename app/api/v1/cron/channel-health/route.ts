@@ -22,6 +22,18 @@
  * — e reconectar exige, com frequência, um humano com o celular na mão. O vigia
  * informa; a decisão é de quem lê.
  *
+ * ─── E o watchdog do worker, que RELIGA? ───────────────────────────────────
+ *
+ * `lib/agent-engine/edge/crm/session-reconciler.ts` religa — e as duas regras
+ * não se contradizem porque falam de estados diferentes. Ele retoma APENAS
+ * `STOPPED`, que é a sessão que o transporte não iniciou (contêiner reiniciado,
+ * com a credencial intacta no volume), e NUNCA `FAILED` nem `SCAN_QR_CODE`, que
+ * são justamente os estados de sessão derrubada pela plataforma ou deslogada. É
+ * sobre esses dois que o parágrafo acima fala, e sobre eles nada religa sozinho.
+ *
+ * Se alguém for afrouxar aquele filtro, é este parágrafo que precisa cair
+ * primeiro — e a razão dele continua de pé.
+ *
  * Auth: Bearer INTERNAL_CRON_SECRET|INTERNAL_SECRET (fail-closed), como os demais.
  *
  * NOTA DE DEPLOY: o agendamento vive no serviço `scheduler` do
@@ -36,6 +48,7 @@ import {
   DEFAULT_CHANNEL_PROVIDER,
   getAdapter,
   resolveSessionRef,
+  canalConhecidoSemMensagem,
   type ChannelProvider,
   type ChannelSessionRef,
 } from "@/lib/channels";
@@ -89,17 +102,43 @@ async function handle(req: NextRequest): Promise<Response> {
   const sessoes = (data ?? []) as LinhaDeSessao[];
   let verificadas = 0;
   const desfechos: Record<string, number> = {};
+  let ignoradas = 0;
 
   for (const s of sessoes) {
-    // Pergunta ao CANAL, não ao provider: quem tem sessão para consultar
-    // implementa `checkHealth`; quem não tem simplesmente não o expõe, e o vigia
-    // segue adiante sem nunca perguntar QUEM ele é — o invariante 1 da doutrina.
-    const adapter = getAdapter((s.provider ?? DEFAULT_CHANNEL_PROVIDER) as ChannelProvider);
-    const sessionRef = resolveSessionRef(s);
-    if (!adapter.checkHealth || !sessionRef) continue;
+    // Canal CONHECIDO que não transporta mensagem não tem saúde de mensagem a
+    // vigiar — e a linha de chamada de voz (spec 18) é uma dessas. Este
+    // `continue` vem ANTES de `getAdapter` de propósito: é decisão de escopo,
+    // não erro, e um `warn` por sessão de voz a cada minuto seria ruído
+    // perpétuo. É `canalConhecidoSemMensagem` e não `!transportaMensagem`
+    // justamente para que um provider DESCONHECIDO não caia aqui em silêncio:
+    // ele segue para o `getAdapter` abaixo, que lança, e o `catch` da iteração
+    // deixa o rastro.
+    if (canalConhecidoSemMensagem(s.provider)) {
+      ignoradas++;
+      continue;
+    }
 
     try {
-      const saude = await adapter.checkHealth({ sessionRef });
+      // Pergunta ao CANAL, não ao provider: quem tem sessão para consultar
+      // implementa `checkHealth`; quem não tem simplesmente não o expõe, e o
+      // vigia segue adiante sem nunca perguntar QUEM ele é — o invariante 1 da
+      // doutrina.
+      //
+      // DENTRO do try, e a diferença é a rodada inteira: `getAdapter` falha
+      // FECHADO (`unknown_channel_provider`), e o `catch` desta iteração fica
+      // logo abaixo. Enquanto a chamada morava fora, um provider que o banco já
+      // aceita e esta imagem ainda não conhece — o clone que aplicou o baseline
+      // antes de puxar a imagem nova — abortava `handle()` no meio do laço:
+      // TODOS os tenants seguintes daquela rodada ficavam sem vigia, e o
+      // operador via 500 no cron sem nenhuma pista de qual linha o derrubou.
+      const adapter = getAdapter((s.provider ?? DEFAULT_CHANNEL_PROVIDER) as ChannelProvider);
+      const sessionRef = resolveSessionRef(s);
+      if (!adapter.checkHealth || !sessionRef) continue;
+
+      const saude = await adapter.checkHealth({
+        organizationId: s.organization_id,
+        sessionRef,
+      });
       verificadas++;
 
       // O status novo vale para o banco, mas SÓ quando deu para perguntar:
@@ -135,7 +174,7 @@ async function handle(req: NextRequest): Promise<Response> {
     }
   }
 
-  return ok({ sessoes: sessoes.length, verificadas, ...desfechos }, { requestId });
+  return ok({ sessoes: sessoes.length, verificadas, ignoradas, ...desfechos }, { requestId });
 }
 
 export const GET = handle;

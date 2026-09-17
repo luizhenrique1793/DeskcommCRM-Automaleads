@@ -14,7 +14,7 @@ import type { NextRequest } from "next/server";
 
 import { ok, fail } from "@/lib/api/wrappers";
 import { audit } from "@/lib/audit";
-import { env } from "@/lib/env";
+import { autorizaCron } from "@/lib/auth/cron-auth";
 import { logger } from "@/lib/logger";
 import { runRoutingWorker } from "@/lib/routing/worker";
 
@@ -23,11 +23,7 @@ export const dynamic = "force-dynamic";
 async function handle(req: NextRequest): Promise<Response> {
   const requestId = randomUUID();
 
-  const auth = req.headers.get("authorization") ?? "";
-  const bearer = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length).trim() : "";
-  const provided = bearer || (req.headers.get("x-cron-secret")?.trim() ?? "");
-  const accepted = [env.INTERNAL_CRON_SECRET, env.INTERNAL_SECRET].filter(Boolean);
-  if (accepted.length === 0 || !provided || !accepted.includes(provided)) {
+  if (!autorizaCron(req)) {
     return fail("forbidden", "Cron secret missing or invalid.", 403, { requestId });
   }
 
@@ -40,13 +36,31 @@ async function handle(req: NextRequest): Promise<Response> {
     return fail("internal_error", detail, 500, { requestId });
   }
 
-  void audit({
-    action: "routing.worker_run",
-    organizationId: null,
-    bypassedRls: true,
-    metadata: { batch_size: summary.batch_size, outcomes: summary.outcomes, errors: summary.errors.length },
-    requestId,
-  });
+  // Tick que não drenou evento nenhum não é mutação e não ocupa linha de
+  // auditoria (mesmo critério do snooze-watcher, do followup-flow-worker e do
+  // recover-stuck-messages). Esta rota roda 1×/min: auditar incondicionalmente
+  // gravava 43.200 linhas/mês numa instalação que não atende ninguém, numa
+  // tabela append-only com retenção de anos — 95% do audit log de uma VPS real
+  // era batida de cron vazia (`docs/testing/user-journey-map.md`, achado 17).
+  //
+  // `errors` entra na condição e NÃO é redundante com `batch_size`: quando o
+  // `select` do event_log falha, `runRoutingWorker` devolve `batch_size = 0` com
+  // o erro dentro (worker.ts:88). Sem esta cláusula, o tick em que o banco não
+  // respondeu ficaria idêntico, na trilha, ao tick de uma instalação sem nada a
+  // fazer — o mesmo defeito que `claim_falhou` conserta no followup-flow-worker.
+  if (summary.batch_size > 0 || summary.errors.length > 0) {
+    void audit({
+      action: "routing.worker_run",
+      organizationId: null,
+      bypassedRls: true,
+      metadata: {
+        batch_size: summary.batch_size,
+        outcomes: summary.outcomes,
+        errors: summary.errors.length,
+      },
+      requestId,
+    });
+  }
 
   return ok(
     { batch_size: summary.batch_size, outcomes: summary.outcomes, errors: summary.errors },

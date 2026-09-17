@@ -134,6 +134,8 @@ function makeDb(opts: DbOpts = {}): Registro {
 
   class Q implements PromiseLike<unknown> {
     private filtros: Array<[string, unknown]> = [];
+    /** `neq`: o oposto de `filtros`, guardado à parte para não virar igualdade. */
+    private negados: Array<[string, unknown]> = [];
     private colunas = "";
     private unica = false;
 
@@ -151,8 +153,15 @@ function makeDb(opts: DbOpts = {}): Registro {
       this.filtros.push([col, val]);
       return this;
     }
+    in(col: string, val: unknown[]): this {
+      this.filtros.push([col, val]); return this;
+    }
     is(col: string, val: unknown): this {
       this.filtros.push([col, val]);
+      return this;
+    }
+    neq(col: string, val: unknown): this {
+      this.negados.push([col, val]);
       return this;
     }
     order(): this {
@@ -183,7 +192,9 @@ function makeDb(opts: DbOpts = {}): Registro {
     }
 
     private casam(): Linha[] {
-      return linhas.filter((l) => this.filtros.every(([c, v]) => (l[c] ?? null) === v));
+      return linhas.filter((l) =>
+        this.filtros.every(([c, v]) => Array.isArray(v) ? v.includes(l[c]) : (l[c] ?? null) === v)
+        && this.negados.every(([c, v]) => (l[c] ?? null) !== v));
     }
 
     private executar(): { data: unknown; error: unknown } {
@@ -210,8 +221,13 @@ function makeDb(opts: DbOpts = {}): Registro {
         linhas.push(nova);
         return { data: nova, error: null };
       }
-      for (const l of this.casam()) Object.assign(l, this.patch);
-      return { data: null, error: null };
+      // As linhas casam ANTES do patch: aplicar primeiro mudaria o que casa.
+      const casadas = this.casam();
+      for (const l of casadas) Object.assign(l, this.patch);
+      // `update().select()` devolve as linhas afetadas, como o PostgREST. Sem
+      // `select()`, nada — é o que os chamadores antigos esperam.
+      if (!this.colunas) return { data: null, error: null };
+      return { data: this.unica ? (casadas[0] ?? null) : casadas, error: null };
     }
 
     then<R1 = unknown, R2 = never>(
@@ -223,6 +239,25 @@ function makeDb(opts: DbOpts = {}): Registro {
   }
 
   const client = {
+    rpc: async (fn: string, args: Linha) => {
+      if (fn === "fn_reserve_channel_connection") {
+        let channel = linhas.find(l => l.organization_id === args.p_org && l.waha_session_name === NOME_SESSAO);
+        if (!channel) {
+          channel = canalQr({ id: CANAL, status: "STARTING", phone_number: null }); linhas.push(channel);
+          registro.escritas.push({ tipo: "insert", table: "channel_sessions", patch: channel, recusada: false });
+        }
+        return { data: { replay: false, channel: { ...channel }, receipt_id: CANAL, lease_token: USER }, error: null };
+      }
+      if (fn === "fn_finish_channel_connection") {
+        if (args.p_status === "remote_created") return { data: {}, error: null };
+        const channel = linhas.find(l => l.organization_id === args.p_org && l.id === CANAL);
+        if (!channel) return { data: null, error: { message: "missing" } };
+        if (channel.archived_at) channel.phone_number = null;
+        Object.assign(channel, { status: args.p_status, archived_at: null });
+        return { data: { ...channel }, error: null };
+      }
+      return { data: null, error: null };
+    },
     from: (table: string) => ({
       select: (cols?: string) => new Q(table, "select").select(cols),
       update: (patch: Linha) => new Q(table, "update", patch),
@@ -242,6 +277,7 @@ function authOk(): void {
     full_name: null,
     avatar_url: null,
     is_platform_admin: false,
+    idioma: "pt-BR" as const,
     organizations: [{ organization_id: ORG, organization_name: "Org", role: "admin" }],
   };
   const org = { orgId: ORG, name: "Org", role: "admin" as const };
@@ -253,6 +289,8 @@ function authOk(): void {
 
 function transporteOk() {
   const cliente = {
+    createSession: vi.fn(async (name: string) => ({ created: false, session: { name, status: "STOPPED" } })),
+    startExistingSession: vi.fn(async (name: string) => ({ name, status: "STARTING" })),
     stopSession: vi.fn(async () => undefined),
     logoutSession: vi.fn(async () => undefined),
     startSession: vi.fn(async () => ({ status: "STARTING" })),
@@ -471,6 +509,54 @@ describe("POST /api/v1/channel-sessions/[id]/reconnect — canal excluído não 
     expect(db.escritas).toEqual([]);
   });
 
+  /**
+   * O nome de 69 caracteres da 0228/0230. O WAHA recusa `name` acima de 54, e
+   * reconectar com ele pedia 400 três vezes (stop, logout, start).
+   */
+  const NOME_LONGO = `org_${ORG.replaceAll("-", "")}_${CANAL.replaceAll("-", "")}`;
+
+  it("⭐ nome fora do teto num canal que NUNCA pareou é curado e o transporte recebe o nome novo", () => {
+    expect(NOME_LONGO).toHaveLength(69);
+  });
+
+  it("⭐ canal que nunca pareou com nome de 69: renomeia e reconecta", async () => {
+    authOk();
+    const db = makeDb({ sessions: [canalQr({ status: "FAILED", waha_session_name: NOME_LONGO, phone_number: null })] });
+    const waha = transporteOk();
+    const { POST } = await import("@/app/api/v1/channel-sessions/[id]/reconnect/route");
+    const res = await POST(req(), ctx());
+
+    expect(res.status).toBe(200);
+    const novo = db.linhas[0]?.waha_session_name as string;
+    expect(novo).not.toBe(NOME_LONGO);
+    expect(novo.length).toBeLessThanOrEqual(54);
+    expect(waha.stopSession).toHaveBeenCalledWith(novo);
+    expect(waha.startSession).toHaveBeenCalledWith(novo);
+    expect(waha.stopSession).not.toHaveBeenCalledWith(NOME_LONGO);
+  });
+
+  /**
+   * ⭐ O caso que uma guarda só por `status` perderia. Este canal PAREOU (tem
+   * `phone_number`) e está parado. O WAHA guarda a credencial em
+   * `/app/.sessions/<name>`: renomear aqui aponta o CRM para uma sessão que não
+   * existe e abandona a que existe — o número some e só volta com QR novo.
+   */
+  it("⭐ canal PAREADO e parado com nome de 69: recusa, não renomeia, não toca o transporte", async () => {
+    authOk();
+    const db = makeDb({ sessions: [canalQr({ status: "STOPPED", waha_session_name: NOME_LONGO })] });
+    const waha = transporteOk();
+    const { POST } = await import("@/app/api/v1/channel-sessions/[id]/reconnect/route");
+    const res = await POST(req(), ctx());
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).error.code).toBe("connection_session_name_too_long");
+    expect(db.linhas[0]?.waha_session_name).toBe(NOME_LONGO);
+    expect(db.escritas).toEqual([]);
+    expect(waha.stopSession).not.toHaveBeenCalled();
+    expect(waha.logoutSession).not.toHaveBeenCalled();
+    expect(waha.startSession).not.toHaveBeenCalled();
+  });
+
   it("sem auth não chega no banco nem no transporte", async () => {
     vi.mocked(requireRole).mockResolvedValue({
       ok: false,
@@ -488,9 +574,9 @@ describe("POST /api/v1/channel-sessions/[id]/reconnect — canal excluído não 
 
 describe("POST /api/v1/onboarding/whatsapp/session — retomar o pareamento ressuscita", () => {
   const req = () =>
-    new Request("http://localhost/api/v1/onboarding/whatsapp/session", { method: "POST" });
+    new Request("http://localhost/api/v1/onboarding/whatsapp/session", { method: "POST", headers: { "Idempotency-Key": USER } });
 
-  it("⭐ linha arquivada com o mesmo nome de sessão volta ATIVA antes de subir o transporte", async () => {
+  it("⭐ linha arquivada com o mesmo nome de sessão volta ATIVA após confirmar o transporte", async () => {
     authOk();
     const db = makeDb({
       sessions: [canalQr({ archived_at: ARQUIVADO_EM, status: "STOPPED" })],
@@ -505,7 +591,7 @@ describe("POST /api/v1/onboarding/whatsapp/session — retomar o pareamento ress
     // O número só se sabe depois do escaneamento — e o health check só preenche
     // o campo quando ele está vazio, então guardar o antigo o congelaria errado.
     expect(db.linhas[0]?.phone_number).toBeNull();
-    expect(waha.startSession).toHaveBeenCalledWith(NOME_SESSAO);
+    expect(waha.startExistingSession).toHaveBeenCalledWith(NOME_SESSAO);
   });
 
   it("linha ATIVA é reaproveitada sem escrita nenhuma", async () => {
@@ -639,7 +725,7 @@ describe("toda ressurreição é auditada — nenhuma nasce muda", () => {
       chamar: async () => {
         const { POST } = await import("@/app/api/v1/onboarding/whatsapp/session/route");
         return POST(
-          new Request("http://localhost/api/v1/onboarding/whatsapp/session", { method: "POST" }),
+          new Request("http://localhost/api/v1/onboarding/whatsapp/session", { method: "POST", headers: { "Idempotency-Key": USER } }),
         );
       },
     },

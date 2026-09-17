@@ -1,3 +1,4 @@
+import { requireSupportWrite } from "@/lib/impersonate/support";
 /**
  * Épico Operação Visível (F1) — memória geral da org (spec harness, migration
  * 0067): documento versionado (versões imutáveis + ponteiro, mesmo padrão de
@@ -15,6 +16,8 @@ import { ok, fail } from "@/lib/api/wrappers";
 import { audit } from "@/lib/audit";
 import { requireRole } from "@/lib/auth/require-role";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { publicarMemoriaDaOrg } from "@/lib/ai/memoria-da-org";
+import { traduzir } from "@/lib/i18n/dicionario";
 
 export const dynamic = "force-dynamic";
 
@@ -24,6 +27,7 @@ export async function GET(_req: NextRequest): Promise<Response> {
   const requestId = randomUUID();
   const authz = await requireRole("agent", { requestId, resource: "org_memory" });
   if (!authz.ok) return authz.response;
+  const t = (texto: string) => traduzir(texto, authz.user.idioma);
   const { org } = authz;
 
   const admin = createAdminClient();
@@ -64,7 +68,7 @@ export async function GET(_req: NextRequest): Promise<Response> {
     .eq("organization_id", org.orgId)
     .order("version_number", { ascending: false });
   if (versionsErr) {
-    return fail("internal_error", "Erro ao carregar versões da memória.", 500, { requestId });
+    return fail("internal_error", t("Erro ao carregar versões da memória."), 500, { requestId });
   }
 
   const { data: entries, error: entriesErr } = await admin
@@ -74,22 +78,26 @@ export async function GET(_req: NextRequest): Promise<Response> {
     .neq("status", "proposed")
     .order("created_at", { ascending: false });
   if (entriesErr) {
-    return fail("internal_error", "Erro ao carregar entradas da memória.", 500, { requestId });
+    return fail("internal_error", t("Erro ao carregar entradas da memória."), 500, { requestId });
   }
 
   return ok({ document, versions: versions ?? [], entries: entries ?? [] }, { requestId });
 }
 
 export async function POST(req: NextRequest): Promise<Response> {
+  const supportDenied = await requireSupportWrite();
+  if (supportDenied) return supportDenied;
+
   const requestId = randomUUID();
   const authz = await requireRole("admin", { requestId, resource: "org_memory" });
   if (!authz.ok) return authz.response;
+  const t = (texto: string) => traduzir(texto, authz.user.idioma);
   const { user: authUser, org } = authz;
 
   const body = await req.json().catch(() => null);
   const parsed = postSchema.safeParse(body);
   if (!parsed.success) {
-    return fail("validation_failed", "content é obrigatório.", 422, {
+    return fail("validation_failed", t("content é obrigatório."), 422, {
       requestId,
       details: parsed.error.flatten(),
     });
@@ -97,38 +105,18 @@ export async function POST(req: NextRequest): Promise<Response> {
 
   const admin = createAdminClient();
 
-  const { data: maxRow } = await admin
-    .from("org_memory_versions")
-    .select("version_number")
-    .eq("organization_id", org.orgId)
-    .order("version_number", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  // ponytail: select-max + insert não é atômico sob publicação concorrente; publicação
-  // é admin-only pela tela. Se virar concorrente, usar advisory lock por org.
-  const nextVersion = ((maxRow?.version_number as number | null) ?? 0) + 1;
-
-  const { data: ver, error: verErr } = await admin
-    .from("org_memory_versions")
-    .insert({
-      organization_id: org.orgId,
-      version_number: nextVersion,
-      content: parsed.data.content,
-      created_by: authUser.id,
-    })
-    .select("id, version_number")
-    .single();
-  if (verErr || !ver) {
-    return fail("internal_error", "Erro ao publicar versão da memória.", 500, { requestId });
+  const pub = await publicarMemoriaDaOrg(admin, org.orgId, authUser.id, parsed.data.content);
+  if (!pub.ok) {
+    return fail(
+      "internal_error",
+      pub.erro === "versao"
+        ? t("Erro ao publicar versão da memória.")
+        : t("Erro ao ativar a versão da memória."),
+      500,
+      { requestId },
+    );
   }
-
-  const { error: ptrErr } = await admin.from("org_memory_pointers").upsert(
-    { organization_id: org.orgId, version_id: ver.id, updated_at: new Date().toISOString() },
-    { onConflict: "organization_id" },
-  );
-  if (ptrErr) {
-    return fail("internal_error", "Erro ao ativar a versão da memória.", 500, { requestId });
-  }
+  const ver = { id: pub.versionId, version_number: pub.versionNumber };
 
   await audit({
     action: "ai.org_memory_published",

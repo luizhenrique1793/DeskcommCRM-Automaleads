@@ -70,7 +70,24 @@ const versionShapeSchema = z
     system_prompt: z.string().trim().min(10).max(20000),
     provider: z.enum(PROVIDERS),
     model: z.string().trim().min(1).max(120),
-    credential_id: UUID,
+    /**
+     * `null` = usar a chave que veio na INSTALAÇÃO.
+     *
+     * Era UUID obrigatório, e isso trancava a porta para o cenário mais comum do
+     * produto: quem instala pelo kit cola a chave no `.env` e nunca abre a tela
+     * de Credenciais — não existe uma única linha em `ai_provider_credentials`.
+     * O runtime SEMPRE soube lidar com isso (`chaveDePlataforma` em
+     * `lib/ai/runtime/agent.ts`, mesma precedência de `resolveOrgLlmConfig`); só
+     * o editor não deixava salvar. O efeito: o agente do onboarding tinha de
+     * nascer `rag_bot`, no editor legado, e as capacidades ficavam invisíveis
+     * para o dono.
+     *
+     * ⚠️ QUEM ACEITA `null` PRECISA CONFERIR QUE A CHAVE EXISTE. O schema é de
+     * FORMA, não de ambiente: nulo aqui significa "usa a da instalação", e se ela
+     * não existir o agente é publicado para morrer em toda mensagem. A guarda
+     * mora na rota de versões, que é quem conhece o `process.env` do servidor.
+     */
+    credential_id: UUID.nullable(),
     tool_ids: z
       .array(z.string().min(1).max(80))
       // O mesmo teto que a tela mostra ("13 de 21") é o que o servidor recusa —
@@ -82,7 +99,22 @@ const versionShapeSchema = z
         { message: "tool_id_invalid" },
       ),
     trigger_config: triggerConfigSchema.optional(),
-    channel_session_id: UUID,
+    /**
+     * Por qual número o agente atende. `null` = AINDA NÃO ESCOLHIDO.
+     *
+     * Era UUID obrigatório, e isso trancava o caminho mais comum de uma
+     * instalação nova: o dono escreve o prompt do atendente ANTES de conectar o
+     * WhatsApp (pareia o aparelho outro dia, com o celular na mão). Sem número
+     * em `channel_sessions`, o editor não deixava salvar uma linha do que ele
+     * acabou de escrever — a tela exigia escolher de uma lista vazia.
+     *
+     * ⚠️ NULO RASCUNHA, NÃO ATENDE. Publicar sem número continua recusado, e em
+     * três camadas independentes: `bloqueioDePublicacao` desabilita o botão,
+     * `fn_publish_ai_agent_version` levanta `channel_session_not_found` (o
+     * `select` por `channel_session_id` nulo não acha linha), e o runtime resolve
+     * o agente por `published_version_id` — sem publicação, ninguém o executa.
+     */
+    channel_session_id: UUID.nullable(),
     max_steps: z.number().int().min(1).max(25).default(10),
     token_budget: z.number().int().min(1000).max(500000).default(50000),
     cost_budget_cents: z.number().int().min(1).max(10000).default(50),
@@ -111,8 +143,17 @@ const versionShapeSchema = z
     // `.nullable()` e não opcional: null é o valor que SIGNIFICA "herda o modelo
     // do Conversador". Omitir seria indistinguível de "ainda não decidi".
     operator_model: z.string().trim().min(1).max(120).nullable().default(null),
-    // Teto PRÓPRIO, não compartilhado com `tool_ids`: é assim que separar os
-    // papéis resolve o estouro do teto por divisão em vez de aumentar o número.
+    // Teto PRÓPRIO, não compartilhado com `tool_ids`: o Operador tem as 25 vagas
+    // dele, o Conversador as dele, e nenhum come a lista do outro.
+    //
+    // ⚠️ A FRASE ANTERIOR VENCEU e está reescrita: ela dizia que separar os
+    // papéis resolve o estouro "por divisão em vez de aumentar o número", e o
+    // número FOI aumentado (20 → 25) quando o dono do produto ficou sem como
+    // ligar as capacidades de agenda. Uma coisa não invalida a outra — a divisão
+    // continua sendo o que impede os dois papéis de disputarem vaga —, mas
+    // deixar escrito que o número nunca sobe faria a próxima sessão medir contra
+    // uma régua que já não existe. O porquê do 25 está em
+    // `lib/mcp/tools/selecao-por-pacote.ts`, junto da constante.
     operator_tool_ids: z
       .array(z.string().min(1).max(80))
       .max(TETO_TOOLS_POR_AGENTE)
@@ -132,6 +173,15 @@ const versionShapeSchema = z
      * organização) mora no servidor, junto do resto.
      */
     pipeline_ids: z.array(z.string().uuid()).default([]),
+    /**
+     * Materiais que este agente consulta (0181). Vazio = NENHUM.
+     *
+     * Sem `.refine()` de existência pelo mesmo motivo de `pipeline_ids` logo
+     * acima: material é linha de tabela, e um schema compartilhado com o browser
+     * não faz consulta cross-row. Quem confere que o material existe e é desta
+     * organização é o servidor.
+     */
+    knowledge_source_ids: z.array(z.string().uuid()).default([]),
   })
   .strict();
 
@@ -187,6 +237,7 @@ export type PublishErrorCode =
   | "agent_not_found"
   | "agent_archived"
   | "version_not_found"
+  | "existing_version_requires_review"
   | "version_invalid_state"
   | "credential_missing"
   | "credential_not_found"
@@ -203,6 +254,7 @@ export const PUBLISH_ERROR_CODES: ReadonlySet<string> = new Set<PublishErrorCode
   "agent_archived",
   "version_not_found",
   "version_invalid_state",
+  "existing_version_requires_review",
   "credential_missing",
   "credential_not_found",
   "credential_inactive",

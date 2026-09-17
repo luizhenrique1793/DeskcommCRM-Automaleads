@@ -8,7 +8,9 @@
  */
 import { z } from "zod";
 
+import { ehHexValido } from "@/lib/branding/rampa";
 import { IDIOMAS } from "@/lib/i18n/idiomas";
+import { MOEDAS_SERVIDAS } from "@/lib/money";
 
 import { conversationTagSchema } from "./messaging";
 
@@ -47,9 +49,20 @@ export const canonicalConversationTagsSchema = z
 export type CanonicalConversationTags = z.infer<typeof canonicalConversationTagsSchema>;
 export type Locale = (typeof LOCALES)[number];
 
+/**
+ * "Sigo minha empresa" — a ausência de preferência, com um valor para ela.
+ *
+ * Sem isto, quem abrisse o perfil por qualquer motivo (trocar o fuso, o nome)
+ * sairia de lá com uma preferência de idioma que nunca escolheu: o seletor
+ * mostraria o idioma em vigor e o salvar o gravaria como decisão pessoal. A
+ * partir daí, trocar o idioma da empresa não alcançaria mais essa pessoa — e
+ * ninguém entenderia por quê.
+ */
+export const SEM_PREFERENCIA_DE_IDIOMA = "auto";
+
 export const profileSchema = z.object({
   full_name: z.string().min(1).max(120).nullable().optional(),
-  locale: z.enum(LOCALES),
+  locale: z.enum([...LOCALES, SEM_PREFERENCIA_DE_IDIOMA]),
   timezone: z.string().min(1).max(64),
   avatar_url: z
     .string()
@@ -60,6 +73,13 @@ export const profileSchema = z.object({
     .or(z.literal("").transform(() => null)),
 });
 export type ProfileInput = z.infer<typeof profileSchema>;
+
+/**
+ * As moedas servidas vêm de `lib/money`, pelo mesmo motivo que os idiomas vêm
+ * de `lib/i18n/idiomas`: com duas listas, uma moeda aceita aqui e ausente do
+ * seletor vira um valor que ninguém consegue mais escolher de volta.
+ */
+const MOEDAS = MOEDAS_SERVIDAS;
 
 export const tenantSchema = z.object({
   display_name: z.string().min(1).max(120),
@@ -72,6 +92,7 @@ export const tenantSchema = z.object({
     .or(z.literal("").transform(() => null)),
   timezone: z.string().min(1).max(64),
   locale: z.enum(LOCALES),
+  currency: z.enum(MOEDAS),
   media_retention_days: z.coerce.number().int().min(30).max(3650),
   dpo_email: z
     .string()
@@ -110,7 +131,7 @@ export const notificationPrefsSchema = z.object({
 });
 export type NotificationPrefsInput = z.infer<typeof notificationPrefsSchema>;
 
-const customFieldSchema = z.object({
+export const customFieldSchema = z.object({
   key: z
     .string()
     .min(1)
@@ -134,6 +155,7 @@ const customFieldSchema = z.object({
     .array(z.object({ value: z.string().min(1), label: z.string().min(1) }))
     .optional(),
 });
+export type CustomFieldDef = z.infer<typeof customFieldSchema>;
 
 export const pipelineConfigPatchSchema = z.object({
   vocabulary: z
@@ -148,3 +170,103 @@ export const pipelineConfigPatchSchema = z.object({
   lost_reasons: z.array(z.string().min(1).max(80)).max(50).optional(),
 });
 export type PipelineConfigPatch = z.infer<typeof pipelineConfigPatchSchema>;
+
+/**
+ * A marca da INSTALAÇÃO (`platform_branding`) — o que a server action aceita.
+ *
+ * `.nullable()` em cada campo, e não `.optional()`: aqui `null` é um valor com
+ * significado ("apague este campo, quero o padrão do produto"), e ausência
+ * significaria "não mexa". Colapsar os dois faria a tela não ter como limpar o
+ * logo depois de configurá-lo.
+ *
+ * `accent_hex` valida com `ehHexValido` — o validador do domínio, o MESMO que
+ * `lib/branding/schema.ts` usa — e a action normaliza antes de gravar. Um regex
+ * novo escrito aqui divergiria do CHECK do banco (`^#[0-9a-f]{6}$`) e o operador
+ * receberia um `23514` cru na tela em vez de "essa cor não é válida".
+ */
+export const platformBrandingSchema = z.object({
+  app_name: z.string().trim().min(1).max(120).nullable(),
+  logo_url: z.string().trim().url().max(2048).nullable(),
+  accent_hex: z
+    .string()
+    .trim()
+    .refine(ehHexValido, { message: "Use uma cor no formato #rrggbb" })
+    .nullable(),
+  show_powered_by: z.boolean(),
+});
+export type PlatformBrandingInput = z.infer<typeof platformBrandingSchema>;
+
+/**
+ * A marca da ORGANIZAÇÃO (`organizations.settings.branding`) — o cliente final
+ * do revendedor, e o que a Server Action `updateMarcaDaOrganizacao` aceita.
+ *
+ * `.nullable()` pelo mesmo motivo do schema de cima: aqui `null` é um valor com
+ * significado ("apague este campo, quero o que vem da instalação") e ausência
+ * significaria "não mexa". Colapsar os dois deixaria o admin sem como voltar
+ * atrás depois de escolher uma cor.
+ *
+ * SEM `logo_url`: upload é a fase seguinte (bucket, policies, limite de tamanho,
+ * delete-on-replace). Um campo aqui hoje seria contrato oferecido e não
+ * implementado — a precedência por campo garante que o logo da instalação
+ * continua valendo enquanto isso.
+ *
+ * `accent_hex` valida com `ehHexValido` — o MESMO validador do domínio que
+ * `lib/branding/schema.ts` usa — e a action normaliza antes de gravar. Um regex
+ * novo escrito aqui divergiria da regex da função SQL (`^#[0-9a-f]{6}$`) e o
+ * admin receberia um `22023` cru na tela em vez de "essa cor não é válida".
+ */
+export const marcaDaOrganizacaoSchema = z.object({
+  app_name: z.string().trim().min(1).max(120).nullable(),
+  accent_hex: z
+    .string()
+    .trim()
+    .refine(ehHexValido, { message: "Use uma cor no formato #rrggbb" })
+    .nullable(),
+});
+export type MarcaDaOrganizacaoInput = z.infer<typeof marcaDaOrganizacaoSchema>;
+
+/** Prazos por organização. Leitura legada degrada; escrita usa schema estrito. */
+export const agendaSettingsWriteSchema = z.strictObject({
+  confirmation_delay_minutes: z.number().int().min(1).max(10080),
+  unknown_protection_minutes: z.number().int().min(1).max(10080),
+  /**
+   * Quanto tempo um pedido não confirmado segura o horário.
+   *
+   * ⚠️ `.default()` e não obrigatório: este schema é `strictObject`, e torná-lo
+   * exigido faria TODO PATCH já escrito (que manda só os dois campos de cima)
+   * passar a falhar — o tipo de mudança que a doutrina de packaging proíbe,
+   * porque quebra quem já instalou sem nenhum aviso.
+   *
+   * 24h é o default porque quem confere a fila uma vez por dia não pode perder
+   * pedido. O mínimo é 15 minutos: abaixo disso a expiração corre com quem está
+   * decidindo naquele instante.
+   */
+  pending_expires_after_minutes: z.number().int().min(15).max(10080).default(1440),
+}).refine(v => v.unknown_protection_minutes >= v.confirmation_delay_minutes, {message:"O prazo de proteção deve ser maior que o prazo de confirmação."});
+export const agendaSettingsSchema = agendaSettingsWriteSchema.catch({confirmation_delay_minutes:10,unknown_protection_minutes:1440,pending_expires_after_minutes:1440});
+
+/**
+ * `organizations.settings.crm` — regras de CRM que cada organização liga para si.
+ *
+ * `cliente_pela_agenda`: quem tem horário marcado vira cliente (migration 0262).
+ * Nasce DESLIGADA em toda organização, e só um administrador a liga, por
+ * `fn_definir_cliente_pela_agenda` (nunca por UPDATE em `organizations`).
+ *
+ * ⚠️ SÓ O BOOLEANO `true` LIGA — e é a mesma régua do banco, que compara
+ * `settings->'crm'->'cliente_pela_agenda' = 'true'::jsonb` em
+ * `fn_marcar_contato_como_cliente`. Ausente, `false`, a string `"true"` ou
+ * qualquer lixo é desligado aqui E lá. Se os dois idiomas divergissem, a tela
+ * mostraria o selo de uma regra que o trigger não aplica.
+ */
+export const crmSettingsSchema = z
+  .object({ cliente_pela_agenda: z.boolean().catch(false) })
+  .catch({ cliente_pela_agenda: false });
+
+/** A regra "cliente pela agenda" está ligada nesta organização? Nunca lança. */
+export function clientePelaAgendaLigado(settings: unknown): boolean {
+  const crm =
+    settings && typeof settings === "object" && !Array.isArray(settings)
+      ? (settings as Record<string, unknown>).crm
+      : undefined;
+  return crmSettingsSchema.parse(crm ?? {}).cliente_pela_agenda === true;
+}

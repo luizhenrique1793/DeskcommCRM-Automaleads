@@ -1,3 +1,4 @@
+import { requireSupportWrite } from "@/lib/impersonate/support";
 /**
  * POST /api/v1/conversations/[id]/claim — atendente assume a conversa.
  *
@@ -8,17 +9,23 @@
  * G3-01: a mudança de dono acontece via rpc `fn_conversation_assign`
  * (migration 0031), que faz o UPDATE condicional + INSERT do evento em
  * `conversation_assignment_events` (reason='claim') na MESMA transação.
+ *
+ * 0173: essa mesma RPC agora grava `bot_silenced_until='infinity'` — assumir CALA
+ * o atendimento automático. Antes disso o motor moderno nunca soube que alguém
+ * assumiu (ele não lê `assignee_kind`) e os dois atendiam o mesmo cliente.
  */
 import { randomUUID } from "node:crypto";
 import { type NextRequest } from "next/server";
 
 import { audit } from "@/lib/audit";
+import { registrarTrocaDeComando } from "@/lib/inbox/atividade-de-comando";
 import { ApiError } from "@/lib/api/types";
 import { ok, fail } from "@/lib/api/wrappers";
 import { requireRole } from "@/lib/auth/require-role";
 import { claimConversationSchema, validateRequest } from "@/lib/schemas";
 import { createClient } from "@/lib/supabase/server";
 import type { Conversation } from "@/lib/types/messaging";
+import { traduzir } from "@/lib/i18n/dicionario";
 
 export const dynamic = "force-dynamic";
 
@@ -27,6 +34,9 @@ interface RouteCtx {
 }
 
 export async function POST(req: NextRequest, ctx: RouteCtx): Promise<Response> {
+  const supportDenied = await requireSupportWrite();
+  if (supportDenied) return supportDenied;
+
   const requestId = randomUUID();
   const { id } = await ctx.params;
   const supabase = await createClient();
@@ -34,6 +44,7 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<Response> {
   // spec 13 §4: escrita é agent+ (viewer é read-only).
   const authz = await requireRole("agent", { requestId, resource: "conversations" });
   if (!authz.ok) return authz.response;
+  const t = (texto: string) => traduzir(texto, authz.user.idioma);
   const user = authz.user;
 
   let input;
@@ -65,7 +76,7 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<Response> {
   }
   const row = data?.[0];
   if (!row) {
-    return fail("state_conflict", "Outro atendente já assumiu.", 409, { requestId });
+    return fail("state_conflict", t("Outro atendente já assumiu."), 409, { requestId });
   }
 
   const conv = row as unknown as Conversation;
@@ -91,6 +102,21 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<Response> {
     .then(({ error: emitErr }) => {
       if (emitErr) console.error("[conversation.claim] emit_event failed", emitErr.message);
     });
+
+  // A linha na TELA. O `emit_event` acima e o audit não são lidos por atendente
+  // nenhum; sem esta chamada, assumir uma conversa era invisível na timeline —
+  // grep por atividade nas três rotas de troca de dono devolvia zero.
+  await registrarTrocaDeComando({
+    supabase,
+    organizationId: conv.organization_id,
+    conversationId: conv.id,
+    contactId: conv.contact_id,
+    tipo: "conversation_claimed",
+    actor: { type: "user", id: user.id, role: authz.org.role },
+    // Canônico em português: quem traduz é a LEITURA (`t(item.reason)`). Ver o
+    // bloco "vocabulario de dominio persistido" em `lib/i18n/dicionario.ts`.
+    motivo: "Assumiu o atendimento desta conversa",
+  });
 
   return ok(conv, { requestId });
 }

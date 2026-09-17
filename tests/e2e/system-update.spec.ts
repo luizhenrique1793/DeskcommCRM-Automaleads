@@ -6,13 +6,27 @@
  * experiência na tela (rodapé → aviso → clique → progresso → desfecho), não
  * o bash em si — esse é provado na VPS (ver o brief da task).
  *
+ * ═══ QUEM É O DONO AQUI, E POR QUE NÃO É O `e2e-admin` ═══
+ *
+ * O dono do servidor desta spec é `e2e-dono@deskcomm.test`, um usuário
+ * DEDICADO. Antes ele era o `e2e-admin`, que 10 outras specs usam como *admin
+ * de tenant* — e como nenhum seed revogava a promoção e as duas partes do job
+ * `e2e` compartilham banco sem reset, a parte 2 inteira herdava um admin com
+ * escape de plataforma. O escape abre justamente a tela que ESTA spec mede
+ * (`app/app/settings/atualizacao/page.tsx:16` faz `notFound()` sem a flag) e o
+ * `/admin/*` inteiro; a medição do que muda e do que NÃO muda está em
+ * `tests/e2e/utils/precondicao.ts`.
+ *
+ * Trocar de usuário remove a CAUSA. Limpar depois não serviria: `afterAll` não
+ * roda quando a spec estoura.
+ *
  * Pré-requisitos:
  * - `.e2e-creds.json` (o spec roda `seed-e2e-credentials.ts` sozinho se
  *   ausente/incompleto, como `rbac-roles.spec.ts`) + `seed-e2e-system-update.ts`
- *   (promove o usuário `admin` do seed a dono do servidor via `platform_admins`
- *   — é uma superfície diferente do role de organização — e limpa
- *   `system_version`/`system_update_runs` pra não colidir com o índice único
- *   de run em andamento).
+ *   (promove o usuário `dono` do seed a dono do servidor via `platform_admins`
+ *   — é uma superfície diferente do role de organização —, REVOGA a promoção do
+ *   `admin` e limpa `system_version`/`system_update_runs` pra não colidir com o
+ *   índice único de run em andamento).
  * - `INTERNAL_SECRET` no ambiente do Playwright (o segredo que autentica o
  *   agente do host em `/api/v1/system/agent`). Sem ele, o heartbeat simulado
  *   nem autenticaria — o arquivo INTEIRO pula em vez de falhar por motivo
@@ -38,13 +52,17 @@ interface E2ECreds {
   password: string;
   users: Record<string, { id: string; email: string; role: string }>;
   admin_totp?: { factor_id: string; secret: string };
+  dono_totp?: { factor_id: string; secret: string };
 }
 
 function loadCreds(): E2ECreds {
   const needsSeed = (): boolean => {
     if (!fs.existsSync(CREDS_PATH)) return true;
     const c = JSON.parse(fs.readFileSync(CREDS_PATH, "utf8")) as E2ECreds;
-    return !c.users?.agent || !c.admin_totp?.secret;
+    // `dono` entra na condição junto com `agent`: um `.e2e-creds.json` gerado
+    // antes do quinto usuário existir passaria no teste antigo e faria o seed
+    // seguinte estourar com "creds.users.dono ausente".
+    return !c.users?.agent || !c.users?.dono || !c.admin_totp?.secret || !c.dono_totp?.secret;
   };
   if (needsSeed()) {
     execFileSync("npx", ["tsx", "scripts/seed-e2e-credentials.ts"], { stdio: "inherit" });
@@ -160,11 +178,76 @@ function resetEstado(): void {
   execFileSync("npx", ["tsx", "scripts/seed-e2e-system-update.ts"], { stdio: "inherit" });
 }
 
+test("quem pula versões vê os avisos de TODAS elas, não só o da mais nova", async ({
+  page,
+  request,
+}) => {
+  // O defeito que este caso guarda: a tela mostrava só a seção da versão-alvo.
+  // Quem estava na 1.0.0 e ia para a 1.2.0 nunca lia a 1.1.0 — e no caso real
+  // (commit ac9472c5) a versão do meio trazia uma instrução para o operador
+  // apagar a conexão que estava funcionando.
+  const changelog = [
+    "## [1.2.0] — 2026-08-03",
+    "",
+    "**⚠️ Requer atenção**",
+    "",
+    "Rode o comando de migração antes.",
+    "",
+    "### Adicionado",
+    "",
+    "- Coisa da versão nova.",
+    "",
+    "## [1.1.0] — 2026-08-02",
+    "",
+    "**⚠️ Requer atenção**",
+    "",
+    "Reconecte o número depois.",
+    "",
+    "### Corrigido",
+    "",
+    "- Conserto da versão do meio.",
+    "",
+    "## [1.0.0] — 2026-08-01",
+    "",
+    "- Primeira versão.",
+    "",
+  ].join("\n");
+
+  await loginWithTotp(page, creds.users.dono!.email, creds.dono_totp!.secret);
+  await heartbeat(request, { latest_version: "1.2.0", current_version: "1.0.0", changelog });
+  await page.goto("/app/settings/atualizacao");
+
+  // Os DOIS avisos visíveis, o da alvo e o da versão do meio, cada um nomeando
+  // de onde veio.
+  await expect(page.getByText(/Rode o comando de migração antes/)).toBeVisible();
+  await expect(page.getByText(/Reconecte o número depois/)).toBeVisible();
+  await expect(page.getByText(/Da versão 1\.1\.0/)).toBeVisible();
+
+  // E os dois ANTES do botão — medido por ferramenta, nunca a olho: aviso que
+  // aparece depois do clique não é aviso.
+  const y = async (rx: RegExp) => (await page.getByText(rx).boundingBox())!.y;
+  const botao = (await page.getByRole("button", { name: /atualizar agora/i }).boundingBox())!.y;
+  expect(await y(/Rode o comando de migração antes/)).toBeLessThan(botao);
+  expect(await y(/Reconecte o número depois/)).toBeLessThan(botao);
+
+  // O corpo da versão-alvo fica aberto; o da intermediária, recolhido. Texto
+  // dentro de um `<details>` FECHADO não é visível para o Playwright, então o
+  // caso abre e prova pelo estado real do elemento — e nunca põe um AVISO ali
+  // dentro, que é o defeito que esta tela existe para consertar.
+  await expect(page.getByText(/Coisa da versão nova/)).toBeVisible();
+  const recolhido = page.locator("details", { hasText: "Versão 1.1.0" });
+  await recolhido.locator("summary").click();
+  await expect(recolhido).toHaveJSProperty("open", true);
+  await expect(page.getByText(/Conserto da versão do meio/)).toBeVisible();
+
+  await page.screenshot({ path: ".superpowers/evidence/faixa-de-versoes.png" });
+});
+
 test("o dono vê a versão nova na sidebar e atualiza pela tela", async ({ page, request }) => {
   const changelog =
     "## [1.1.0] — 2026-08-02\n\n**⚠️ Requer atenção**\n\nReconecte o número depois.\n\n### Adicionado\n\n- Botão de atualizar pela tela.\n";
 
-  await loginWithTotp(page, creds.users.admin!.email, creds.admin_totp!.secret);
+  await loginWithTotp(page, creds.users.dono!.email, creds.dono_totp!.secret);
   await heartbeat(request, { latest_version: "1.1.0", changelog });
   await page.goto("/app/inbox");
 
@@ -188,30 +271,68 @@ test("o dono vê a versão nova na sidebar e atualiza pela tela", async ({ page,
   expect(atencao!.y).toBeLessThan(botao!.y);
 
   await page.getByRole("button", { name: /atualizar agora/i }).click();
-  await expect(page.getByRole("heading", { name: /atualizando para a versão 1\.1\.0/i })).toBeVisible();
-  await expect(page.getByText(/Guardando uma cópia de segurança/)).toBeVisible();
-  await page.screenshot({ path: ".superpowers/evidence/task9-2-atualizando.png" });
+
+  // ── PONTA 1: o clique NÃO começa a atualização ──────────────────────────
+  //
+  // O `POST /update` só registra o pedido; quem executa é o `agent.sh`, que
+  // roda de 5 em 5 minutos no host. Este caso AFIRMAVA o defeito: esperava a
+  // lista de passos ("Guardando uma cópia de segurança") logo depois do clique
+  // — a tela dizia que o sistema estava trabalhando quando ele ainda nem tinha
+  // recebido a ordem, e ficava assim, imóvel, por até cinco minutos.
+  await expect(
+    page.getByRole("heading", { name: /pedido enviado/i }),
+    "logo após o clique a tela ainda afirma que está atualizando",
+  ).toBeVisible();
+  await expect(page.getByText(/ficar parada nesse tempo é normal/i)).toBeVisible();
+  await expect(page.getByTestId("espera-decorrida")).toBeVisible();
+  await page.screenshot({ path: ".superpowers/evidence/task9-2a-pedido-enviado.png" });
 
   // O agente do host detecta o pedido no próximo heartbeat...
   const { data } = await heartbeat(request, { latest_version: "1.1.0" });
   expect(data.update_requested).toBe(true);
   expect(data.run_id).not.toBeNull();
 
+  // ...e aí sim a lista de passos aparece, porque aí sim há um passo.
+  await runProgress(request, data.run_id!, "backup");
+  // ⏱️ 20s, e não os 5s do padrão. ESTE é o único ponto do arquivo em que a tela
+  // descobre a mudança pelo POLL, sem recarga — e o poll é de 5 segundos
+  // (`useSystemVersion({ refetchInterval: 5_000 })`). Timeout de 5s contra ciclo
+  // de 5s é cara ou coroa: passou nas rodadas de CI de 16:25 e 16:54 e reprovou
+  // na de 17:21, sem ninguém tocar neste teste entre elas. As demais asserções
+  // do arquivo vêm depois de `page.reload()`, onde o dado já chega na carga.
+  await expect(
+    page.getByRole("heading", { name: /atualizando para a versão 1\.1\.0/i }),
+  ).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByText(/Guardando uma cópia de segurança/)).toBeVisible({
+    timeout: 20_000,
+  });
+  await page.screenshot({ path: ".superpowers/evidence/task9-2b-atualizando.png" });
+
   // ...executa (fora deste teste — é o `agent.sh`/`update.sh` reais, provados
   // na task 8) e reporta o desfecho.
-  const runResult = await request.post("/api/v1/system/agent", {
-    headers: { Authorization: `Bearer ${SECRET}` },
-    data: { kind: "run_result", run_id: data.run_id, status: "success", log_tail: "ok" },
-  });
-  expect(runResult.status()).toBe(200);
+  await runResult(request, data.run_id!, "success", "ok");
 
-  // Depois do sucesso, o agente reinicia e o próximo heartbeat já anuncia a
-  // versão nova como a instalada — é o que a tela usa pra sair do estado
-  // "atualizando" e mostrar "você está em dia".
+  // ── PONTA 2: terminou, e o host ainda não teve chance de contar ─────────
+  //
+  // `run_result` fecha o run e NÃO escreve `current_version` — quem escreve é o
+  // heartbeat, até 5 minutos depois. Sem o conserto, esta recarga trazia de
+  // volta "Versão 1.1.0 disponível" e o botão "Atualizar agora", oferecendo a
+  // versão que acabou de ser instalada. Repare que NENHUM heartbeat foi enviado
+  // entre o `run_result` e esta linha: é exatamente a janela do defeito.
+  await page.reload();
+  await expect(
+    page.getByRole("heading", { name: /pronto — você está na versão 1\.1\.0/i }),
+    "a tela voltou oferecendo a versão que acabou de ser instalada",
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: /atualizar agora/i })).toHaveCount(0);
+  await page.screenshot({ path: ".superpowers/evidence/task9-3a-acabou-de-atualizar.png" });
+
+  // E quando o host finalmente confirma, a janela se fecha sozinha: volta o
+  // texto normal de quem está em dia, sem ninguém limpar estado nenhum.
   await heartbeat(request, { current_version: "1.1.0", latest_version: "1.1.0" });
   await page.reload();
-  await expect(page.getByRole("heading", { name: /você está na versão 1\.1\.0/i })).toBeVisible();
-  await page.screenshot({ path: ".superpowers/evidence/task9-3-em-dia.png" });
+  await expect(page.getByRole("heading", { name: /^você está na versão 1\.1\.0/i })).toBeVisible();
+  await page.screenshot({ path: ".superpowers/evidence/task9-3b-em-dia.png" });
 });
 
 test("quando a atualização falha, a tela nomeia a versão certa, mostra o log e dá saída", async ({
@@ -223,10 +344,16 @@ test("quando a atualização falha, a tela nomeia a versão certa, mostra o log 
   test.setTimeout(120_000);
   resetEstado();
   await heartbeat(request, { current_version: "1.0.0", latest_version: "1.1.0" });
-  await loginWithTotp(page, creds.users.admin!.email, creds.admin_totp!.secret);
+  await loginWithTotp(page, creds.users.dono!.email, creds.dono_totp!.secret);
   await page.goto("/app/settings/atualizacao");
   await page.getByRole("button", { name: /atualizar agora/i }).click();
-  await expect(page.getByRole("heading", { name: /atualizando para a versão 1\.1\.0/i })).toBeVisible();
+  // ⛔ NÃO é "Atualizando para a versão 1.1.0". O clique registra um PEDIDO; quem
+  // executa é o agente no host, que confere de poucos em poucos minutos — e a
+  // tela passou a dizer isso com todas as letras em vez de afirmar trabalho que
+  // ainda não começou. A versão de destino continua nomeada, que é o que este
+  // teste vigia.
+  await expect(page.getByRole("heading", { name: /pedido enviado/i })).toBeVisible();
+  await expect(page.getByText(/Anotei o pedido de atualizar para a versão/)).toContainText("1.1.0");
 
   // ── Falha COM rollback ─────────────────────────────────────────────────────
   const primeiro = await heartbeat(request, { latest_version: "1.1.0" });
@@ -277,7 +404,7 @@ test("quando a atualização falha, a tela nomeia a versão certa, mostra o log 
   await heartbeat(request, { current_version: "1.1.0", latest_version: "1.2.0" });
   await page.reload();
   await page.getByRole("button", { name: /atualizar agora/i }).click();
-  await expect(page.getByRole("heading", { name: /atualizando para a versão 1\.2\.0/i })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /pedido enviado/i })).toBeVisible();
 
   const segundo = await heartbeat(request, { current_version: "1.1.0", latest_version: "1.2.0" });
   expect(segundo.data.update_requested).toBe(true);
@@ -308,7 +435,7 @@ test("quando a atualização falha, a tela nomeia a versão certa, mostra o log 
   await page.getByRole("button", { name: /atualizar agora/i }).click();
   // Espera a tela confirmar o pedido antes de bater o heartbeat: sem isso, o
   // agente simulado corre com o POST do clique e não acha run nenhum.
-  await expect(page.getByRole("heading", { name: /atualizando para a versão 1\.2\.0/i })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /pedido enviado/i })).toBeVisible();
   const terceiro = await heartbeat(request, { current_version: "1.1.0", latest_version: "1.2.0" });
   await runResult(
     request,
@@ -327,6 +454,31 @@ test("quando a atualização falha, a tela nomeia a versão certa, mostra o log 
   await page.getByText(/Detalhes técnicos/).click();
   await expect(page.getByText(/é ANTERIOR à que já está instalada/)).toBeVisible();
   await page.screenshot({ path: ".superpowers/evidence/final-4-sem-passo-reportado.png" });
+
+  // ── A falha que já foi SUPERADA por outro caminho solta a tela ────────────
+  //
+  // Sem este bloco, o conserto do #945 não tem guarda nenhuma: a spec acima
+  // reporta sempre uma versão que o run DESCREVE (from=1.1.0, to=1.2.0), e
+  // `superseded` só vira verdadeiro quando o host informa uma TERCEIRA versão.
+  // Medido antes de escrever: reverter o `falhaVigente` do UpdatePanel deixava
+  // este arquivo inteiro verde.
+  //
+  // O caso é o da instalação real que originou o PR: a falha é de dias atrás, o
+  // dono atualizou pelo terminal (`update.sh`), o servidor está numa versão que
+  // a tentativa nem menciona — e a tela precisa voltar a oferecer, senão o único
+  // jeito de sair do aviso é clicar no botão que ele mesmo escondeu.
+  //
+  // `latest_version` precisa ser MAIOR que a instalada: com as duas iguais, o
+  // botão sumiria por "Você está na versão X" (UpdatePanel.tsx:297) e o teste
+  // passaria pelo motivo errado.
+  await heartbeat(request, { current_version: "1.3.0", latest_version: "1.4.0" });
+  await page.reload();
+  await expect(
+    page.getByRole("heading", { name: /não deu certo/i }),
+    "a tela repetiu uma falha que o servidor já superou",
+  ).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /atualizar agora/i })).toBeVisible();
+  await page.screenshot({ path: ".superpowers/evidence/final-5-falha-superada.png" });
 });
 
 test("quando o host não conseguiu comparar, a tela não diz que está em dia", async ({
@@ -344,7 +496,7 @@ test("quando o host não conseguiu comparar, a tela não diz que está em dia", 
     off_release: false,
     compare_failed: true,
   });
-  await loginWithTotp(page, creds.users.admin!.email, creds.admin_totp!.secret);
+  await loginWithTotp(page, creds.users.dono!.email, creds.dono_totp!.secret);
   await page.goto("/app/settings/atualizacao");
 
   await expect(page.getByRole("heading", { name: /não consegui checar/i })).toBeVisible();
@@ -363,7 +515,7 @@ test("instalação à frente da versão publicada não vira tela quebrada nem al
   // consegue comparar. Não é defeito — e a tela não pode tratar como se fosse.
   resetEstado();
   await heartbeat(request, { current_version: "abc1234", latest_version: "", off_release: true });
-  await loginWithTotp(page, creds.users.admin!.email, creds.admin_totp!.secret);
+  await loginWithTotp(page, creds.users.dono!.email, creds.dono_totp!.secret);
 
   await page.goto("/app/inbox");
   await expect(page.getByRole("link", { name: /nova versão/i })).toHaveCount(0);
@@ -392,7 +544,7 @@ test("fork sem nenhuma release publicada não afirma 'à frente' sem base", asyn
     off_release: true,
     has_known_release: false,
   });
-  await loginWithTotp(page, creds.users.admin!.email, creds.admin_totp!.secret);
+  await loginWithTotp(page, creds.users.dono!.email, creds.dono_totp!.secret);
 
   await page.goto("/app/settings/atualizacao");
   await expect(

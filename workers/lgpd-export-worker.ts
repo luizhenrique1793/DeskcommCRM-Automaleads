@@ -29,7 +29,23 @@ import { env } from "@/lib/env";
 import { logger } from "@/lib/logger";
 import { collectExportData } from "@/lib/lgpd/export-collector";
 import { findLgpdRequest } from "@/lib/lgpd/repository";
-import { renderLgpdPdf } from "@/lib/lgpd/pdf-renderer";
+// IMPORT TARDIO, e a razão é o laço rápido do `event_log`.
+//
+// `lib/event-log/register-handlers.ts` — cujo próprio comentário pede "keep it
+// lightweight" — importa o handler da LGPD no topo, e ele importava este
+// arquivo, que importava o gerador de PDF, que arrasta `@react-pdf/renderer`
+// inteiro. Resultado: TODA montagem do laço carregava a pilha de PDF só para
+// registrar um handler que, na esmagadora maioria das rodadas, não roda.
+//
+// Isso deixou de ser só desperdício em 29/08, quando `@react-pdf/hyphenate`
+// passou a declarar `exports` sem a condição `require`: sob `tsx` (que é como o
+// worker roda, e diferente do vitest, que resolve pelo Vite) o import falhava,
+// `carregarDeps()` caía no catch, e o laço rápido MORRIA — 10 dias e três
+// releases, com a guarda 6/6 verde.
+//
+// O patch em `patches/` conserta a dependência e continua valendo. Este import
+// tardio conserta a CAUSA: o laço deixa de depender de PDF para existir. Um
+// depende de o pnpm aplicar o patch em todo ambiente; o outro, não.
 import { signPdfPades, isPadesConfigured } from "@/lib/lgpd/pades-signer";
 import {
   EmailNotConfigured,
@@ -38,6 +54,7 @@ import {
   sendExportEmail,
 } from "@/lib/lgpd/email-delivery";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { marcaDaSaida } from "@/lib/branding/saida";
 
 const MAX_ATTEMPTS = 3;
 const BUCKET = "lgpd-exports";
@@ -150,6 +167,7 @@ export async function processLgpdExport(event: EventRow): Promise<HandlerResult>
 
     // 4. Render PDF (with warning banner when unsigned).
     const padesConfigured = isPadesConfigured();
+    const { renderLgpdPdf } = await import("@/lib/lgpd/pdf-renderer");
     const pdfBuffer = await renderLgpdPdf(data, { unsignedWarning: !padesConfigured });
 
     // 5. Sign (stubbed when key missing).
@@ -243,11 +261,15 @@ export async function processLgpdExport(event: EventRow): Promise<HandlerResult>
     // 9. Send email (Resend). Failure here is retriable.
     let messageId: string | null = null;
     try {
+      // Classe A: há organização, então o e-mail diz quem PROCESSOU — a marca
+      // resolvida da org, e não a nossa. O PDF em anexo continua nomeando o
+      // controlador legal, de propósito (ver `lib/lgpd/pdf-renderer.tsx`).
       const sent = await sendExportEmail({
         to: deliveryEmail,
         requestId,
         signedUrl: signed.signedUrl,
         expiresAt,
+        marca: await marcaDaSaida(orgId),
       });
       messageId = sent.messageId;
     } catch (err) {

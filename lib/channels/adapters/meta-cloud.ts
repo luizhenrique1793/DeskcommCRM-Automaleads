@@ -19,9 +19,17 @@
  *    da bolha de voz. E a Meta **não converte** — quem manda mp3 com `voice:true` erra;
  *    o outro canal converte por nós, este não.
  */
+import { graphVersion } from "@/lib/graph-version";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { metaContactsPayload } from "@/lib/channels/meta/contact-card";
 import { resolveMetaCreds } from "../meta/credentials";
-import type { ChannelAdapter, ChannelHealth, OutboundEnvelope, RecipientInput } from "../types";
+import type {
+  ChannelAdapter,
+  ChannelHealth,
+  ChannelTenantScope,
+  OutboundEnvelope,
+  RecipientInput,
+} from "../types";
 
 /** Só dígitos. `+55 (31) 99896-6398` → `5531998966398`. */
 function toE164Digits(raw: string): string {
@@ -31,14 +39,22 @@ function toE164Digits(raw: string): string {
 /**
  * Credencial do ambiente — o caminho de instalação de número único.
  *
- * `isConfigured()` continua olhando só o env de propósito: ele responde "dá para
- * tentar?" de forma SÍNCRONA, e a resposta certa para uma instalação que gravou a
- * credencial na sessão vem do banco. Quem sabe disso é o `send`, que é async.
- * Devolver `false` aqui com sessão configurada faria o handler gravar `queued` sem
- * motivo — por isso o `send` resolve de novo, com a sessão, antes de desistir.
+ * O env continua sendo LIDO (`resolveMetaCreds`, que o `send` chama como
+ * fallback depois da sessão), mas ele já não é quem decide se o canal está
+ * configurado: essa pergunta não tem resposta síncrona honesta — ver
+ * `isConfigured`.
  */
 import { metaCredsFromEnv } from "../meta/credentials";
 export { metaCredsFromEnv as getMetaCreds };
+
+/** `kind: "contact"` → objeto `contacts` da Cloud API. */
+function contactPayload(env: OutboundEnvelope): Record<string, unknown> | null {
+  if (env.kind !== "contact" || !env.contact) return null;
+  return {
+    type: "contacts",
+    contacts: metaContactsPayload(env.contact.fullName, env.contact.phoneNumber),
+  };
+}
 
 /** `kind` do envelope → objeto de mídia da Cloud API. */
 function mediaPayload(env: OutboundEnvelope): Record<string, unknown> | null {
@@ -81,28 +97,28 @@ export const metaCloudAdapter: ChannelAdapter = {
   },
 
   /**
-   * DÍVIDA CONHECIDA, deixada de propósito — não é descuido.
+   * SEMPRE `true`, e isso não é preguiça: para este canal a pergunta não tem
+   * resposta síncrona honesta.
    *
-   * A credencial deste canal também pode viver na SESSÃO (a tela de "Conectar
-   * canal oficial" grava `meta_token_encrypted` desde a 0118), e `isConfigured`
-   * é síncrono: não consulta o banco. Numa instalação que conectou pela tela e
-   * não escreveu `.env`, isto devolve `false`, e o handler (`_handler.ts:370`)
-   * grava `queued` com `queued_reason: meta_not_configured` sem nunca chamar
-   * `send` — mensagem parada no inbox, sem erro, com o canal conectado.
+   * A credencial vive na SESSÃO (a tela de "Conectar canal oficial" grava
+   * `meta_token_encrypted` desde a 0118), e `isConfigured` é síncrono — não
+   * consulta o banco. Olhar só o env respondia "não configurado" para toda
+   * instalação que conectou pela tela: o handler gravava `queued` com
+   * `queued_reason: meta_not_configured` sem NUNCA chamar `send`, e a mensagem
+   * ficava parada no inbox, sem erro, com o canal conectado e funcionando
+   * (issue #674). O canal intermediado pagou o mesmo defeito antes e resolveu
+   * assim — ver `adapters/zernio.ts`, que adotou este contrato primeiro.
    *
-   * O canal intermediado JÁ passou por isso e resolveu devolvendo `true` e
-   * fazendo o `send` lançar (ver `adapters/zernio.ts`). O mesmo conserto cabe
-   * aqui, mas ele muda um contrato com dois testes explícitos
-   * (`tests/unit/channel-adapter-meta.test.ts`) cuja justificativa escrita é
-   * "mesmo contrato do outro canal" — justificativa que o fork já não sustenta.
-   *
-   * Trocar contrato testado exige uma mudança própria, com os testes revistos de
-   * propósito e não de passagem. Fica registrado aqui para quem for fazê-la.
+   * O custo de responder `true` é que `send` precisa ser quem desiste — e ele
+   * LANÇA `meta_not_configured` em vez de devolver `{externalId: null}`, para o
+   * handler gravar `queued` com o motivo em vez de um `sent` sem id, que diria
+   * "enviado" para algo que nunca saiu. O fallback de ambiente para instalações
+   * legadas segue vivo DENTRO do `send` (`resolveMetaCreds`): sessão primeiro,
+   * env depois.
    */
   isConfigured(): boolean {
-    // Síncrono por contrato. Com credencial na sessão, quem confirma é o `send`
-    // (async) — ver o comentário acima.
-    return metaCredsFromEnv() !== null;
+    // Quem decide é `send()`, que pode consultar o banco. Ver o comentário.
+    return true;
   },
 
   /**
@@ -123,11 +139,16 @@ export const metaCloudAdapter: ChannelAdapter = {
    * checagem olha os dois. Erro de rede devolve `reachable: false` sem status:
    * uma oscilação virando "canal caído" ensinaria o operador a ignorar o aviso.
    */
-  async checkHealth(input: { sessionRef: string }): Promise<ChannelHealth> {
-    const creds = await resolveMetaCreds(createAdminClient(), input.sessionRef);
+  async checkHealth(
+    input: ChannelTenantScope & { sessionRef: string },
+  ): Promise<ChannelHealth> {
+    const creds = await resolveMetaCreds(createAdminClient(), {
+      organizationId: input.organizationId,
+      phoneNumberId: input.sessionRef,
+    });
     if (!creds) return { reachable: false, status: null, detail: "sem_credencial_para_a_sessao" };
 
-    const version = process.env.META_GRAPH_VERSION ?? "v22.0";
+    const version = graphVersion();
     try {
       const res = await fetch(
         `https://graph.facebook.com/${version}/${input.sessionRef}?fields=display_phone_number,quality_rating`,
@@ -164,16 +185,108 @@ export const metaCloudAdapter: ChannelAdapter = {
     unknownError: "meta_unknown",
   },
 
+  async fetchInboundMedia(input): Promise<{ buffer: Buffer; mime: string }> {
+    const creds = await resolveMetaCreds(createAdminClient(), {
+      organizationId: input.organizationId,
+      phoneNumberId: input.sessionRef,
+    });
+    if (!creds) {
+      throw new Error("meta_not_configured: sem credencial para baixar a mídia.");
+    }
+
+    const prefix = "meta-media:";
+    if (!input.url.startsWith(prefix)) {
+      throw new Error("meta_media_invalid_ref: ponte não reconhecido.");
+    }
+    const mediaId = input.url.slice(prefix.length);
+    if (!/^[A-Za-z0-9._~-]+$/.test(mediaId)) {
+      throw new Error("meta_media_invalid_ref: media_id inválido.");
+    }
+
+    const headers = { Authorization: `Bearer ${creds.token}` };
+    const lookup = await fetch(
+      `https://graph.facebook.com/${creds.graphVersion}/${encodeURIComponent(mediaId)}`,
+      { headers, signal: AbortSignal.timeout(15_000) },
+    );
+    const metadata = (await lookup.json().catch(() => ({}))) as {
+      url?: string;
+      mime_type?: string;
+      error?: { code?: number; message?: string };
+    };
+    if (!lookup.ok || metadata.error || !metadata.url) {
+      const detalhe = metadata.error?.message ?? lookup.statusText ?? "sem URL";
+      throw new Error(
+        `meta_media_lookup_failed: ${metadata.error?.code ?? lookup.status} ${detalhe}`.trim(),
+      );
+    }
+
+    // ⚠️ ALLOWLIST DE HOST, e ela é fail-closed de propósito: a `url` vem da
+    // resposta da Graph API, e seguir cegamente uma URL que chegou de fora é
+    // SSRF — mesmo vindo de um endereço autenticado.
+    //
+    // O sufixo, e não o host exato. O `lookaside.fbsbx.com` é o que a
+    // documentação da Meta cita, e era o que estava aqui; a leitura mais ampla
+    // (inclusive implementações de referência) descreve a mídia saindo também de
+    // hosts `*.fbcdn.net`. Não consegui MEDIR isso — não há conta Meta nesta
+    // casa —, e essa incerteza decide a direção do erro: um host legítimo
+    // recusado faz a mídia NUNCA chegar, com uma mensagem que parece problema de
+    // segurança e manda quem opera investigar o lugar errado. Um sufixo da Meta
+    // a mais não abre superfície nova.
+    //
+    // Se algum dia a lista precisar crescer de novo, cresça por SUFIXO de
+    // domínio da Meta — nunca para host arbitrário, e nunca sem `https:`.
+    const HOSTS_DE_MIDIA_DA_META = [".fbsbx.com", ".fbcdn.net"] as const;
+    const mediaUrl = new URL(metadata.url);
+    const hostPermitido = HOSTS_DE_MIDIA_DA_META.some(
+      (sufixo) => mediaUrl.hostname === sufixo.slice(1) || mediaUrl.hostname.endsWith(sufixo),
+    );
+    if (mediaUrl.protocol !== "https:" || !hostPermitido) {
+      throw new Error(
+        `meta_media_lookup_failed: host de mídia inesperado (${mediaUrl.protocol}//${mediaUrl.hostname}).`,
+      );
+    }
+
+    const download = await fetch(mediaUrl.toString(), {
+      headers,
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!download.ok) {
+      throw new Error(`meta_media_download_failed: ${download.status} ${download.statusText}`.trim());
+    }
+
+    const buffer = Buffer.from(await download.arrayBuffer());
+    const mime =
+      download.headers.get("content-type")?.split(";")[0]?.trim() ||
+      metadata.mime_type ||
+      input.hintMime ||
+      "application/octet-stream";
+    return { buffer, mime };
+  },
+
   async send(envelope: OutboundEnvelope): Promise<{ externalId: string | null }> {
     // Sessão primeiro, env como fallback. O `sessionRef` do canal oficial É o
     // `phone_number_id` (ver `resolveSessionRef`), então ele é a chave da busca.
-    const creds = await resolveMetaCreds(createAdminClient(), envelope.sessionRef);
-    // Mesmo contrato do outro canal: sem credencial é NOOP, não exceção. A UI mostra
-    // o banner de "canal não conectado"; transformar em erro mudaria comportamento.
-    if (!creds) return { externalId: null };
+    const creds = await resolveMetaCreds(createAdminClient(), {
+      organizationId: envelope.organizationId,
+      phoneNumberId: envelope.sessionRef,
+    });
+    // LANÇA, não devolve null: com `isConfigured` sempre true, quem desiste é
+    // este ponto — e `{externalId: null}` faria o handler gravar `sent` sem id,
+    // dizendo "enviado" para algo que nunca saiu. O handler traduz o prefixo
+    // `meta_not_configured` para `queued` com o motivo: credencial ausente é
+    // canal ainda não conectado, não falha desta mensagem.
+    if (!creds) {
+      throw new Error(
+        "meta_not_configured: nenhuma credencial para esta sessão (nem na sessão, nem no ambiente).",
+      );
+    }
 
-    const corpo = mediaPayload(envelope) ?? { type: "text", text: { body: envelope.body ?? "" } };
+    const corpo =
+      contactPayload(envelope) ??
+      mediaPayload(envelope) ??
+      { type: "text", text: { body: envelope.body ?? "" } };
 
+    await envelope.beforeSend?.();
     const res = await fetch(
       `https://graph.facebook.com/${creds.graphVersion}/${creds.phoneNumberId}/messages`,
       {

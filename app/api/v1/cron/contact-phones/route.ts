@@ -47,6 +47,7 @@ import {
 } from "@/lib/channels";
 import { env } from "@/lib/env";
 import { logger } from "@/lib/logger";
+import { canonicalPhoneBR } from "@/lib/channels/phone-variants";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export const dynamic = "force-dynamic";
@@ -109,7 +110,7 @@ async function handle(req: NextRequest): Promise<Response> {
       const { data: afetadas } = await admin
         .from("contacts")
         .update({
-          ...(phone ? { phone_number: phone } : {}),
+          ...(phone ? { phone_number: canonicalPhoneBR(phone) } : {}),
           phone_lookup_at: new Date().toISOString(),
         })
         .eq("id", c.id)
@@ -172,7 +173,11 @@ async function handle(req: NextRequest): Promise<Response> {
 
     let phone: string | null = null;
     try {
-      phone = await adapter.resolvePhoneForIdentity({ sessionRef, identity: c.wa_identity });
+      phone = await adapter.resolvePhoneForIdentity({
+        organizationId: c.organization_id,
+        sessionRef,
+        identity: c.wa_identity,
+      });
     } catch (err) {
       // Falha de rede não é "não existe": carimba e tenta de novo no ciclo
       // seguinte, sem derrubar o lote inteiro por um contato.

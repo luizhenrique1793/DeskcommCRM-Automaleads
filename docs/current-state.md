@@ -5,10 +5,35 @@ status: draft
 last_updated: 2026-07-29
 generated_by: auditoria documental (Claude Code) — leitura de código, HANDOFFs, plan/, loop/, CI
 confidence: média-alta (métricas de código são CONFIRMADO; estado de épico vem dos HANDOFFs, que são auto-relatados)
-audited_against: origin/main @ 789dfa6 (v1.0.0, 2026-07-27)
+audited_against: origin/main @ 789dfa6 (v1.0.0, 2026-07-29)
 ---
 
 # Estado atual — DeskcommCRM
+
+> # ⚠️ ESTE DOCUMENTO É UM RETRATO, NÃO O ESTADO DE HOJE
+>
+> **Ele descreve `origin/main` no commit `789dfa6` (v1.0.0, 2026-07-29).** Os números,
+> contagens e vereditos abaixo conferem **contra aquele commit** — não contra o que está na
+> `main` agora. Entre um e outro há **1.014 commits e 71 migrations** (medido em 2026-08-14).
+>
+> **Nada aqui é mantido.** É deliberado, e é a alternativa honesta: um retrato datado nunca
+> mente, enquanto um documento atualizado uma vez volta a mentir na semana seguinte — e sem
+> aviso, porque a atualização recente faz o leitor confiar mais.
+>
+> **Antes de agir sobre qualquer linha, remeça.** Uma auditoria de 2026-08-14 encontrou
+> 40 afirmações desatualizadas só neste arquivo — várias dizendo que falta algo que já foi
+> feito. Os comandos de medição de cada uma estão em
+> [`audits/2026-08-14-afirmacoes-de-estado.md`](audits/2026-08-14-afirmacoes-de-estado.md).
+>
+> Precisa do estado de agora? Meça na fonte. Para o que este documento mais cita:
+>
+> ```bash
+> gh api repos/melgarafael/DeskcommCRM/branches/main/protection \
+>   --jq '.required_status_checks.contexts'      # os checks obrigatórios
+> pnpm typecheck && pnpm lint && pnpm lint:channels && pnpm test:unit && pnpm test:shell
+> ```
+
+
 
 Este documento existe porque "o que está pronto" estava espalhado em 5 `HANDOFF-*.md`
 na raiz, `plan/progress.md`, `loop/checkpoints/`, `tasks/todo.md` e o roadmap do README —
@@ -118,9 +143,39 @@ funil** (só de etapas). O primeiro é bug de primeira impressão em mobile.
 
 Estes são achados de código/config verificados nesta auditoria, não relatos.
 
+### 4.0 O agente de IA nunca recebia atualização 🔴 — RESOLVIDO em 2026-08-13
+
+Fica no topo por gravidade e porque é o tipo de defeito que este documento existe para
+tornar visível: durou dois meses, atingia **toda** instalação, e nada na tela, no log ou no
+CI dizia isso.
+
+O serviço `worker` do `docker-compose.prod.yml` — o runtime do agente de IA, e o único
+consumidor de `ai_agent.dispatch_requested` — não tinha `image:`, só `build:`. Serviço
+`build:`-only é pulado por `docker compose pull` ("Skipped — No image to be pulled") e imune
+a `up -d` sem `--build`. Consequência: ele era compilado na VPS do cliente no dia da
+instalação e **nenhum `update.sh` jamais o reconstruiu**. Correções do agente não chegavam a
+lugar nenhum. Enquanto isso, `CLAUDE.md` afirmava que "o caminho normal não constrói nada na
+VPS" — verdade para o app, falso para o produto.
+
+Resolvido publicando `deskcomm-worker` e `deskcomm-scheduler` como imagens, com gate em
+`tests/unit/packaging-artefato-do-cliente.test.ts`. Lei em
+[`doctrine/packaging.md`](doctrine/packaging.md); decisões em
+[`adr/0001-packaging-e-distribuicao.md`](adr/0001-packaging-e-distribuicao.md).
+
+**O que continua aberto:** não existe ensaio *automatizado* de atualização numa VPS real — o
+caso U6 de [`testing/user-journey-map.md`](testing/user-journey-map.md), que foi executado à
+mão em 2026-08-13. *(O `imagens-ok` estava listado aqui como pendente; entrou na branch
+protection em 2026-08-13 e saiu desta lista em 2026-08-14.)*
+
 ### 4.1 Os E2E quase não rodam no CI 🟠 — parcialmente resolvido em 2026-07-30
 
-> **Atualização (2026-08-05, issue #63):** `e2e.yml` roda **28 das 32 specs** contra Supabase
+> **Atualização (2026-08-14 @ `741c4ec8`):** `e2e.yml` roda **45 das 46 specs**, e o `e2e` **é
+> check obrigatório** na branch protection desde 2026-08-08 (junto com `verify`,
+> `build-and-size`, `invariants` e `imagens-ok` — **cinco**). A única spec fora é
+> `vps-fresh-onboarding`. O parágrafo abaixo é o registro de 2026-08-05, mantido pelo histórico
+> que ele conta; os números dele estão superados por este bloco.
+>
+> **Registro de 2026-08-05 (issue #63):** `e2e.yml` roda **28 das 32 specs** contra Supabase
 > local com o `baseline.sql` aplicado. Não-obrigatório ainda. A primeira execução real já
 > pagou o job: achou a página `/500`, que `public-paths.ts` declarava pública e **nunca havia
 > sido criada**. A rodada de 2026-08-05 pagou de novo: as 12 specs do épico IA 360 nunca
@@ -132,19 +187,18 @@ O gate de isolamento RLS **roda** — `ci.yml` tem o job `invariants` chamando `
 que sobe `pgvector/pgvector:pg17`, aplica `baseline.sql` em modo install e update, e roda os
 56 arquivos de `tests/invariants/`. Esse buraco está fechado.
 
-O que continua fora: **4 das 32 specs Playwright**. A `vps-webhook-outbound-ssrf.spec.ts`,
-única prova automatizada do guard de SSRF, **passou a rodar** no `e2e.yml`. Mas a
-`vps-fresh-onboarding.spec.ts` — a jornada que a doutrina de QA Visual classifica como o
-caminho mais crítico do produto — continua fora, porque exige WAHA + Redis + Resend +
-Nuvemshop no runner. Regressão nela passa sem detecção (issue #63).
+O que continua fora (2026-08-14): **1 das 46 specs Playwright**. A
+`vps-webhook-outbound-ssrf.spec.ts`, única prova automatizada do guard de SSRF, **passou a
+rodar** no `e2e.yml`. Mas a `vps-fresh-onboarding.spec.ts` — a jornada que a doutrina de QA
+Visual classifica como o caminho mais crítico do produto — continua fora, porque exige WAHA +
+Redis + Resend + Nuvemshop no runner. Regressão nela passa sem detecção (issue #63), e é por
+isso que **`e2e` verde não prova a instalação fresca**.
 
-O `e2e` também **ainda não é check obrigatório** na branch protection, que exige apenas
-`verify`, `build-and-size` e `invariants`. Enquanto for opcional, um PR que quebre o e2e
-entra na `main` assim mesmo.
+O `e2e` **é** check obrigatório desde 2026-08-08; um PR que o quebre não entra na `main`.
 
 `vitest.config.ts:12` exclui `tests/invariants/**` e `tests/e2e/**` do `test:unit`. Para os
-invariantes isso é deliberado e correto (o job de CI os pega). Para os E2E, o `e2e.yml` pega
-metade.
+invariantes isso é deliberado e correto (o job de CI os pega). Para os E2E, quem os pega é o
+`e2e.yml` — hoje 45 de 46, não "metade".
 
 ### 4.2 `pnpm gov:verify` não é o comando único que aparenta ser 🟠
 

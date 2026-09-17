@@ -104,6 +104,69 @@ describe("mapas de arquitetura — coerência interna", () => {
     expect(orfaos, `${nome} tem peça sem nenhuma ligação`).toEqual([]);
   });
 
+  it("a marca própria está no mapa, e nenhuma peça dela é ilha", () => {
+    // O caso concreto do DoD 13 para o épico de marca própria. O caso genérico
+    // acima cobra ≥1 aresta; o invariante 1 do Sistema Vivo cobra ≥2 (uma de
+    // entrada e uma de saída), e essa parte nenhum gate cobrava. Sem nomear as
+    // peças, "algum mapa existe" continuaria verde com a marca inteira ausente.
+    const m = JSON.parse(
+      fs.readFileSync(path.join(DIR, "marca-propria.architecture.json"), "utf8"),
+    ) as Mapa;
+    const grau = (id: string) =>
+      (m.edges ?? []).filter((e) => e.from === id || e.to === id).length;
+    for (const peca of [
+      "platformbranding",
+      "orgbranding",
+      "resolver",
+      "saida",
+      "layout",
+      "iconroute",
+      "marcaemails",
+      "pdf",
+    ]) {
+      expect(
+        grau(peca),
+        `${peca} com menos de 2 arestas — é ilha pelo invariante 1`,
+      ).toBeGreaterThanOrEqual(2);
+    }
+    // `pdf` está na lista de propósito: ele é a peça DESLIGADA da marca, e a
+    // tentação de "desilhá-la" ligando-a a `saida` é exatamente a decisão que o
+    // épico recusou. As duas arestas que ele tem são para o CONTROLADOR e para o
+    // titular — nenhuma delas vem do resolvedor de marca.
+    const doPdf = (m.edges ?? []).filter((e) => e.from === "pdf" || e.to === "pdf");
+    expect(
+      doPdf.filter((e) => e.from === "saida" || e.to === "saida"),
+      "alguém ligou o PDF de LGPD ao resolvedor de marca. Isso nomearia o revendedor " +
+        "(que é OPERADOR) como controlador num documento que responde a direito legal do " +
+        "titular. A não-ligação é a decisão — está no card vermelho do próprio mapa.\n",
+    ).toEqual([]);
+  });
+
+  it("clientes pela agenda está no mapa, e nenhuma peça dela é ilha", () => {
+    // O caso concreto do DoD 13 para a migration 0262. A regra genérica acima
+    // cobra ≥1 aresta, e foi por essa fresta que o nó `auditoria` entrou com UMA
+    // só — a de entrada —, sem nenhuma saída: o invariante 1 do Sistema Vivo
+    // pede entrada E saída, e a saída é justamente o laço de retorno (quem lê a
+    // auditoria é quem desliga a regra). As listas de ≥2 deste arquivo eram
+    // fixas em `marca-propria` e no índice de atrito; `crm-vivo` não entrava em
+    // nenhuma, então nada media isto.
+    const m = JSON.parse(
+      fs.readFileSync(path.join(DIR, "crm-vivo.architecture.json"), "utf8"),
+    ) as Mapa;
+    const grau = (id: string) =>
+      (m.edges ?? []).filter((e) => e.from === id || e.to === id).length;
+    for (const peca of ["interruptorcliente", "promocaocliente", "auditoria", "telaauditoria"]) {
+      expect(grau(peca), `${peca} com menos de 2 arestas — é ilha pelo invariante 1`).toBeGreaterThanOrEqual(2);
+    }
+    // E a saída existe de fato: `auditoria` PARTE de alguma aresta. Só contar o
+    // grau aceitaria duas arestas de entrada, que é o mesmo defeito com outro
+    // número.
+    expect(
+      (m.edges ?? []).filter((e) => e.from === "auditoria").map((e) => e.to),
+      "api_audit_log sem nenhuma aresta de SAÍDA: a feature registra e ninguém lê",
+    ).toContain("telaauditoria");
+  });
+
   it("o índice de atrito está no mapa, e com mais de duas arestas", () => {
     // O caso concreto do DoD 13 para o trabalho desta branch. Genérico demais
     // não guardaria nada: "algum mapa existe" é verdade desde sempre.
@@ -112,7 +175,7 @@ describe("mapas de arquitetura — coerência interna", () => {
     ) as Mapa;
     const grau = (id: string) =>
       (m.edges ?? []).filter((e) => e.from === id || e.to === id).length;
-    for (const peca of ["demandas", "fnatrito", "libradar", "toolradar", "inbox"]) {
+    for (const peca of ["demandas", "fnatrito", "libradar", "toolradar", "inbox", "rotalead", "crmleads"]) {
       expect(grau(peca), `${peca} com menos de 2 arestas — é ilha pelo invariante 1`).toBeGreaterThanOrEqual(2);
     }
   });

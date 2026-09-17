@@ -1,7 +1,10 @@
+import type { Metadata } from "next";
 import { NavHub } from "@/components/shell/NavHub";
 import { requireAuth, resolveActiveOrg } from "@/lib/auth/server";
+import { traduzir } from "@/lib/i18n/dicionario";
 
 export const dynamic = "force-dynamic";
+export const metadata: Metadata = { title: "Configurações" };
 
 /**
  * Hub de Organização.
@@ -23,14 +26,17 @@ export const dynamic = "force-dynamic";
 export default async function SettingsHubPage() {
   const user = await requireAuth();
   const activeOrg = await resolveActiveOrg(user);
+  const idioma = user.idioma;
 
   return (
     <NavHub
       group="organizacao"
-      isPlatformAdmin={user.is_platform_admin}
+      isPlatformAdmin={user.is_platform_admin && !user.support}
       role={activeOrg?.role ?? null}
-      title="Configurações"
-      subtitle="Sua conta, os dados da empresa e quem tem acesso ao quê."
+      interfaceSettings={activeOrg?.interface_settings}
+      title={traduzir("Configurações", idioma)}
+      subtitle={traduzir("Sua conta, os dados da empresa e quem tem acesso ao quê.", idioma)}
+      locale={idioma}
     />
   );
 }

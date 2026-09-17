@@ -2,6 +2,11 @@
 
 [🇧🇷 Português](README.md) · [🇺🇸 English](README.en.md) · 🇪🇸 Español
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/deskcomm-logo-dark.svg">
+  <img src="docs/brand/deskcomm-logo.svg" alt="Deskcomm CRM" width="420">
+</picture>
+
 # 🛠️ DeskcommCRM — el Sistema Operativo de Ventas con IA, open source, para WhatsApp
 
 **Agentes de IA que atienden, califican y venden en WhatsApp — dentro de un CRM open source que corre en tu propio servidor.**
@@ -121,7 +126,7 @@ un sitio mudo. Detalles en [`hostgator-setup-kit/README.md`](hostgator-setup-kit
 ### Primer acceso
 
 Abre `https://<tu-dominio>` (el candado tarda ~1 min en aparecer), entra con el admin y ten a
-mano **Google Authenticator** o **Authy** — el primer inicio de sesión de admin exige MFA. En el
+mano **Google Authenticator** o **Authy** *si* querés activar la verificación en dos pasos — es **opcional** y está en Configuración › Seguridad; el primer inicio de sesión **no** la exige. En el
 onboarding, escanea el código QR con el WhatsApp de tu número.
 
 ### 🤖 ¿Prefieres que una IA lo instale por ti?
@@ -171,8 +176,12 @@ cosas que ya tienes); para eso existe `--force`, a propósito.
 
 **Cosas normales que vas a ver:** un montón de `already exists` / `multiple primary keys` en la
 parte de la base — **es esperado e inofensivo**, son cosas que ya existían. El script filtra ese
-ruido y muestra `✓ banco atualizado`. Si aparece `⚠ avisos que não são os esperados`, ahí sí
-guarda el mensaje.
+ruido y muestra `✓ banco atualizado`. Si la base está ocupada con el CRM atendiendo, la aplica de
+nuevo sola (hasta 3 pasadas) y lo dice en pantalla — esto vale desde la actualización siguiente a la
+que instale esta corrección. Si aparece `⚠ Apareceram avisos no banco que NÃO são os esperados`, ahí sí guarda el
+mensaje: el **final** de la salida dice qué hacer en cada caso (repetir con `--force` cuando la base
+estaba ocupada, declarar `SUPABASE_DB_ADMIN_URL` cuando fue permiso). Restaurar el backup es el
+último recurso.
 
 **¿Salió mal?** `bash hostgator-setup-kit/restore.sh` vuelve al backup.
 **¿Solo quieres diagnosticar?** `bash hostgator-setup-kit/healthcheck.sh`.
@@ -306,7 +315,14 @@ pnpm test:db       # Postgres efímero + baseline install/update + invariantes
 pnpm test:e2e      # Playwright (requiere dev server)
 ```
 
-**Cuatro checks son obligatorios** para mergear en `main` — todos verificados en la branch protection, no solo en el papel:
+**Estos checks son obligatorios** para mergear en `main`. Esta lista ya dijo "cuatro" y después "cinco" — **medí, no confíes en ella**:
+
+```bash
+gh api repos/melgarafael/DeskcommCRM/branches/main/protection \
+  --jq '.required_status_checks.contexts|join(", ")'
+# el 2026-08-14: verify, build-and-size, invariants, e2e, imagens-ok
+```
+
 
 | Check | Qué hace |
 |---|---|
@@ -330,7 +346,7 @@ Entre los invariantes está el **test de aislamiento RLS**: crea 2 organizacione
 | [`VISION.md`](VISION.md) | **Visión y posicionamiento** — qué es el proyecto, en qué cree y hacia dónde va |
 | [`CHANGELOG.md`](CHANGELOG.md) | Qué cambió en cada versión — **lee la sección de tu versión antes de actualizar** |
 | [`docs/SETUP.md`](docs/SETUP.md) | Setup de desarrollo, paso a paso, de todas las integraciones |
-| [`docs/white-label.md`](docs/white-label.md) | **Instalar para clientes** — cambiar la marca, una instalación por cliente vs compartida, reventa |
+| [`docs/white-label.es.md`](docs/white-label.es.md) | **Instalar para clientes** — cambiar la marca, una instalación por cliente vs compartida, reventa |
 | [`docs/runbooks/waha-hostgator.md`](docs/runbooks/waha-hostgator.md) | Runbook de WAHA en producción (dimensionamiento, recuperación) |
 | [`CLAUDE.md`](CLAUDE.md) | Convenciones no negociables (lectura obligatoria para contribuir) |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Visión de 1 página de la arquitectura |
@@ -359,7 +375,9 @@ pnpm test:db   # necesita Docker — es el job `invariants`, obligatorio para me
 git commit -m "feat(alcance): descripción"
 ```
 
-Esa línea es la lista **completa** de los gates obligatorios, a propósito: correr solo la mitad y descubrir el resto como sorpresa roja después de horas de espera es la peor primera experiencia que este repositorio sabe entregar.
+Esas dos líneas son **todo lo que podés correr en tu máquina**, a propósito: correr solo la mitad y descubrir el resto como sorpresa roja después de horas de espera es la peor primera experiencia que este repositorio sabe entregar.
+
+Dos gates obligatorios **no** entran ahí y solo corren en CI: `e2e` (necesita un Supabase local) y `imagens-ok` (construye las tres imágenes Docker). Verde en tu máquina no es verde en el merge.
 
 **Definition of Done:** typecheck en cero, lint en cero, tests relevantes verdes, RLS testeada si toca una tabla tenant-aware, audit log emitido en mutaciones, migration versionada **+ apéndice idempotente en `baseline.sql`** si cambia el schema (si no, el cambio nunca llega a quien se auto-hospeda).
 

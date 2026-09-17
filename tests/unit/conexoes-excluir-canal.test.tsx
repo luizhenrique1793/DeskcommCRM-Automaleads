@@ -14,23 +14,26 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
+import { ApiError } from "@/lib/api/types";
 import type { ChannelDeletionImpact } from "@/app/api/v1/channel-sessions/[id]/route";
 import type * as CanaisModule from "@/hooks/channels/useChannelSessions";
 import type { ChannelSession } from "@/hooks/channels/useChannelSessions";
 
 const getMock = vi.fn();
 const deleteMock = vi.fn();
+const postMock = vi.fn();
 vi.mock("@/lib/api/client", () => ({
   apiClient: {
     get: (...a: unknown[]) => getMock(...a),
-    post: vi.fn(),
+    post: (...a: unknown[]) => postMock(...a),
     delete: (...a: unknown[]) => deleteMock(...a),
   },
 }));
 
 const toastSuccess = vi.fn();
+const toastError = vi.fn();
 vi.mock("sonner", () => ({
-  toast: { success: (m: string) => toastSuccess(m), error: vi.fn() },
+  toast: { success: (m: string) => toastSuccess(m), error: (m: string) => toastError(m) },
 }));
 
 vi.mock("@/hooks/channels/usePacingKnobs", () => ({
@@ -75,7 +78,7 @@ function canal(over: Partial<ChannelSession> = {}): ChannelSession {
 
 const IMPACTO_ARQUIVA: ChannelDeletionImpact = {
   outcome: "archive",
-  history: { conversations: 12, messages: 340, agent_versions: 0 },
+  history: { conversations: 12, messages: 340, agent_versions: 0, voice_calls: 0 },
   configuration: { ai_routers: 1, channel_knobs: 0, before_send_traces: 7 },
 };
 
@@ -87,13 +90,15 @@ function wrap(ui: React.ReactNode) {
 beforeEach(() => {
   getMock.mockReset();
   deleteMock.mockReset();
+  postMock.mockReset();
+  toastError.mockReset();
   toastSuccess.mockReset();
   listagem.data = [canal()];
   listagem.isLoading = false;
   listagem.isError = false;
   listagem.schemaOutdated = false;
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe("listagem que falhou não vira 'primeira instalação'", () => {
   it("erro de carregamento aparece como erro, e não como zero número", () => {
@@ -242,7 +247,7 @@ describe("frasesDoImpacto", () => {
     expect(
       frasesDoImpacto({
         outcome: "delete",
-        history: { conversations: 0, messages: 0, agent_versions: 0 },
+        history: { conversations: 0, messages: 0, agent_versions: 0, voice_calls: 0 },
         configuration: { ai_routers: 0, channel_knobs: 0, before_send_traces: 0 },
       }),
     ).toEqual(["Este número não tem conversa, mensagem nem configuração ligada a ele."]);
@@ -251,20 +256,68 @@ describe("frasesDoImpacto", () => {
   it("contagem zero não vira frase", () => {
     const frases = frasesDoImpacto({
       outcome: "archive",
-      history: { conversations: 0, messages: 0, agent_versions: 2 },
+      history: { conversations: 0, messages: 0, agent_versions: 2, voice_calls: 0 },
       configuration: { ai_routers: 0, channel_knobs: 0, before_send_traces: 0 },
     });
     expect(frases).toEqual(["Fica salvo, mas sem número — para de atender: 2 versões de agente."]);
   });
 
+  it("chamada de voz pendurada: a frase aparece, e o número dela é o que o painel mostra", () => {
+    // Sem este caso, `voice_calls` seria campo decorativo: o tipo o exige, a rota
+    // o conta, a tela monta a frase — e nenhuma asserção veria se ele some. Foi
+    // exatamente o que quase aconteceu, porque as quatro fixtures deste arquivo
+    // nasceram com 0 só para o typecheck parar de reclamar.
+    //
+    // A frase é "Continua no inbox", e não "para de atender", de propósito: o
+    // registro da ligação é histórico COM O CLIENTE, do mesmo tipo da conversa,
+    // e sobrevive ao arquivamento do número. Era isso que sumia por cascade.
+    const frases = frasesDoImpacto({
+      outcome: "archive",
+      history: { conversations: 0, messages: 0, agent_versions: 0, voice_calls: 3 },
+      configuration: { ai_routers: 0, channel_knobs: 0, before_send_traces: 0 },
+    });
+    expect(frases).toEqual(["Continua no inbox: 3 chamadas de voz."]);
+  });
+
+  it("uma chamada só: a frase vai no singular", () => {
+    const frases = frasesDoImpacto({
+      outcome: "archive",
+      history: { conversations: 0, messages: 0, agent_versions: 0, voice_calls: 1 },
+      configuration: { ai_routers: 0, channel_knobs: 0, before_send_traces: 0 },
+    });
+    expect(frases).toEqual(["Continua no inbox: 1 chamada de voz."]);
+  });
+
   it("só auditoria pendurada: explica o arquivamento em vez de prometer que não há nada", () => {
     const frases = frasesDoImpacto({
       outcome: "archive",
-      history: { conversations: 0, messages: 0, agent_versions: 0 },
+      history: { conversations: 0, messages: 0, agent_versions: 0, voice_calls: 0 },
       configuration: { ai_routers: 0, channel_knobs: 0, before_send_traces: 4 },
     });
     expect(frases).toEqual([
       "Este canal tem registros internos, por isso ele é arquivado em vez de apagado.",
     ]);
+  });
+});
+
+
+describe("copiar detalhes de conexão no self-host HTTP", () => {
+  it.each([true, false])("fallback execCommand=%s dá feedback e preserva detalhe", async (copied) => {
+    listagem.data = [];
+    getMock.mockResolvedValue({ data: { channels: [], members: [] } });
+    postMock.mockRejectedValue(new ApiError(502, "connection_repair_required", { operation: "start" }, "request-owned"));
+    vi.stubGlobal("navigator", {});
+    document.execCommand = vi.fn().mockReturnValue(copied);
+    render(wrap(<ConnectionsClient wahaConfigured />));
+    fireEvent.click(screen.getByRole("button", { name: "Conectar novo WhatsApp" }));
+    const details = await screen.findByText(/request-owned/);
+    fireEvent.click(screen.getByText("Detalhes para suporte"));
+    fireEvent.click(screen.getByRole("button", { name: "Copiar detalhes" }));
+    await waitFor(() => expect(document.execCommand).toHaveBeenCalledWith("copy"));
+    await waitFor(() => expect(copied ? toastSuccess : toastError).toHaveBeenCalledWith(
+      copied ? "Copiado!" : "Não foi possível copiar. Selecione e copie manualmente.",
+    ));
+    expect(details).toHaveTextContent("connection_repair_required");
+    expect(details).toHaveTextContent("request-owned");
   });
 });

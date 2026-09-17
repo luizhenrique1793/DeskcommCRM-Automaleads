@@ -1,3 +1,4 @@
+import { requireSupportWrite } from "@/lib/impersonate/support";
 /**
  * A imagem do cabeçalho de uma definição — subir do computador, sem colar URL.
  *
@@ -26,7 +27,9 @@ import { randomUUID } from "node:crypto";
 import type { NextRequest } from "next/server";
 
 import { fail, ok } from "@/lib/api/wrappers";
-import { loadAuthUser, resolveActiveOrg } from "@/lib/auth/server";
+import { requireRole } from "@/lib/auth/require-role";
+import { extensaoDe, farejarTipo, pareceSvg } from "@/lib/branding/logo-arquivo";
+import { traduzir } from "@/lib/i18n/dicionario";
 import { logger } from "@/lib/logger";
 import { createAdminClient } from "@/lib/supabase/admin";
 
@@ -41,44 +44,68 @@ const VALIDADE_SEGUNDOS = 7 * 24 * 60 * 60;
  * Recusar aqui é melhor que deixar subir: o arquivo iria para o storage, a
  * definição seria criada, e a recusa chegaria horas depois falando de um
  * formato que o operador escolheu porque a tela deixou.
+ *
+ * O conjunto é consultado DUAS vezes, e as duas importam: contra o `type` que o
+ * navegador declarou (barato, descarta o engano honesto) e contra o tipo
+ * FAREJADO nos bytes (`farejarTipo`), que é o que decide. O rótulo é do cliente
+ * e mente quando quer — um SVG renomeado para `.png` passava pela primeira
+ * peneira e chegava ao storage com `contentType: image/png`.
  */
 const TIPOS = new Set(["image/jpeg", "image/png"]);
 const TAMANHO_MAX = 5 * 1024 * 1024;
 
 export async function POST(req: NextRequest): Promise<Response> {
+  const supportDenied = await requireSupportWrite();
+  if (supportDenied) return supportDenied;
+
   const requestId = randomUUID();
 
-  const user = await loadAuthUser();
-  if (!user) return fail("unauthenticated", "Faça login.", 401, { requestId });
-  const org = await resolveActiveOrg(user);
-  if (!org) return fail("forbidden", "Sem organização ativa.", 403, { requestId });
+  const authz = await requireRole("agent", { requestId, resource: "channel_templates" });
+  if (!authz.ok) return authz.response;
+  const { user, org } = authz;
+  const t = (texto: string) => traduzir(texto, user.idioma);
 
   const form = await req.formData().catch(() => null);
   const file = form?.get("file");
   if (!(file instanceof File)) {
-    return fail("validation_failed", "Campo 'file' (multipart) obrigatório.", 422, { requestId });
+    return fail("validation_failed", t("Campo 'file' (multipart) obrigatório."), 422, { requestId });
+  }
+
+  if (file.size > TAMANHO_MAX) {
+    return fail("payload_too_large", t("A imagem precisa ter até 5 MB."), 413, { requestId });
   }
 
   const mime = file.type || "application/octet-stream";
   if (!TIPOS.has(mime)) {
+    return fail("unsupported_media_type", t("O cabeçalho aceita imagem JPG ou PNG."), 415, { requestId });
+  }
+
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const tipoReal = farejarTipo(bytes);
+  if (!tipoReal || !TIPOS.has(tipoReal)) {
+    if (pareceSvg(bytes)) {
+      return fail(
+        "unsupported_media_type",
+        t("Arquivos SVG não são aceitos. O cabeçalho aceita imagem JPG ou PNG."),
+        415,
+        { requestId },
+      );
+    }
     return fail(
       "unsupported_media_type",
-      "O cabeçalho aceita imagem JPG ou PNG.",
+      t("O cabeçalho aceita imagem JPG ou PNG válida."),
       415,
       { requestId },
     );
   }
-  if (file.size > TAMANHO_MAX) {
-    return fail("payload_too_large", "A imagem precisa ter até 5 MB.", 413, { requestId });
-  }
 
-  const ext = mime === "image/png" ? "png" : "jpg";
+  const ext = extensaoDe(tipoReal);
   const caminho = `${org.orgId}/templates/${randomUUID()}.${ext}`;
   const admin = createAdminClient();
 
   const { error: erroUp } = await admin.storage
     .from("whatsapp-media")
-    .upload(caminho, Buffer.from(await file.arrayBuffer()), { contentType: mime, upsert: false });
+    .upload(caminho, Buffer.from(bytes), { contentType: tipoReal, upsert: false });
   if (erroUp) {
     logger.error("[partner/templates/media] upload falhou", { detail: erroUp.message, requestId });
     return fail("internal_error", "Erro ao subir a imagem.", 500, { requestId });

@@ -2,6 +2,13 @@
 
 ## Antes de começar
 
+0. Abra o repositório no seu assistente de código (Claude Code, Codex, Cursor, OpenCode ou
+   Antigravity): o guia `deskcomm-contribuir` (`.agents/skills/deskcomm-contribuir/SKILL.md`) mede
+   antes do PR o que a triagem mede depois — branch atrasada, tripla de migration, marca do fork no
+   diff, fragmento de release — e arma os hooks de git com `bash .agents/skills/deskcomm-contribuir/scripts/armar-hooks.sh`.
+   Para ter os guias em qualquer pasta: `bash scripts/instalar-guias.sh`. Vai **editar** um guia?
+   Rode `bash scripts/instalar-guias.sh --fonte .` no seu clone — no Claude Code a skill global
+   vence a do projeto, e sem isso você testaria a versão da `main`, não a sua.
 1. Leia [`CLAUDE.md`](CLAUDE.md) — convenções não-negociáveis.
 2. Leia [`ARCHITECTURE.md`](ARCHITECTURE.md) — visão de 1 página.
 3. Identifique o epic de origem em [`docs/stories/epics/MASTER.md`](docs/stories/epics/MASTER.md).
@@ -67,12 +74,33 @@ Ao finalizar um epic:
    - Mudança de schema saiu como **tripla**: arquivo em `supabase/migrations/`, apêndice idempotente
      no `supabase/baseline.sql` e linha no `MANIFEST.md`. O kit self-host aplica **só o baseline** —
      migration que não chega lá não chega em quem instalou numa VPS. Nenhum job de CI confere isso
+   - **Se você tocou `Dockerfile*`, `docker-compose*.yml` ou `hostgator-setup-kit/`:** a mudança
+     alcança quem **já** instalou. Lei em [`docs/doctrine/packaging.md`](docs/doctrine/packaging.md).
+     O CI reprova serviço `build:`-only, instalação em tag móvel e imagem quebrada (`imagens-ok`);
+     o que fica com você é o resto: variável nova com default que não quebre `.env` antigo, e a
+     atualização não pedindo edição manual de arquivo. **Nenhum bump pode exigir que o operador
+     da VPS edite alguma coisa na mão** — se exigir, abra issue com plano de migração em vez de PR
    - Docs atualizadas se mudou contrato (PRD/spec)
    - `pnpm test:e2e` (subset relevante) — **opcional se você contribui de fora**, ver abaixo
 4. Abrir PR contra `main`. Description deve referenciar o epic e listar evidências (logs/screenshots dos testes).
-5. CI deve passar antes de merge. Obrigatórios: `verify`, `invariants` (isolamento RLS) e `build-and-size`.
-   O job `e2e` roda e é **não-bloqueante de propósito** — ele mesmo imprime, no resumo, quais specs
-   não cobriu. Verde nele não é "jornada provada".
+5. **Tocou um documento de autoridade?** Corrija as afirmações de estado **daquele** documento —
+   as que dizem o que está ativo, o que falta, o que aponta para onde. Não saia caçando nos
+   outros: a dívida decai sozinha se ninguém a alimentar. Achados medidos, com o comando de cada
+   um, em [`docs/audits/2026-08-14-afirmacoes-de-estado.md`](docs/audits/2026-08-14-afirmacoes-de-estado.md).
+
+6. CI deve passar antes de merge. Obrigatórios: `verify`, `invariants` (isolamento RLS),
+   `build-and-size`, `e2e` e `imagens-ok`.
+
+   O `imagens-ok` (em `.github/workflows/publish-image.yml`) constrói as três imagens que o
+   self-hoster instala, roda em PR e **bloqueia** desde 2026-08-13.
+
+   Verde no `e2e` **não** é "jornada provada": ele mesmo imprime, no resumo, quais specs não
+   cobriu — e a que fica de fora é justamente `vps-fresh-onboarding`, a instalação do zero.
+
+   > Esta lista dizia "três obrigatórios" e chamava o `e2e` de não-bloqueante. Estava
+   > desatualizada nos dois pontos, e quem a usasse como régua mediria contra a régua errada.
+   > Confira na fonte antes de confiar em qualquer lista escrita:
+   > `gh api repos/melgarafael/DeskcommCRM/branches/main/protection --jq '.required_status_checks.contexts'`
 
 ### Pegando uma issue — o protocolo
 
@@ -102,10 +130,74 @@ Duas coisas vão parecer erro seu e não são:
   GitHub para quem nunca contribuiu antes. Um mantenedor libera; do segundo PR em diante
   roda sozinho. Se demorar, comente no PR.
 
+**Abra o PR de um ramo com nome, nunca do `main` do seu fork.** Se o `main` do fork já tem
+personalizações suas — e ele quase sempre tem, porque é dele que a sua VPS puxa —, o PR propõe
+essas personalizações ao produto inteiro. Isso não gera conflito e não acende gate nenhum: elas
+entram em silêncio para todas as instalações. Foi medido (PR #465): sete arquivos com a marca de um
+cliente, seis deles mergeando sem um único conflito. O caminho é `git checkout -b fix/o-que-voce-conserta`
+a partir da `main` **deste** repositório, com só o seu conserto dentro.
+
+**Com "Allow edits by maintainers" ligado no seu PR, o projeto pode empurrar um conserto direto na
+branch do PR** — um ajuste mecânico, ou a `main` trazida para dentro quando há conflito. Sempre como
+commit novo: nunca `--force`, nunca rebase, e os seus commits ficam como estão. Avisamos no PR antes
+de empurrar. Quando isso acontecer, traga a branch antes de continuar (`git pull --no-rebase`) e só
+então empurre de novo; um `--force` do seu lado apagaria o que foi empurrado do lado de cá. Com a
+opção desligada, o conserto vai numa branch nossa. Nos dois caminhos, o trabalho que é seu entra com
+você como autor.
+
+**A marca da sua instalação não se troca editando código.** Não altere `DEFAULT_APP_NAME` em
+`lib/branding.ts`, nem os títulos em `app/`. O banco manda (`platform_branding`,
+`organizations.settings.branding`), `APP_NAME` no `.env` é a semente que o `install.sh` pergunta, e
+o resto é a tela **Configurações › Marca**. Receita inteira em [`docs/white-label.md`](docs/white-label.md).
+Editar a constante troca o padrão do PRODUTO — e a sua marca some no próximo `git pull`, o que é a
+razão prática de o caminho suportado ser melhor para você também.
+
 E sobre o `pnpm test:e2e` do DoD: rodar a suíte completa exige Docker, banco semeado e WAHA
 local. **Não travamos PR externo nisso** — mande o que conseguiu provar (unit + descrição do
 que testou na mão), que a prova de tela fica com o mantenedor. Exigir prova sem entregar a
 ferramenta de produzi-la seria pedágio, não rigor.
+
+### `tests/invariants/` é congelado — e isso vale para o COMPORTAMENTO, não só para o arquivo
+
+Os arquivos de `tests/invariants/` guardam leis do produto, e mexer neles pede justificativa
+escrita. Duas coisas que não estão óbvias e já custaram tempo a quem contribui:
+
+1. **O guarda é um hook local do mantenedor** (`core.hooksPath=loop/hooks`), não um check do CI.
+   Você não vai vê-lo reprovar no seu fork — o que você vê é a integração travar depois.
+2. **Um PR pode reprovar um invariante sem tocar no arquivo dele.** Se o seu conserto muda o
+   comportamento que a lei afirma, o vermelho aparece lá. Isso **não é um descuido seu** — é o
+   sinal de que existem duas regras concorrentes, a que está escrita e a que você propõe.
+
+Quando acontecer, **não apague nem afrouxe a asserção**: diga no PR qual é a sua razão e deixe a
+escolha explícita. Quem tria escreve a mudança do invariante com a justificativa exigida, ou ajusta
+o conserto para preservar a lei antiga — e a decisão fica registrada no PR, que é onde ela serve
+para a próxima pessoa.
+
+### Texto de tela: toda frase nova precisa do espanhol
+
+O produto fala português e espanhol, e o CI reprova **frase nova sem tradução**. A regra não
+estava escrita aqui até 16/09/2026, e um PR de primeira contribuição foi reprovado por ela — a
+falha era nossa, não de quem contribuiu.
+
+Se você acrescentou uma frase que aparece na tela, ela passa por `t("...")` **e** ganha uma linha
+em `lib/i18n/dicionario.ts`:
+
+```ts
+"Digite o identificador do modelo": { es: "Escribe el identificador del modelo" },
+```
+
+A chave é o texto em português (não um código). Só o espanhol precisa de linha; o resto degrada
+para o português de propósito.
+
+Para conferir antes de abrir o PR, sem rodar a suíte inteira:
+
+```bash
+pnpm test:unit tests/unit/i18n-espanhol-cobre-a-tela.test.ts
+```
+
+Ele reprova nas duas direções: chave usada na tela sem espanhol, e prosa em português que não
+passou por `t()`. **Se você não fala espanhol, mande assim mesmo** e diga no PR — a tradução é
+trabalho de dez segundos para quem tria, e não é motivo para segurar um conserto.
 
 ### Anti-patterns proibidos
 

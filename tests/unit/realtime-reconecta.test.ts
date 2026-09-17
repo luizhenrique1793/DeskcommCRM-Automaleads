@@ -45,7 +45,11 @@ describe("o canal volta sozinho", () => {
 
   it("monta canal NOVO a cada tentativa", () => {
     // Reassinar o mesmo objeto devolve SUBSCRIBED e não entrega nada.
-    expect(FONTE).toMatch(/supabase\.removeChannel\(active\);\s*\n\s*montar\(\);/);
+    // Solta `active` ANTES de remover: o CLOSED síncrono do canal velho não pode
+    // passar pela guarda e armar outra retomada (ver
+    // `tests/unit/realtime-retomada-sem-timer-orfao.test.tsx`, que prende isso
+    // pelo comportamento).
+    expect(FONTE).toMatch(/const velho = active;\s*\n\s*active = null;\s*\n\s*if \(velho\) supabase\.removeChannel\(velho\);\s*\n\s*montar\(\);/);
     expect(FONTE).toMatch(/supabase\.channel\(`\$\{channelName\}#\$\{tentativas\}`\)/);
   });
 
@@ -76,6 +80,58 @@ describe("o canal volta sozinho", () => {
   });
 });
 
+describe("o primeiro join aguarda a autenticação compartilhada", () => {
+  it("não inventa timeout de auth nem assina anon em falha", () => {
+    expect(FONTE).not.toMatch(/AUTH_TIMEOUT_MS/);
+    expect(FONTE).toMatch(/await prepareRealtimeAuthentication\(\)/);
+    expect(FONTE).toMatch(/if \(cancelado\) return;/);
+  });
+});
+
+describe("a rede de segurança do inbox", () => {
+  /**
+   * O board e a linha do tempo já tinham; o inbox não. Com o canal morto e a
+   * aba EM FOCO, `refetchOnWindowFocus` nunca dispara — e o inbox é a tela em
+   * que se fica parado olhando. Ficava congelada até o F5, que foi o sintoma.
+   */
+  it("a lista de conversas tem rede, e devolve o sinal de perda", () => {
+    const fonte = readFileSync("hooks/inbox/useConversationsRealtime.ts", "utf8");
+    expect(fonte, "a lista ficou sem rede de segurança").toMatch(/useRefetchDeSeguranca</);
+    expect(fonte, "o sinal de perda não sai do hook").toMatch(/return \{[^}]*\bseguranca\b[^}]*\}/);
+  });
+
+  it("a conversa aberta também", () => {
+    const fonte = readFileSync("hooks/inbox/useMessagesRealtime.ts", "utf8");
+    expect(fonte, "a conversa aberta ficou sem rede de segurança").toMatch(/useRefetchDeSeguranca</);
+    expect(fonte, "o sinal de perda não sai do hook").toMatch(/return \{[^}]*\bseguranca\b[^}]*\}/);
+  });
+
+  it("o estado do canal chega à TELA — senão a morte dele segue invisível", () => {
+    // O dossiê do lead já publicava este par; o inbox não publicava nada.
+    // ⚠️ `data-realtime-status` tem de vir do STATUS do canal, não de um objeto
+    // que existe sempre: a primeira versão desta linha diria `ativo` inclusive
+    // com o canal morto — controle decorativo, que mente com cara de instrumento.
+    const tela = readFileSync("components/inbox/InboxLayout.tsx", "utf8");
+    expect(tela, "o inbox não publica o estado do canal").toMatch(
+      /data-realtime-status=\{listQ\.realtimeStatus\}/,
+    );
+    expect(tela, "o inbox não publica a contagem de perdas").toMatch(
+      /data-refetch-divergencias=\{listQ\.seguranca/,
+    );
+  });
+
+  it("a rede consome o carimbo de entrega do canal — senão só sabe reprovar", () => {
+    // Sem `ultimaEntrega`, divergência é indistinguível de "nada aconteceu no
+    // intervalo": a verificação perde a capacidade de APROVAR.
+    for (const f of ["hooks/inbox/useConversationsRealtime.ts", "hooks/inbox/useMessagesRealtime.ts"]) {
+      const fonte = readFileSync(f, "utf8");
+      expect(fonte, `${f} não passa ultimaEntrega para a rede`).toMatch(
+        /const \{[^}]*\bultimaEntrega\b[^}]*\} = useRealtimeChannel\(/,
+      );
+    }
+  });
+});
+
 describe("a segunda rede: voltar para a aba", () => {
   it("o hilo de mensagens ressincroniza ao focar", () => {
     const fonte = readFileSync("hooks/inbox/useMessagesRealtime.ts", "utf8");
@@ -85,6 +141,14 @@ describe("a segunda rede: voltar para a aba", () => {
   it("a lista de conversas também", () => {
     const fonte = readFileSync("hooks/inbox/useConversationsRealtime.ts", "utf8");
     expect(fonte).toMatch(/refetchOnWindowFocus: true/);
+  });
+
+  it("useConversationsRealtime monta UMA vez na árvore do inbox — duplicar dobra refetch", () => {
+    const layout = readFileSync("components/inbox/InboxLayout.tsx", "utf8");
+    const lista = readFileSync("components/inbox/ConversationList.tsx", "utf8");
+    expect(layout.match(/useConversationsRealtime\(/g)?.length).toBe(1);
+    expect(lista).not.toMatch(/useConversationsRealtime\(/);
+    expect(lista).toMatch(/listQuery/);
   });
 
   it("e o padrão GLOBAL segue desligado — isto é exceção, não virada de chave", () => {

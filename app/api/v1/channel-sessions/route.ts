@@ -1,3 +1,4 @@
+import { requireSupportWrite } from "@/lib/impersonate/support";
 /**
  * GET  /api/v1/channel-sessions — lista os canais WhatsApp da org (do DB).
  *   Acessível a qualquer membro (usado pelo seletor do inbox e pela sidebar).
@@ -9,14 +10,18 @@
 import { randomUUID } from "node:crypto";
 import type { NextRequest } from "next/server";
 
-import { audit } from "@/lib/audit";
+import { connectWahaChannel, ChannelConnectionError } from "@/lib/channels/connect-waha";
+import { createAdminClient } from "@/lib/supabase/admin";
+import { mfaEmDivida } from "@/lib/auth/server";
 import { ok, fail } from "@/lib/api/wrappers";
 import { loadAuthUser, resolveActiveOrg } from "@/lib/auth/server";
 import { requireRole } from "@/lib/auth/require-role";
 import { ARCHIVED_AT, queryTolerantToMissingArchived } from "@/lib/channels/archived";
+import { PROVIDERS_DE_MENSAGEM } from "@/lib/channels/capabilities";
 import { createChannelSchema } from "@/lib/schemas/channels";
 import { createClient } from "@/lib/supabase/server";
-import { getWahaClient, wahaFriendlyError } from "@/lib/waha/client";
+import { getWahaClient } from "@/lib/waha/client";
+import { traduzir } from "@/lib/i18n/dicionario";
 
 export const dynamic = "force-dynamic";
 
@@ -35,7 +40,12 @@ export async function GET(): Promise<Response> {
     supabase
       .from("channel_sessions")
       .select(CHANNEL_COLUMNS)
-      .eq("organization_id", activeOrg.orgId);
+      .eq("organization_id", activeOrg.orgId)
+      // Só canal de MENSAGEM. A linha de chamada de voz (spec 18) mora na mesma
+      // tabela, tem card próprio em Conexões e não tem `waha_session_name` nem
+      // telefone: entrando aqui, ela vira um número a mais no seletor do inbox e
+      // na barra lateral — sem nome, sem estado vigiado e sem para onde mandar.
+      .in("provider", [...PROVIDERS_DE_MENSAGEM]);
   // Canais arquivados sobrevivem só como âncora das FKs RESTRICT
   // (conversations/messages). Para o usuário eles foram excluídos.
   //
@@ -57,6 +67,9 @@ export async function GET(): Promise<Response> {
 }
 
 export async function POST(req: NextRequest): Promise<Response> {
+  const supportDenied = await requireSupportWrite();
+  if (supportDenied) return supportDenied;
+
   const requestId = randomUUID();
   const authz = await requireRole("admin", {
     requestId,
@@ -64,13 +77,15 @@ export async function POST(req: NextRequest): Promise<Response> {
     allowPlatformAdmin: true,
   });
   if (!authz.ok) return authz.response;
+  const t = (texto: string) => traduzir(texto, authz.user.idioma);
   const { user, org: activeOrg } = authz;
+  if (await mfaEmDivida()) return fail("mfa_required", t("Confirme a verificação em duas etapas."), 403, { requestId });
 
   const waha = getWahaClient();
   if (!waha) {
     return fail(
       "waha_not_configured",
-      "O WhatsApp (WAHA) não está configurado neste ambiente: faltam WAHA_API_BASE_URL e/ou WAHA_API_KEY. Configure-as e tente de novo.",
+      t("O WhatsApp (WAHA) não está configurado neste ambiente: faltam WAHA_API_BASE_URL e/ou WAHA_API_KEY. Configure-as e tente de novo."),
       503,
       { requestId },
     );
@@ -84,58 +99,24 @@ export async function POST(req: NextRequest): Promise<Response> {
   }
   const parsed = createChannelSchema.safeParse(raw ?? {});
   if (!parsed.success) {
-    return fail("validation_failed", "Dados inválidos.", 422, {
+    return fail("validation_failed", t("Dados inválidos."), 422, {
       requestId,
       details: parsed.error.flatten().fieldErrors as Record<string, unknown>,
     });
   }
 
-  const supabase = await createClient();
-  // Nome de sessão único por canal — o hardcode `org_<8>` era 1 número por org.
-  const sessionName = `org_${activeOrg.orgId.slice(0, 8)}_${randomUUID().replace(/-/g, "").slice(0, 6)}`;
-
-  const { data: created, error: insErr } = await supabase
-    .from("channel_sessions")
-    .insert({
-      organization_id: activeOrg.orgId,
-      waha_session_name: sessionName,
-      display_name: parsed.data.display_name ?? null,
-      engine: "NOWEB",
-      webhook_path_token: randomUUID().replace(/-/g, ""),
-      webhook_secret_encrypted: Buffer.from([0]),
-      status: "STARTING",
-      last_status_change_at: new Date().toISOString(),
-      consecutive_health_fails: 0,
-      daily_message_limit: 250,
-      metadata: {},
-    })
-    .select(CHANNEL_COLUMNS)
-    .single();
-  if (insErr || !created) {
-    return fail("internal_error", insErr?.message ?? "channel_session_insert_failed", 500, { requestId });
-  }
-
   try {
-    await waha.startSession(sessionName);
-  } catch (err) {
-    // Rollback: sem WAHA no ar, não deixamos um canal fantasma preso em STARTING.
-    await supabase
-      .from("channel_sessions")
-      .delete()
-      .eq("organization_id", activeOrg.orgId)
-      .eq("id", created.id);
-    return fail("waha_error", wahaFriendlyError(err), 502, { requestId });
+    const result = await connectWahaChannel(await createClient(), createAdminClient(), waha, {
+      organizationId: activeOrg.orgId, idempotencyKey: req.headers.get("Idempotency-Key") ?? "",
+      userId: user.id, requestId, displayName: parsed.data.display_name,
+    });
+    return ok(result.channel, { requestId, status: result.replay ? 200 : 201 });
+  } catch (error) {
+    if (error instanceof ChannelConnectionError) return fail(error.code,
+      error.code === "connection_in_progress" ? t("A conexão ainda está sendo preparada. Aguarde e tente novamente.")
+        : error.code === "connection_session_name_too_long" ? t("O identificador desta conexão passou do limite que o WhatsApp aceita. Nada foi criado no WhatsApp — atualize o sistema e tente novamente.")
+        : t("Não foi possível concluir a conexão. Abra Conexões para tentar novamente ou reparar o número."),
+      error.status, { requestId, details: error.technical });
+    return fail("internal_error", t("Não foi possível concluir a conexão. Tente novamente."), 500, { requestId });
   }
-
-  void audit({
-    action: "channel.connected",
-    actorUserId: user.id,
-    organizationId: activeOrg.orgId,
-    resourceType: "channel_session",
-    resourceId: created.id,
-    requestId,
-    metadata: { waha_session_name: sessionName },
-  });
-
-  return ok(created, { requestId, status: 201 });
 }

@@ -1,3 +1,4 @@
+import { requireSupportWrite } from "@/lib/impersonate/support";
 /**
  * GET  /api/v1/channels/official — estado da conexão oficial + o que colar na Meta.
  * POST /api/v1/channels/official — VALIDA a credencial e só então grava.
@@ -25,15 +26,17 @@ import type { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
 import { fail, ok } from "@/lib/api/wrappers";
-import { requireAuth, resolveActiveOrg } from "@/lib/auth/server";
-import { ROLE_RANK } from "@/lib/auth/types";
+import { requireRole } from "@/lib/auth/require-role";
 import { ARCHIVED_AT, queryTolerantToMissingArchived } from "@/lib/channels/archived";
 import { CHANNEL_PROVIDER_META } from "@/lib/channels/capabilities";
+import { appDaMeta, appDaMetaDoAmbiente } from "@/lib/channels/meta/app";
 import { validateMetaCredentials } from "@/lib/channels/meta/validate-credentials";
 import { reactivateChannelSession } from "@/lib/channels/reactivate";
 import { env } from "@/lib/env";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { metadataInicialDoCanal } from "@/lib/ai/elegibilidade/pre-go-live";
 import { encryptWebhookSecret } from "@/lib/webhooks/secrets";
+import { traduzir } from "@/lib/i18n/dicionario";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -43,17 +46,6 @@ const conectarSchema = z.object({
   waba_id: z.string().min(5),
   token: z.string().min(20),
 });
-
-type Gate = { ok: true; orgId: string; userId: string } | { ok: false; resposta: NextResponse };
-
-async function adminGate(requestId: string): Promise<Gate> {
-  const user = await requireAuth();
-  const org = await resolveActiveOrg(user);
-  if (!org || ROLE_RANK[org.role] < ROLE_RANK.admin) {
-    return { ok: false, resposta: fail("forbidden", "admin_required", 403, { requestId }) };
-  }
-  return { ok: true, orgId: org.orgId, userId: user.id };
-}
 
 /**
  * Base pública desta instalação — é o que o operador cola no dashboard da Meta.
@@ -72,10 +64,47 @@ function publicBase(req: NextRequest): string {
   );
 }
 
+/**
+ * O token de verificação que esta tela pode MOSTRAR — e de onde vem o que vale.
+ *
+ * Isto lia `process.env.META_WEBHOOK_VERIFY_TOKEN` direto, e a migration 0257
+ * tornou a leitura errada nos dois sentidos: com o App da Meta cadastrado pela
+ * tela de administração, o handshake passa a conferir o token do BANCO, e esta
+ * rota seguia mostrando o do `.env` (que a Meta recusaria) ou, sem `.env`,
+ * "defina no servidor" para quem já tinha configurado tudo.
+ *
+ * O valor do banco NÃO é devolvido: ele é mostrado uma vez, na resposta da
+ * action que o gera (`app/actions/settings/updateMetaApp.ts`), e aqui quem
+ * responde é o admin de UM tenant, não quem administra a instalação. O do `.env`
+ * continua sendo mostrado, como sempre foi — é o mesmo valor, na mesma rota.
+ *
+ * Por que "o que vale é igual ao do `.env`" basta para rotular a origem como
+ * `ambiente`: o token em vigor (`lib/channels/meta/app.ts`) é OU o do banco OU o
+ * do `.env` — o do banco só vale com o par inteiro decifrado; fora disso vale o
+ * que o `.env` tiver, até pela metade. Então a igualdade só engana num caso: o
+ * token do banco coincidir com o do `.env`. E o do banco ninguém escolhe — é
+ * gerado pelo servidor com 32 bytes aleatórios —, então coincidir exige alguém
+ * ter COPIADO o token gerado para o `.env`. Nesse caso o rótulo erra a origem,
+ * mas o valor exibido é o mesmo que já está no `.env`, que esta rota sempre
+ * mostrou: não sai nada que antes não saía.
+ */
+async function tokenDeVerificacaoParaATela(): Promise<{
+  verifyToken: string | null;
+  verifyTokenOrigem: "ambiente" | "instalacao" | null;
+}> {
+  const { verifyToken: emVigor } = await appDaMeta();
+  if (!emVigor) return { verifyToken: null, verifyTokenOrigem: null };
+  if (emVigor === appDaMetaDoAmbiente().verifyToken) {
+    return { verifyToken: emVigor, verifyTokenOrigem: "ambiente" };
+  }
+  return { verifyToken: null, verifyTokenOrigem: "instalacao" };
+}
+
 export async function GET(req: NextRequest): Promise<NextResponse> {
   const requestId = randomUUID();
-  const g = await adminGate(requestId);
-  if (!g.ok) return g.resposta;
+  const authz = await requireRole("admin", { requestId, resource: "channels_official" });
+  if (!authz.ok) return authz.response;
+  const orgId = authz.org.orgId;
 
   const admin = createAdminClient();
   // Canal ARQUIVADO não conta como conectado. A linha sobrevive à exclusão como
@@ -88,7 +117,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     admin
       .from("channel_sessions")
       .select("id, meta_phone_number_id, meta_waba_id, meta_token_encrypted, phone_number, display_name, webhook_path_token, status")
-      .eq("organization_id", g.orgId)
+      .eq("organization_id", orgId)
       .eq("provider", CHANNEL_PROVIDER_META);
   const { data } = await queryTolerantToMissingArchived(
     () => consultar().is(ARCHIVED_AT, null).maybeSingle(),
@@ -98,6 +127,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const base = publicBase(req);
   return ok({
     connected: Boolean(data),
+    channel_session_id: data?.id ?? null,
     // `hasToken` em vez do token: uma vez gravado, a tela mostra que EXISTE, nunca
     // qual é. Devolver o segredo para preencher o campo seria vazá-lo a cada render.
     hasToken: Boolean(data?.meta_token_encrypted),
@@ -110,7 +140,11 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     webhook: data
       ? {
           callbackUrl: `${base}/api/v1/webhooks/meta/${data.webhook_path_token}`,
-          verifyToken: process.env.META_WEBHOOK_VERIFY_TOKEN ?? null,
+          ...(await tokenDeVerificacaoParaATela()),
+          // A porta para quem PODE abrir a tela da instalação — mesma regra do
+          // link de `/admin/google` na Agenda. Para o admin de um tenant qualquer
+          // o link seria um 404; a tela diz a ele quem procurar.
+          configurarEm: authz.user.is_platform_admin && !authz.user.support ? "/admin/meta" : null,
           fields: ["messages", "message_template_status_update"],
         }
       : null,
@@ -118,13 +152,19 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  const supportDenied = await requireSupportWrite();
+  if (supportDenied) return supportDenied;
+
   const requestId = randomUUID();
-  const g = await adminGate(requestId);
-  if (!g.ok) return g.resposta;
+  const authz = await requireRole("admin", { requestId, resource: "channels_official" });
+  if (!authz.ok) return authz.response;
+  const t = (texto: string) => traduzir(texto, authz.user.idioma);
+  const orgId = authz.org.orgId;
+  const userId = authz.user.id;
 
   const parsed = conectarSchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) {
-    return fail("invalid_request", "phone_number_id, waba_id e token são obrigatórios", 422, {
+    return fail("invalid_request", t("phone_number_id, waba_id e token são obrigatórios"), 422, {
       requestId,
     });
   }
@@ -144,7 +184,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // recusar. O operador precisa saber que falta uma configuração de servidor.
     return fail(
       "invalid_request",
-      "cifra indisponível nesta instalação (GUC app.nuvemshop_oauth_key ausente) — o token não foi gravado",
+      t("cifra indisponível nesta instalação (GUC app.nuvemshop_oauth_key ausente) — o token não foi gravado"),
       422,
       { requestId },
     );
@@ -158,7 +198,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     admin
       .from("channel_sessions")
       .select(colunas)
-      .eq("organization_id", g.orgId)
+      .eq("organization_id", orgId)
       .eq("provider", CHANNEL_PROVIDER_META)
       .maybeSingle();
   const { data: existenteRaw } = await queryTolerantToMissingArchived(
@@ -168,7 +208,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const existente = existenteRaw as { id: string; archived_at?: string | null } | null;
 
   const linha = {
-    organization_id: g.orgId,
+    organization_id: orgId,
     provider: CHANNEL_PROVIDER_META,
     meta_phone_number_id: phone_number_id,
     meta_waba_id: waba_id,
@@ -195,18 +235,22 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     ? await reactivateChannelSession(
         admin,
         {
-          organizationId: g.orgId,
+          organizationId: orgId,
           channelSessionId: existente.id,
           archivedAt: existente.archived_at ?? null,
         },
         linha,
         {
-          userId: g.userId,
+          userId: userId,
           requestId,
           metadata: { provider: CHANNEL_PROVIDER_META, phone_number: linha.phone_number },
         },
       )
-    : await admin.from("channel_sessions").insert({ ...linha, webhook_secret_encrypted: cifrado });
+    : await admin.from("channel_sessions").insert({
+        ...linha,
+        webhook_secret_encrypted: cifrado,
+        metadata: metadataInicialDoCanal(),
+      });
 
   if (error) {
     return fail("internal_error", error.message ?? "channel_session_write_failed", 500, {

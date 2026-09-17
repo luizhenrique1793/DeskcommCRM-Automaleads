@@ -30,6 +30,8 @@
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { PROVIDERS_DE_MENSAGEM } from "./capabilities";
+
 /** Único estado em que mensagem entra e sai. Contrato do CRM (uppercase). */
 export const STATUS_SAUDAVEL = "WORKING";
 
@@ -51,6 +53,16 @@ export const STATUS_QUE_AVISAM = ["SCAN_QR_CODE", "FAILED", "STOPPED"] as const;
 
 /** Marca os avisos desta origem, para resolver o do canal CERTO depois. */
 export const REF_KIND_SESSAO = "channel_session";
+
+/**
+ * O transporte respondeu, e a resposta foi "sua credencial não vale".
+ *
+ * Vive aqui, e não no adapter, porque quem lê este código é a regra de aviso
+ * logo abaixo: é um contrato entre os dois, e um literal repetido nas duas
+ * pontas divergiria no primeiro renomeio — com o gate verde, porque nenhum
+ * `includes` reclama de string que ninguém mais escreve.
+ */
+export const DETALHE_CREDENCIAL_RECUSADA = "credencial_recusada_pelo_transporte";
 
 /**
  * Marca do episódio aberto por um EMPURRÃO do provedor.
@@ -84,11 +96,32 @@ export interface SaudeObservada {
  * pergunta de quem lê o aviso é exatamente essa.
  */
 export function avisoDaConexao(saude: SaudeObservada, apelido: string): AvisoDeConexao | null {
-  // Não deu para perguntar. NÃO é o mesmo que estar caído, e o aviso não pode
-  // afirmar o que não sabe: a ação aqui é olhar o serviço, não escanear um QR.
-  // `warn` e não `critical` porque uma oscilação de rede cabe neste ramo, e
-  // gritar por ela ensinaria o operador a ignorar a cor.
   if (!saude.reachable) {
+    // "Não deu para perguntar" tem DOIS motivos que pedem ações opostas, e
+    // tratá-los igual foi o defeito medido: numa VPS real a chave do WAHA foi
+    // trocada por uma segunda cópia do repo, TUDO parou, e por três dias a
+    // Central mostrou apenas um `warn` dizendo "não foi possível verificar" —
+    // a frase que se usa para descrever um soluço de rede. O dono só descobriu
+    // ao tentar conectar um número e ver o 401 na cara.
+    //
+    // Quando o transporte RESPONDE recusando a credencial, não há incerteza
+    // sobre a causa nem sobre o que fazer — e escanear o QR, que é o reflexo de
+    // quem lê "conexão caída", não resolve nada.
+    if (saude.detail === DETALHE_CREDENCIAL_RECUSADA) {
+      return {
+        kind: "channel_number_alert",
+        severity: "critical",
+        title: `Conexão "${apelido}": o servidor de WhatsApp recusou a chave de acesso`,
+        body:
+          "Escanear o QR não resolve: a chave que o CRM usa para falar com o servidor de WhatsApp não confere com a que o servidor espera. Enquanto isso durar, nenhuma mensagem entra nem sai por NENHUMA conexão. Quem cuida do servidor precisa conferir a WAHA_API_KEY do .env e recriar o contêiner do WhatsApp.",
+        episodio: "CREDENCIAL_RECUSADA",
+      };
+    }
+
+    // Não deu para perguntar mesmo. NÃO é o mesmo que estar caído, e o aviso
+    // não pode afirmar o que não sabe: a ação aqui é olhar o serviço, não
+    // escanear um QR. `warn` e não `critical` porque uma oscilação de rede cabe
+    // neste ramo, e gritar por ela ensinaria o operador a ignorar a cor.
     return {
       kind: "channel_number_alert",
       severity: "warn",
@@ -150,6 +183,11 @@ export async function listarConexoesCaidas(
     .select("id, display_name, phone_number, status")
     .eq("organization_id", organizationId)
     .is("archived_at", null)
+    // A faixa diz "nenhuma mensagem entra nem sai por esta conexão" e leva a
+    // Conexões. A linha de chamada de voz (spec 18) não é vigiada pelo cron de
+    // saúde (nenhum adapter a consulta), então o `status` dela envelhece parado:
+    // anunciá-la aqui seria a faixa permanente que ensina a ignorar a faixa.
+    .in("provider", [...PROVIDERS_DE_MENSAGEM])
     .in("status", [...STATUS_QUE_AVISAM]);
 
   return (data ?? []).map((s) => ({

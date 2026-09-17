@@ -33,9 +33,9 @@
  *      emitir este evento — mesma request, sequencial): cancela TUDO
  *      (`opted_out`). Senão, para enrollments `waiting_reply` do contato:
  *      `cancel_on_reply` no `trigger_config` do pointer → cancela
- *      (`replied`); senão, acorda (marker `inbound_woke` + `next_eval_at=now`)
- *      — o marker é o sinal PRÓPRIO que `node-handlers.ts`/`engine.ts`
- *      (Task 5.2) usam pra desempatar contra o "no_reply" da Task 5.1.
+ *      (`replied`); senão, acorda (marker `inbound_woke` + `next_eval_at=now`).
+ *      Inscrições `active` no nó `wait` seguem a mesma política: com
+ *      `cancel_on_reply`, cancelam; sem ela, acordam e cortam o timer.
  *   2. `ai.handoff_triggered` (handoff aberto) — já emitido em produção por
  *      `lib/ai/handoff/orchestrator.ts` (triggerHandoff, chamado por
  *      workers/ai-response-worker.ts, workers/ai-handoff-from-sentiment.handler.ts,
@@ -56,6 +56,7 @@ import type { EventRow } from "@/lib/event-log/dispatcher";
 import type { EnrollmentPatch } from "./engine";
 import { triggerConfigSchema } from "./api-schemas";
 import type { EnrollmentOutcome, EnrollmentStatus } from "./node-handlers";
+import { idsDoContatoEGemeos } from "@/lib/channels/contato-por-telefone";
 
 /** Grace pós-resume (spec §4: "grace configurável, default 30min, knob"). */
 export const RESUME_GRACE_MS = 30 * 60_000;
@@ -201,6 +202,7 @@ async function reactToInbound(
   }
 
   const waitingReply = live.filter((e) => e.status === "waiting_reply");
+  const esperaAtiva = live.filter((e) => e.status === "active");
   let reacted = 0;
   for (const e of waitingReply) {
     if (parseCancelOnReply(e.trigger_config)) {
@@ -218,27 +220,50 @@ async function reactToInbound(
       continue;
     }
 
-    // Acorda: marker de step próprio (`${node}:${steps}:wake`) — NÃO o
-    // idempotency_key de step (`${node}:${steps-1}`) que resolveWaitPhase
-    // checa. `steps_taken` não muda por essa escrita (só engine.ts avança
-    // steps_taken ao aplicar um NodeResult) — o marker fica válido até o
-    // tick reprocessar esta MESMA ocupação do nó.
-    const wakeKey = `${e.current_node_id}:${e.steps_taken}:wake`;
-    // `next_eval_at` vem do BANCO; `updated_at` continua do processo de
-    // propósito — ele é carimbo de auditoria, ninguém o compara com `now()`.
-    const agora = await db.agoraNoBanco();
-    const applied = await applyStep(
-      db,
-      row.organization_id,
-      e,
-      wakeKey,
-      "inbound_woke",
-      {},
-      { next_eval_at: agora, updated_at: clock().toISOString() },
-    );
-    if (applied) reacted++;
+    if (await acordarPorInbound(db, clock, row, e)) reacted++;
+  }
+  // Uma espera por tempo fixo fica `active` com timer. Quando o fluxo declara
+  // `cancel_on_reply`, a resposta deve encerrar também esta ocupação — não
+  // acordar o próximo nó e disparar a próxima mensagem imediatamente. Sem a
+  // verificação abaixo, a opção funcionava apenas para nós `waiting_reply`.
+  for (const e of esperaAtiva) {
+    if (parseCancelOnReply(e.trigger_config)) {
+      const key = `reactivity:${row.id}:${e.id}:reactivity_replied`;
+      const applied = await applyStep(
+        db,
+        row.organization_id,
+        e,
+        key,
+        "reactivity_replied",
+        { reason: "cancel_on_reply" },
+        cancelPatch(clock, "replied", "cancel_on_reply"),
+      );
+      if (applied) reacted++;
+      continue;
+    }
+
+    if (await acordarPorInbound(db, clock, row, e)) reacted++;
   }
   return { matched: true, reacted };
+}
+
+async function acordarPorInbound(
+  db: ReactivityAdminClient,
+  clock: () => Date,
+  row: EventRow,
+  e: LiveEnrollmentRef,
+): Promise<boolean> {
+  const wakeKey = `${e.current_node_id}:${e.steps_taken}:wake`;
+  const agora = await db.agoraNoBanco();
+  return applyStep(
+    db,
+    row.organization_id,
+    e,
+    wakeKey,
+    "inbound_woke",
+    {},
+    { next_eval_at: agora, updated_at: clock().toISOString() },
+  );
 }
 
 // ---- reação 2: ai.handoff_triggered (aberto) -------------------------------
@@ -386,11 +411,12 @@ export function createSupabaseReactivityClient(admin: SupabaseClient): Reactivit
       return data?.is_blocked ?? false;
     },
     async loadLiveEnrollmentsForContact(orgId, contactId) {
+      const ids = await idsDoContatoEGemeos(admin, orgId, contactId);
       const { data: enrollments, error } = await admin
         .from("followup_enrollments")
         .select("id, status, current_node_id, steps_taken, pointer_id")
         .eq("organization_id", orgId)
-        .eq("contact_id", contactId)
+        .in("contact_id", ids)
         .in("status", LIVE_STATUSES);
       if (error) throw new Error(error.message);
       if (!enrollments?.length) return [];

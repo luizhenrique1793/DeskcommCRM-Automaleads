@@ -1,3 +1,7 @@
+import { withServiceBoundary } from "@/lib/atendimento/fronteira-server";
+import { parseServiceBoundary, StaleServiceBoundaryError } from "@/lib/atendimento/fronteira";
+import { registrarRespostaDeCasoObsoleto } from "@/lib/atendimento/aviso-caso-obsoleto";
+import { requireSupportWrite } from "@/lib/impersonate/support";
 /**
  * POST /api/v1/ai/cases/:id/reply — a ação do humano sobre um caso aberto
  * (spec 15 §7/§9, Wave 5). Três ações: `resolved` (fecha e repassa ao lead),
@@ -32,12 +36,15 @@ import {
   buildCaseSummary,
 } from "@/lib/agent-engine/agent/human-cases";
 import { performHumanHandoff } from "@/lib/agent-engine/agent/human-handoff";
+import { avisarLeadDoCrm } from "@/lib/ai/handoff/aviso-ao-lead";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { getRequestPool } from "@/lib/agent-engine/db/request-pool";
 import { createLogger } from "@/lib/agent-engine/obs/logger";
 import { enqueueJob } from "@/lib/agent-engine/queue/queue";
 import { audit } from "@/lib/audit";
 import { ok, fail } from "@/lib/api/wrappers";
 import { requireRole } from "@/lib/auth/require-role";
+import { traduzir } from "@/lib/i18n/dicionario";
 
 export const dynamic = "force-dynamic";
 
@@ -59,6 +66,7 @@ const NEW_STATUS: Record<z.infer<typeof bodySchema>["action"], string> = {
 };
 
 interface CaseRow {
+  context_snapshot: Record<string, unknown> | null;
   status: string;
   title: string;
   summary: string;
@@ -68,9 +76,13 @@ interface CaseRow {
 }
 
 export async function POST(req: NextRequest, { params }: RouteParams): Promise<Response> {
+  const supportDenied = await requireSupportWrite();
+  if (supportDenied) return supportDenied;
+
   const requestId = randomUUID();
   const authz = await requireRole("agent", { requestId, resource: "agent_cases" });
   if (!authz.ok) return authz.response;
+  const t = (texto: string) => traduzir(texto, authz.user.idioma);
   const { org, user } = authz;
   const { id: caseId } = await params;
 
@@ -78,11 +90,11 @@ export async function POST(req: NextRequest, { params }: RouteParams): Promise<R
   try {
     payload = await req.json();
   } catch {
-    return fail("invalid_request", "Body inválido.", 400, { requestId });
+    return fail("invalid_request", t("Body inválido."), 400, { requestId });
   }
   const parsed = bodySchema.safeParse(payload);
   if (!parsed.success) {
-    return fail("validation_failed", "Body inválido.", 422, {
+    return fail("validation_failed", t("Body inválido."), 422, {
       requestId,
       details: parsed.error.flatten(),
     });
@@ -93,11 +105,11 @@ export async function POST(req: NextRequest, { params }: RouteParams): Promise<R
   try {
     pool = getRequestPool();
   } catch {
-    return fail("unavailable", "Resposta ao caso indisponível (config).", 503, { requestId });
+    return fail("unavailable", t("Resposta ao caso indisponível (config)."), 503, { requestId });
   }
 
   const { rows } = await pool.query<CaseRow>(
-    `select ac.status, ac.title, ac.summary, ac.blocker, ac.conversation_id, conv.contact_id
+    `select ac.status, ac.title, ac.summary, ac.blocker, ac.conversation_id, ac.context_snapshot, conv.contact_id
        from agent_cases ac
        join conversations conv
          on conv.id = ac.conversation_id and conv.organization_id = ac.organization_id
@@ -106,24 +118,36 @@ export async function POST(req: NextRequest, { params }: RouteParams): Promise<R
   );
   const caseRow = rows[0];
   if (caseRow === undefined) {
-    return fail("not_found", "Caso não encontrado.", 404, { requestId });
+    return fail("not_found", t("Caso não encontrado."), 404, { requestId });
   }
   if (caseRow.status !== "awaiting_human") {
     return fail(
       "invalid_state",
-      "O caso não está aguardando resposta do atendente (awaiting_human).",
+      t("O caso não está aguardando resposta do atendente (awaiting_human)."),
       409,
       { requestId },
     );
   }
   if (caseRow.contact_id === null) {
-    return fail("unprocessable_entity", "Conversa do caso sem contato associado.", 422, {
+    return fail("unprocessable_entity", t("Conversa do caso sem contato associado."), 422, {
       requestId,
     });
   }
   const { conversation_id: conversationId, contact_id: contactId } = caseRow;
 
   if (action === "escalate") {
+    const boundary = parseServiceBoundary(caseRow.context_snapshot?.service_boundary);
+    try {
+      if (boundary && (boundary.organization_id !== org.orgId || boundary.contact_id !== contactId || boundary.conversation_id !== conversationId)) throw new StaleServiceBoundaryError();
+      await withServiceBoundary(pool, boundary, async () => {
+    const aviso = await avisarLeadDoCrm(createAdminClient(), {
+      organizationId: org.orgId,
+      conversationId,
+      contactId,
+      reason: body,
+      serviceBoundary: boundary!,
+    });
+
     // O handoff roda ANTES de fechar o caso, e nesta ordem de propósito: ele é
     // idempotente (re-executar é no-op) e recebe um pg.Pool próprio, então não
     // entra na transação abaixo. Se ele falhar, o caso continua `awaiting_human`
@@ -135,15 +159,26 @@ export async function POST(req: NextRequest, { params }: RouteParams): Promise<R
       {
         reason: body,
         conversationSummary: buildCaseSummary(caseRow),
+        avisoAoLead: aviso,
         log: createLogger(),
       },
     );
+      });
+    } catch (error) {
+      if (!(error instanceof StaleServiceBoundaryError)) throw error;
+      // A resposta humana fica registrada, mas não altera o atendimento novo.
+      const registered = await registrarRespostaDeCasoObsoleto(pool, org.orgId, caseId, user.id, body);
+      if (!registered) return fail("invalid_state", "Este caso já foi respondido por outra pessoa.", 409, { requestId });
+      await audit({ action: "ai.case_replied", actorUserId: user.id, organizationId: org.orgId,
+        resourceType: "agent_case", resourceId: caseId, requestId, metadata: { case_action: action, service_stale: true } });
+      return ok({ status: "resolved", delivery: "service_stale" }, { requestId });
+    }
     const escalated = await escalateCase(pool, org.orgId, caseId, user.id, body);
     if (!escalated) {
       // Corrida perdida entre a leitura e o update. O handoff já aconteceu (e é
       // idempotente), então não mentimos dizendo que escalamos: devolvemos o
       // conflito para a UI reler o caso.
-      return fail("invalid_state", "Este caso já foi respondido por outra pessoa.", 409, {
+      return fail("invalid_state", t("Este caso já foi respondido por outra pessoa."), 409, {
         requestId,
       });
     }
@@ -177,7 +212,7 @@ export async function POST(req: NextRequest, { params }: RouteParams): Promise<R
       client.release();
     }
     if (!transitioned) {
-      return fail("invalid_state", "Este caso já foi respondido por outra pessoa.", 409, {
+      return fail("invalid_state", t("Este caso já foi respondido por outra pessoa."), 409, {
         requestId,
       });
     }

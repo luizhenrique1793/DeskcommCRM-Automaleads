@@ -11,11 +11,18 @@ import {
   ChartBar,
   Users,
   ShieldCheck,
+  CalendarBlank,
+  Palette,
+  Key,
+  WebhooksLogo,
   ArrowRight,
 } from "@/lib/ui/icons";
 import type { Icon as PhosphorIcon } from "@phosphor-icons/react";
 import { cn } from "@/lib/utils";
-import { branding } from "@/lib/branding";
+import { SimboloDoProduto } from "@/components/branding/MarcaDoProduto";
+import { marcaEhADoProduto } from "@/lib/branding";
+import { useMarcaDaInstalacao } from "@/lib/branding/contexto";
+import { useT } from "@/hooks/i18n/useT";
 
 interface NavItem {
   href: string;
@@ -33,26 +40,62 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/admin/usage", label: "Usage", icon: ChartBar },
   { href: "/admin/users", label: "Users", icon: Users },
   { href: "/admin/platform-admins", label: "Platform Admins", icon: ShieldCheck },
+  // A porta da tela de marca. Ela NÃO entra em `lib/navigation/registry.ts`:
+  // aquele registro descreve a navegação do tenant (`app/app/**`) e o teste de
+  // completude que o vigia varre só aquela raiz. O admin de plataforma tem
+  // navegação própria, e é esta lista.
+  { href: "/admin/marca", label: "Marca", icon: Palette },
+  // A porta da tela do app OAuth do Google — mesma razão da de cima: é
+  // configuração da INSTALAÇÃO, e /admin tem navegação própria.
+  { href: "/admin/google", label: "Google Agenda", icon: CalendarBlank },
+  // A porta da tela do App da Meta (chave secreta e token de verificação do
+  // webhook) — mesma razão da de cima: é da INSTALAÇÃO. O rótulo é o da aba de
+  // Conexões, para quem vem de lá reconhecer o mesmo nome.
+  { href: "/admin/meta", label: "API Oficial (Meta)", icon: WebhooksLogo },
+  // A porta da tela que decide quem pode criar conta nesta instalação — mesma
+  // razão das duas de cima: é configuração da INSTALAÇÃO, e /admin tem
+  // navegação própria (o registro de `lib/navigation/` cobre só `app/app/**`).
+  { href: "/admin/cadastro", label: "Cadastro", icon: Key },
 ];
 
 interface AdminSidebarProps {
   userEmail: string;
+  /** "mobile" = conteúdo desta MESMA navegação dentro do drawer que `AdminShell`
+   * abre abaixo de `lg` — mesmo padrão de `components/shell/Sidebar.tsx`. */
+  variant?: "desktop" | "mobile";
 }
 
-export function AdminSidebar({ userEmail }: AdminSidebarProps) {
+export function AdminSidebar({ userEmail, variant = "desktop" }: AdminSidebarProps) {
+  const t = useT();
+  const isMobile = variant === "mobile";
   const pathname = usePathname();
+  // Por PROP do servidor, e nunca `branding()`: aquela função lê fontes
+  // diferentes nos dois lados da fronteira (`window.__PUBLIC_ENV__` no
+  // navegador, `process.env` no servidor), e desde que o layout raiz passou a
+  // injetar a marca do BANCO as duas divergem — o nome renderizado no SSR não
+  // batia com o hidratado, que é hydration mismatch. Ver `lib/branding/contexto.tsx`.
+  const marca = useMarcaDaInstalacao();
 
   return (
-    <aside className="flex w-60 shrink-0 flex-col border-r bg-card">
-      <div className="flex h-14 items-center border-b px-4">
+    <aside
+      className={cn(
+        "flex flex-col border-r bg-card",
+        isMobile ? "h-full w-full" : "hidden w-60 shrink-0 lg:flex",
+      )}
+    >
+      <div className="flex h-14 items-center gap-3 border-b px-4">
+        {/* O nome já está escrito ao lado — o símbolo é reforço, não legenda. */}
+        {marcaEhADoProduto(marca) && (
+          <SimboloDoProduto nome={marca.name} decorativo className="h-8 w-8" />
+        )}
         <div className="flex flex-col">
           <span className="text-xs uppercase tracking-wider text-muted-foreground">
-            {branding().name}
+            {marca.name}
           </span>
-          <span className="text-sm font-semibold tracking-tight">Admin Plataforma</span>
+          <span className="text-sm font-semibold tracking-tight">{t("Admin Plataforma")}</span>
         </div>
       </div>
-      <nav className="flex-1 space-y-1 overflow-y-auto p-2" aria-label="Navegação plataforma">
+      <nav className="flex-1 space-y-1 overflow-y-auto p-2" aria-label={t("Navegação plataforma")}>
         {NAV_ITEMS.map((item) => {
           const isActive =
             pathname === item.href || pathname.startsWith(item.href + "/");
@@ -70,7 +113,7 @@ export function AdminSidebar({ userEmail }: AdminSidebarProps) {
               )}
             >
               <Icon size={18} weight={isActive ? "fill" : "regular"} aria-hidden />
-              <span className="truncate">{item.label}</span>
+              <span className="truncate">{t(item.label)}</span>
             </Link>
           );
         })}
@@ -81,7 +124,7 @@ export function AdminSidebar({ userEmail }: AdminSidebarProps) {
           className="flex items-center gap-2 rounded-md px-2 py-1.5 text-xs text-muted-foreground hover:bg-accent/50 hover:text-foreground"
         >
           <ArrowRight size={14} aria-hidden />
-          <span>Voltar pra app</span>
+          <span>{t("Voltar pra app")}</span>
         </Link>
         <p className="truncate px-2 text-xs text-muted-foreground" title={userEmail}>
           {userEmail}
