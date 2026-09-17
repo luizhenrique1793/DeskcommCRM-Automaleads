@@ -88,6 +88,16 @@ const FORA_DE_INTERFACE: Record<string, string> = {
   // da interface faria um documento de conformidade mudar de forma conforme
   // quem apertou o botão.
   "lib/lgpd/pdf-renderer.tsx": "documento legal brasileiro: a data acompanha a lei, não a interface",
+
+  // ─── Data que o AGENTE lê, não a pessoa ───
+  //
+  // `pousada_consultar_data_atual` é uma MCP tool: o resultado vai para o
+  // contexto do modelo (`hoje_por_extenso`), não para uma tela renderizada com
+  // o idioma de quem está logado. O idioma da CONVERSA com o cliente é decidido
+  // pelo próprio modelo a partir do que o cliente escreveu, não pelo `idioma`
+  // do usuário da plataforma — a mesma fronteira do PDF de LGPD e do
+  // conteúdo gravado do dashboard, um nível abaixo da interface.
+  "lib/mcp/tools/pousada.ts": "saída de MCP tool para o contexto do modelo, não interface renderizada",
 };
 
 function arquivos(dir: string, acc: string[] = []): string[] {

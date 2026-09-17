@@ -24,6 +24,7 @@ import { loadPousadaSettings } from "@/lib/pousada/settings";
 import { executarChamadaPousada } from "@/lib/pousada/executor";
 import { getAdapter, resolveSessionRef, CHANNEL_SESSION_REF_COLUMNS } from "@/lib/channels";
 import type { ChannelProvider, ChannelSessionRef } from "@/lib/channels";
+import { branding } from "@/lib/branding";
 import type { McpContext, McpToolDefinition } from "../types";
 
 /**
@@ -476,7 +477,7 @@ export const pousadaCriarReserva: McpToolDefinition<typeof criarReservaInputShap
         QuantidadeDeAdultos: String(input.quantidade_adultos),
         QuantidadeDeCriancas: String(input.quantidade_criancas),
         QuantidadeDeCriancas_11_12: String(input.quantidade_11_12),
-        observacao: "Reserva via atendimento automático (DeskcommCRM)",
+        observacao: `Reserva via atendimento automático (${branding().name})`,
         descricaoPacotes: input.pacote_cotado,
       },
       pacotes: [{}],
@@ -796,6 +797,7 @@ export const pousadaEnviarBotaoCopiarPix: McpToolDefinition<typeof enviarBotaoPi
     }
 
     const enviado = await adapter.sendButtonCopy({
+      organizationId: ctx.organizationId,
       sessionRef: resolveSessionRef(cs),
       to,
       text: "Toque para copiar o código PIX:",

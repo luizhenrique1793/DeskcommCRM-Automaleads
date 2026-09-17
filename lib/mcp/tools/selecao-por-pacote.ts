@@ -52,8 +52,36 @@ import { entraPorPacote, type ToolBundle, type ToolRisk } from "./pacotes";
  * degradação que a heurística prevê. O lugar de observá-la é
  * `app/api/v1/ai/agents/[id]/tool-usage` e o log de invocação do run, com
  * "ferramenta errada escolhida" como sinal. Quem for subir de novo mede antes.
+ *
+ * ═══ Por que 29, e não mais os 25 de antes ═══════════════════════════════════
+ *
+ * Incorporação da Automaleads (catálogo de 57 para 69 capacidades: 8 tools da
+ * pousada/reservas, quase todas em `vender`). `vender` sozinho passou a exigir
+ * 29 vagas (26 automáticas + 3 críticas reservadas — cobrança PIX é crítica),
+ * 4 acima do teto de 25: o pacote mais básico de venda de um agente ZERADO
+ * ficava impossível de ligar por inteiro, o MESMO defeito que motivou os dois
+ * saltos anteriores (20→21, 20→25). Medido e vigiado por
+ * `tests/unit/selecao-por-pacote.test.ts` ("nenhum pacote real estoura o teto
+ * sozinho") e `tests/unit/pacote-reserva-vaga-da-critica.test.ts` — os dois
+ * varrem TODO o catálogo real a cada CI, não um pacote escolhido a dedo, e
+ * reprovariam sozinhos se um catálogo futuro estourar de novo.
+ *
+ * 29 resolvia "vender cabe sozinho", mas não o segundo defeito do mesmo
+ * catálogo: `PACOTE_PADRAO_DO_ONBOARDING` é `vender` inteiro (26 automáticas)
+ * — todo agente NOVO já nasce com ele —, e a partir desse ponto de partida
+ * NENHUM outro pacote cabia mais (atender exigia 40, escalar 38, organizar
+ * 42, reter 32, evoluir 31 — o menor dos cinco). O dono liga o primeiro
+ * pacote e o produto recusa todos os outros: o mesmo "beco" do defeito D3 da
+ * v1.7.0, só que reaberto pela pousada em vez da agenda. Vigiado por
+ * `tests/unit/pacote-reserva-vaga-da-critica.test.ts` ("ALGUM outro pacote
+ * ainda cabe"), que mede a partir do onboarding real, não de um pacote
+ * escolhido a dedo.
+ *
+ * 31 é de novo o MENOR passo: é exatamente o que `evoluir` exige depois do
+ * onboarding — o pacote mais barato dos cinco candidatos. Subir menos que
+ * isso deixaria o onboarding sem NENHUM segundo pacote alcançável.
  */
-export const TETO_TOOLS_POR_AGENTE = 25;
+export const TETO_TOOLS_POR_AGENTE = 31;
 
 /** O mínimo que a regra precisa saber de uma capacidade. */
 export interface CapacidadeSelecionavel {
