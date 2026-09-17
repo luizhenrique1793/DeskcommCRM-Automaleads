@@ -28,13 +28,15 @@ Três informações, nesta ordem. Nada além.
 <!-- triagem-de-pr:v1:pass=1 -->
 Recebido, @<login> — obrigado por isto.
 
-Duas coisas que vão parecer erro seu e não são:
+Uma coisa vai parecer erro seu e não é:
 
-- O check **Vercel** vermelho ("Authorization required to deploy") é esperado em PR de fork. A `main`
-  faz deploy de produção e a Vercel se recusa a construir código de fora, o que está certo. **Ele não
-  entra no gate de merge.**
 - Os workflows ficam parados esperando liberação no primeiro PR de quem nunca contribuiu — política
   do GitHub, não sua. **Acabei de liberar**, o CI já está rodando.
+
+Quando eles terminarem, o que trava o merge são só os checks marcados **Required** no seu PR — é essa
+lista que vale, não qualquer outro vermelho que apareça. No terminal, `gh pr checks <número> --required`
+mostra os obrigatórios que **já reportaram**, e só esses: enquanto um deles não rodou, ele não aparece
+ali. Se um reprovar, a saída dele diz o que falta; se não estiver claro, me diga aqui — não feche o PR.
 
 Vou revisar de verdade — rodando os gates e reproduzindo o comportamento, não só lendo o diff — e
 volto com o resultado <prazo>. Se eu achar algo, venho com a medição junto, nunca com um "acho que".

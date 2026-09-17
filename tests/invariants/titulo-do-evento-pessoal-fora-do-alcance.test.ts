@@ -104,9 +104,9 @@ const DEFEITO_DA_V1260 = `
 /**
  * O default ACL de TABELAS que todo projeto Supabase grava antes de qualquer SQL
  * nosso, reconstruído dentro da transação (o `rollback` o desfaz). O prelude do
- * `test:db` não o reproduz (issue #887); hoje ele chega mesmo assim, pelo `ALTER
- * DEFAULT PRIVILEGES … ON TABLES` que o próprio dump emite — e depender disso
- * faria o caso medir o dump, não o Supabase. As duas metades têm alvos diferentes:
+ * `test:db` o reproduz desde a issue #887, e o próprio dump também emite um
+ * `ALTER DEFAULT PRIVILEGES … ON TABLES` — depender de qualquer um dos dois faria
+ * o caso medir o ambiente do gate, não o Supabase. As duas metades têm alvos diferentes:
  *
  * - o `alter default privileges` decide o ACL de relação CRIADA DEPOIS, e o bloco
  *   da 0261 CRIA a view (`drop` + `create`). É ele que dá tudo a `anon` na view

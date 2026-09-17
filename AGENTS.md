@@ -436,9 +436,29 @@ Lei completa em [`docs/doctrine/packaging.md`](docs/doctrine/packaging.md). O n�
 
 `pnpm test:shell` é o único gate que exercita o kit. Rode-o.
 
+## Extensões — se sua mudança muda comportamento
+
+Lei completa em [`docs/doctrine/extensoes.md`](docs/doctrine/extensoes.md); contrato vigente em
+[`docs/specs/extensoes-declarativas-v1.md`](docs/specs/extensoes-declarativas-v1.md). Declare o
+destino (núcleo, extensão, ambos ou infraestrutura) respondendo: **se nenhuma organização ativar
+isto, a operação comum continua inteira?** O não-negociável:
+
+- **O núcleo continua útil com zero extensões.** Nenhuma jornada do núcleo depende de extensão ativa.
+- **Extensão pede capacidade nomeada** e não importa código interno, não lê o banco e não recebe
+  cliente Supabase, ambiente ou dados do CRM. Instalar não concede autoridade.
+- **A instância decide o pacote; a organização decide o uso.** A plataforma não reativa decisão da
+  organização.
+- **Toda operação é recibo idempotente com saída pela tela; toda troca de ponteiro exige a revisão
+  que a tela viu.** Remover é lógico e preserva dados e configuração.
+- **Não anuncie SDK, código isolado ou marketplace público**, e não extraia do núcleo recurso já
+  distribuído sem equivalência e migração.
+- **Módulo oficial com dados não põe tabela no baseline para todos**
+  ([ADR-0002](docs/adr/0002-tabelas-de-modulo-num-banco-so.md)): um banco só, `public`, tabelas criadas
+  por função provisionadora fixa quando o módulo é instalado na instância.
+
 ## Critério de conclusão
 
-Vale a **Definition of Done em [`CLAUDE.md`](CLAUDE.md)** — conte lá em vez de confiar num número aqui (`sed -n '/^## Definition of Done/,/^Um staff engineer/p' CLAUDE.md | grep -cE '^[0-9]+\. '`; esta linha já disse 15 e o DoD tem 16). A régua tem que DELIMITAR a seção: a primeira versão desta linha oferecia `grep -c '^[0-9]\+\. \*\*' CLAUDE.md`, que devolve **25** — casa toda linha numerada em negrito do arquivo (anti-patterns, packaging, higiene de branches, migrations) e perde os itens 1–10 do próprio DoD, que não são negrito. Trocar o número pelo comando só ajuda se o comando responder à pergunta. Não declare pronto
+Vale a **Definition of Done em [`CLAUDE.md`](CLAUDE.md)** — conte lá em vez de confiar num número aqui (`sed -n '/^## Definition of Done/,/^Um staff engineer/p' CLAUDE.md | grep -cE '^[0-9]+\. '`; esta linha já disse 15 quando o DoD tinha 16). A régua tem que DELIMITAR a seção: a primeira versão desta linha oferecia `grep -c '^[0-9]\+\. \*\*' CLAUDE.md`, que devolve **25** — casa toda linha numerada em negrito do arquivo (anti-patterns, packaging, higiene de branches, migrations) e perde os itens 1–10 do próprio DoD, que não são negrito. Trocar o número pelo comando só ajuda se o comando responder à pergunta. Não declare pronto
 sem: typecheck/lint zerados, testes relevantes verdes, RLS testada se tocou tabela
 tenant-aware, migration + baseline + MANIFEST se mudou schema, prova visual se mudou UI, e a
 regra de packaging acima se mudou o artefato que o self-hoster instala.

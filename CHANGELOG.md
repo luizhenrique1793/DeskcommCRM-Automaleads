@@ -8,6 +8,28 @@ Se você roda o DeskcommCRM numa VPS, **leia a seção da versão para a qual es
 
 ## [Não lançado]
 
+## [1.32.1] — 2026-09-17
+
+### Corrigido
+
+- **A senha das rotinas automáticas deixa de ser gravada no log do servidor** A rotina que processa a fila de eventos a cada minuto levava a senha interna escrita na própria linha do agendamento, e o servidor anota cada execução no log do sistema: a senha ia parar lá uma vez por minuto. Agora ela fica num arquivo que só o administrador do servidor lê, e a linha do agendamento só aponta para ele. Instalações novas já nascem assim; nas existentes, a troca acontece sozinha a partir da atualização SEGUINTE a esta, porque a atualização em curso ainda roda o instalador da versão anterior. Crédito: @rafaeskytrabalho.
+
+## [1.32.0] — 2026-09-17
+
+### Adicionado
+
+- **Guias opcionais podem ser instalados e ativados por organização** A área Extensões permite ao responsável pela instalação admitir um catálogo revisado e baixar guias declarativos sem reconstruir o aplicativo. Cada organização escolhe quais guias ativar e como apresentá-los no CRM; desativar preserva a configuração. Os pedidos ficam registrados, com retomada e cancelamento de preparações interrompidas. O conteúdo instalado continua disponível quando o catálogo está fora do ar.
+
+  O responsável pela instalação também atualiza um guia para outra versão do catálogo, desfaz a última troca mesmo com o catálogo fora do ar e remove um guia da instalação. Enquanto houver um guia sendo preparado, a atualização do sistema pela tela espera; a própria tela diz como retomar ou cancelar essa preparação em Extensões. Remover desliga o guia em todas as organizações, guarda a configuração de cada uma e registra na auditoria de cada organização por que ele saiu; ao reinstalar, cada organização decide se ativa de novo.
+
+  Este primeiro perfil aceita apenas conteúdo e ações conhecidas do sistema. Código externo e o catálogo público com avaliações ainda não são oferecidos. O sistema continua funcionando com zero extensões, e a atualização normal aplica as tabelas necessárias, sem variável obrigatória nem edição manual de arquivo. A única variável nova, `EXTENSIONS_LOCAL_CATALOG_ORIGIN`, é de laboratório e fica vazia por padrão.
+
+### Corrigido
+
+- **As travas do modo somente leitura do suporte cobrem todas as tabelas já na instalação nova** As travas do modo somente leitura do suporte cobrem todas as tabelas da organização já na primeira aplicação do schema, e uma instalação nova chega ao mesmo conjunto de travas que uma instalação atualizada.
+
+  Não há nada a fazer: a próxima atualização aplica a correção sozinha.
+
 ## [1.31.1] — 2026-09-17
 
 ### Corrigido
@@ -5113,7 +5135,9 @@ Primeira versão marcada do DeskcommCRM. O projeto vinha sendo desenvolvido publ
 
 - **Node 22 é obrigatório para desenvolvimento.** A suíte de invariantes instancia o cliente do Supabase, que exige o `WebSocket` global — nativo apenas a partir do Node 22. Isso não afeta quem apenas hospeda: a VPS roda a imagem pronta.
 
-[Não lançado]: https://github.com/melgarafael/DeskcommCRM/compare/v1.31.1...HEAD
+[Não lançado]: https://github.com/melgarafael/DeskcommCRM/compare/v1.32.1...HEAD
+[1.32.1]: https://github.com/melgarafael/DeskcommCRM/compare/v1.32.0...v1.32.1
+[1.32.0]: https://github.com/melgarafael/DeskcommCRM/compare/v1.31.1...v1.32.0
 [1.31.1]: https://github.com/melgarafael/DeskcommCRM/compare/v1.31.0...v1.31.1
 [1.31.0]: https://github.com/melgarafael/DeskcommCRM/compare/v1.30.0...v1.31.0
 [1.30.0]: https://github.com/melgarafael/DeskcommCRM/compare/v1.29.0...v1.30.0

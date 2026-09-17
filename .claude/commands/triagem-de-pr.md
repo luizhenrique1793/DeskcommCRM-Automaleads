@@ -62,3 +62,6 @@ Seis lembretes que valem antes mesmo de abrir o arquivo:
    quando falta, creditando o autor), seção `## [X.Y.Z]` escrita à mão no `CHANGELOG.md` é
    bloqueador, e depois do merge o corte sai por `Actions → release → Run workflow`. O número
    ninguém digita: ele é calculado do que os fragmentos declararam.
+6. **Registre o destino: núcleo, extensão, ambos ou infraestrutura/documentação** (passe 2-bis).
+   O núcleo segue completo sem extensões. A classificação orienta a arquitetura e não cobra do
+   contribuidor um SDK ainda inexistente, nem autoriza retirar recursos já distribuídos.

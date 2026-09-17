@@ -693,6 +693,15 @@ export const NAV_CATALOG = [
     section: "Dados e acesso",
     minRole: "admin",
   },
+  {
+    href: "/app/extensions",
+    label: "Extensões",
+    description:
+      "Guias instalados para orientar o trabalho no CRM, com permissões e estado visíveis.",
+    icon: "PuzzlePiece",
+    group: "organizacao",
+    section: "Sua empresa",
+  },
 ] as const satisfies readonly NavMetadata[];
 
 export type NavDestinationId = (typeof NAV_CATALOG)[number]["href"];

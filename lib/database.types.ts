@@ -4473,6 +4473,218 @@ export type Database = {
           },
         ]
       }
+      extension_artifacts: {
+        Row: {
+          byte_length: number
+          created_at: string
+          document: string
+          id: string
+          manifest: Json
+          sha256: string
+        }
+        Insert: {
+          byte_length: number
+          created_at?: string
+          document: string
+          id?: string
+          manifest: Json
+          sha256: string
+        }
+        Update: {
+          byte_length?: number
+          created_at?: string
+          document?: string
+          id?: string
+          manifest?: Json
+          sha256?: string
+        }
+        Relationships: []
+      }
+      extension_catalogs: {
+        Row: {
+          admitted_at: string
+          admitted_by: string | null
+          digest: string
+          id: string
+          origin: string
+          revision: number
+          snapshot: Json
+        }
+        Insert: {
+          admitted_at?: string
+          admitted_by?: string | null
+          digest: string
+          id?: string
+          origin: string
+          revision: number
+          snapshot: Json
+        }
+        Update: {
+          admitted_at?: string
+          admitted_by?: string | null
+          digest?: string
+          id?: string
+          origin?: string
+          revision?: number
+          snapshot?: Json
+        }
+        Relationships: []
+      }
+      extension_installations: {
+        Row: {
+          artifact_id: string
+          catalog_id: string
+          id: string
+          installed_at: string
+          installed_by: string | null
+          name: string
+          previous_artifact_id: string | null
+          publisher: string
+          removed_at: string | null
+          removed_by: string | null
+          revision: number
+          version: string
+        }
+        Insert: {
+          artifact_id: string
+          catalog_id: string
+          id?: string
+          installed_at?: string
+          installed_by?: string | null
+          name: string
+          previous_artifact_id?: string | null
+          publisher: string
+          removed_at?: string | null
+          removed_by?: string | null
+          revision?: number
+          version: string
+        }
+        Update: {
+          artifact_id?: string
+          catalog_id?: string
+          id?: string
+          installed_at?: string
+          installed_by?: string | null
+          name?: string
+          previous_artifact_id?: string | null
+          publisher?: string
+          removed_at?: string | null
+          removed_by?: string | null
+          revision?: number
+          version?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "extension_installations_artifact_id_fkey"
+            columns: ["artifact_id"]
+            isOneToOne: false
+            referencedRelation: "extension_artifacts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "extension_installations_catalog_id_fkey"
+            columns: ["catalog_id"]
+            isOneToOne: false
+            referencedRelation: "extension_catalogs"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "extension_installations_previous_artifact_id_fkey"
+            columns: ["previous_artifact_id"]
+            isOneToOne: false
+            referencedRelation: "extension_artifacts"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      extension_operations: {
+        Row: {
+          actor_id: string | null
+          admission_digest: string | null
+          admission_revision: number | null
+          catalog_id: string | null
+          created_at: string
+          entry: Json | null
+          error_code: string | null
+          id: string
+          installation_id: string | null
+          kind: string
+          name: string | null
+          organization_id: string | null
+          publisher: string | null
+          request: Json
+          request_fingerprint: string
+          result: Json | null
+          status: string
+          updated_at: string
+          version: string | null
+        }
+        Insert: {
+          actor_id?: string | null
+          admission_digest?: string | null
+          admission_revision?: number | null
+          catalog_id?: string | null
+          created_at?: string
+          entry?: Json | null
+          error_code?: string | null
+          id: string
+          installation_id?: string | null
+          kind: string
+          name?: string | null
+          organization_id?: string | null
+          publisher?: string | null
+          request: Json
+          request_fingerprint: string
+          result?: Json | null
+          status: string
+          updated_at?: string
+          version?: string | null
+        }
+        Update: {
+          actor_id?: string | null
+          admission_digest?: string | null
+          admission_revision?: number | null
+          catalog_id?: string | null
+          created_at?: string
+          entry?: Json | null
+          error_code?: string | null
+          id?: string
+          installation_id?: string | null
+          kind?: string
+          name?: string | null
+          organization_id?: string | null
+          publisher?: string | null
+          request?: Json
+          request_fingerprint?: string
+          result?: Json | null
+          status?: string
+          updated_at?: string
+          version?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "extension_operations_catalog_id_fkey"
+            columns: ["catalog_id"]
+            isOneToOne: false
+            referencedRelation: "extension_catalogs"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "extension_operations_installation_id_fkey"
+            columns: ["installation_id"]
+            isOneToOne: false
+            referencedRelation: "extension_installations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "extension_operations_organization_id_fkey"
+            columns: ["organization_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       flywheel_distiller_proposals: {
         Row: {
           applied_at: string | null
@@ -6207,6 +6419,54 @@ export type Database = {
           },
         ]
       }
+      organization_extensions: {
+        Row: {
+          configuration: Json
+          deactivated_by_removal_at: string | null
+          enabled: boolean
+          installation_id: string
+          organization_id: string
+          revision: number
+          updated_at: string
+          updated_by: string | null
+        }
+        Insert: {
+          configuration: Json
+          deactivated_by_removal_at?: string | null
+          enabled: boolean
+          installation_id: string
+          organization_id: string
+          revision: number
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Update: {
+          configuration?: Json
+          deactivated_by_removal_at?: string | null
+          enabled?: boolean
+          installation_id?: string
+          organization_id?: string
+          revision?: number
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "organization_extensions_installation_id_fkey"
+            columns: ["installation_id"]
+            isOneToOne: false
+            referencedRelation: "extension_installations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "organization_extensions_organization_id_fkey"
+            columns: ["organization_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       organizations: {
         Row: {
           ai_budget_cents: number | null
@@ -7722,6 +7982,90 @@ export type Database = {
           p_key: string
           p_onboarding?: boolean
           p_org: string
+        }
+        Returns: Json
+      }
+      fn_extensions_admit_catalog: {
+        Args: {
+          p_actor: string
+          p_digest: string
+          p_operation: string
+          p_snapshot: Json
+        }
+        Returns: Json
+      }
+      fn_extensions_assert_actor: {
+        Args: { p_actor: string; p_organization?: string }
+        Returns: undefined
+      }
+      fn_extensions_cancel_install: {
+        Args: { p_actor: string; p_operation: string }
+        Returns: Json
+      }
+      fn_extensions_configure: {
+        Args: {
+          p_actor: string
+          p_configuration: Json
+          p_enabled: boolean
+          p_expected_revision: number
+          p_installation: string
+          p_operation: string
+          p_organization: string
+        }
+        Returns: Json
+      }
+      fn_extensions_core_update_in_progress: { Args: never; Returns: boolean }
+      fn_extensions_fail_install: {
+        Args: { p_actor: string; p_error_code: string; p_operation: string }
+        Returns: Json
+      }
+      fn_extensions_fingerprint: { Args: { p_request: Json }; Returns: string }
+      fn_extensions_finish_install: {
+        Args: {
+          p_actor: string
+          p_byte_length: number
+          p_document: string
+          p_manifest: Json
+          p_operation: string
+          p_sha256: string
+        }
+        Returns: Json
+      }
+      fn_extensions_installation_counts: {
+        Args: { p_actor: string }
+        Returns: {
+          active_organizations: number
+          awaiting_reactivation: number
+          installation_id: string
+        }[]
+      }
+      fn_extensions_prepare_install: {
+        Args: {
+          p_actor: string
+          p_catalog: string
+          p_expected_installation_revision: number
+          p_name: string
+          p_operation: string
+          p_publisher: string
+          p_version: string
+        }
+        Returns: Json
+      }
+      fn_extensions_remove_installation: {
+        Args: {
+          p_actor: string
+          p_expected_installation_revision: number
+          p_installation: string
+          p_operation: string
+        }
+        Returns: Json
+      }
+      fn_extensions_revert_install: {
+        Args: {
+          p_actor: string
+          p_expected_installation_revision: number
+          p_installation: string
+          p_operation: string
         }
         Returns: Json
       }

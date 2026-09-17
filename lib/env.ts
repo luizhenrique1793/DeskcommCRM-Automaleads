@@ -75,6 +75,10 @@ const schema = z.object({
   /** Optional dedicated secret for cron endpoints (S-06.07 onwards). */
   INTERNAL_CRON_SECRET: z.string().optional().default(""),
 
+  // Laboratório local de extensões: origem HTTP exata em 127.0.0.1. O cliente
+  // recusa a exceção se a URL do app não for loopback. Vazio mantém HTTPS público.
+  EXTENSIONS_LOCAL_CATALOG_ORIGIN: z.string().optional().default(""),
+
   /**
    * Retenção do arquivo do corpo cru dos webhooks (`webhook_events_log`).
    *
@@ -409,7 +413,7 @@ if (!parsed.success) {
   console.error("[env] Falha de validação de variáveis de ambiente:");
   console.error(parsed.error.flatten().fieldErrors);
   throw new Error(
-    "Variáveis de ambiente inválidas. Veja o erro acima e ajuste .env.local / Vercel.",
+    "Variáveis de ambiente inválidas. Veja o erro acima e ajuste o .env da instalação (ou .env.local, em dev).",
   );
 }
 

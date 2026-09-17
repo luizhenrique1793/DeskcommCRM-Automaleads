@@ -1,13 +1,23 @@
 /**
- * Configuração do projeto na Vercel.
+ * Agendamento para quem hospeda um FORK deste repositório na Vercel.
  *
- * Os crons abaixo são a MESMA cadência de `docker/scheduler/entrypoint.sh`.
+ * O caminho oficial é o self-host: quem chama as rotas de cron é o serviço
+ * `scheduler` (`docker/scheduler/entrypoint.sh`). Os crons abaixo são a MESMA
+ * cadência daquele crontab, e `tests/unit/cron-routes-scheduled.test.ts` reprova
+ * quando as duas listas de rotas divergem (a cadência não está sob gate) — rota de
+ * cron nova entra nos dois arquivos.
+ *
  * Plano Pro: minuto a minuto vale. Hobby: expressões mais frequentes que
  * 1×/dia derrubam o deploy — nesse caso deixe só o `lgpd-sla-watcher` e use
- * o relógio HTTP (`docs/runbooks/vercel-hobby-relogio.md`).
+ * o relógio HTTP (`app/api/v1/system/relogio/tick/route.ts`; passo a passo em
+ * `docs/runbooks/vercel-hobby-relogio.md`).
  *
- * Auth: Vercel Cron manda Bearer CRON_SECRET; em produção `lib/env.ts` copia
- * isso para INTERNAL_CRON_SECRET. INTERNAL_SECRET continua valendo nas rotas.
+ * Auth: o Vercel Cron manda Bearer CRON_SECRET; em produção `lib/env.ts` copia esse
+ * valor para INTERNAL_CRON_SECRET. A regra canônica de quem é aceito está em
+ * `lib/auth/cron-auth.ts`, que confere o Bearer contra os DOIS segredos — então o
+ * INTERNAL_SECRET segue servindo. A exceção é
+ * `app/api/v1/cron/sync-model-catalog/route.ts`, que espera só o primeiro dos dois
+ * que estiver definido: com CRON_SECRET presente, o INTERNAL_SECRET não passa ali.
  */
 
 import type { VercelConfig } from "@vercel/config/v1";

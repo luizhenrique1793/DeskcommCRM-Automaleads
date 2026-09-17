@@ -121,11 +121,8 @@ abaixo são para que isso não se repita.
 
 ### Se você está contribuindo de fora (fork) — leia isto
 
-Duas coisas vão parecer erro seu e não são:
+Uma coisa vai parecer erro seu e não é:
 
-- **O check `Vercel` fica vermelho** com "Authorization required to deploy". A `main` deste
-  repositório faz deploy de produção, e a Vercel se recusa a construir PR de fork por
-  segurança — o que está certo. **Ignore esse check**; ele não entra no gate de merge.
 - **Os workflows ficam parados esperando aprovação** no seu primeiro PR. É política do
   GitHub para quem nunca contribuiu antes. Um mantenedor libera; do segundo PR em diante
   roda sozinho. Se demorar, comente no PR.

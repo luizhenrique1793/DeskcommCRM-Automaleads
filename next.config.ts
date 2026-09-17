@@ -8,9 +8,12 @@ import type { NextConfig } from "next";
  *  - Initial bundle /app/inbox < 250KB gzipped
  */
 const nextConfig: NextConfig = {
-  // Self-host: gera .next/standalone pro container Docker (node server.js).
-  // Na Vercel (VERCEL=1) fica desligado — Next 16.3 + adapter + standalone
-  // quebra o onBuildComplete com ENOENT next-server.js.nft.json (#96646).
+  // Self-host: gera .next/standalone pro container Docker (node server.js) — é
+  // o que o estágio `runner` do Dockerfile copia, então é o modo de build deste
+  // repositório. O ramo de `process.env.VERCEL` é resíduo defensivo, não um modo
+  // suportado aqui: onde essa variável existe, o standalone precisa ficar
+  // desligado porque Next 16.3 + adapter + standalone quebra o onBuildComplete
+  // com ENOENT next-server.js.nft.json (#96646).
   output: process.env.VERCEL ? undefined : "standalone",
   /**
    * O `standalone` copia SÓ o que o file tracing detecta — e ele não detecta
@@ -124,10 +127,11 @@ export default withSentryConfig(nextConfig, {
   tunnelRoute: "/monitoring",
 
   webpack: {
-    // Enables automatic instrumentation of Vercel Cron Monitors. (Does not yet work with App Router route handlers.)
-    // See the following for more information:
+    // Herança do wizard do Sentry (instrumentação automática de cron monitors).
+    // Inerte aqui: o bloco `webpack:` inteiro é ignorado pelo build de produção,
+    // que roda Turbopack (ver Dockerfile). Fica como resíduo defensivo, não como
+    // modo de build suportado por este repositório.
     // https://docs.sentry.io/product/crons/
-    // https://vercel.com/docs/cron-jobs
     automaticVercelMonitors: true,
 
     // Tree-shaking options for reducing bundle size

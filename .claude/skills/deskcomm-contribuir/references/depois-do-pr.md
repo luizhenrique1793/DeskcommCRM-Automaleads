@@ -2,8 +2,6 @@
 
 ## O que vai parecer erro e não é
 
-- **`Vercel` vermelho** — "Authorization required to deploy". A `main` faz deploy de produção e a
-  Vercel recusa construir PR de fork. **Não entra no gate de merge.** Ignore.
 - **Workflows parados "esperando aprovação"** — política do GitHub no primeiro PR de quem nunca
   contribuiu. Um mantenedor libera; do segundo PR em diante roda sozinho. Se demorar mais que um
   dia útil, comente no PR.

@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import { DICIONARIO } from "@/lib/i18n/dicionario";
 import { traduzir } from "@/lib/i18n/dicionario";
 import { IDIOMAS } from "@/lib/i18n/idiomas";
+import { IDIOMAS_EM_CONSTRUCAO } from "@/lib/i18n/registro";
 
 /**
  * O ESPANHOL COBRE A TELA, E O PORTUGUÊS NÃO MUDA UM BYTE.
@@ -36,7 +37,8 @@ import { IDIOMAS } from "@/lib/i18n/idiomas";
  * entrada pode declarar `pt-BR`, então `traduzir(k, "pt-BR")` devolve `k` para
  * toda chave. Não prova que a CHAVE escrita no componente é o texto que estava
  * lá antes — isso é uma mudança de código-fonte, e quem a pega é a revisão do
- * diff, mais a varredura de `scripts/i18n-auditar-portugues.mjs`.
+ * diff. (Este parágrafo citava também `scripts/i18n-auditar-portugues.mjs`, que
+ * nunca existiu no repositório — `git log --all` sobre o caminho sai vazio.)
  *
  * `toda chave usada tem espanhol` prova a direção 1 para o texto que JÁ passa
  * por `t()` — cobertura de 100% das chamadas, não amostra.
@@ -47,10 +49,34 @@ import { IDIOMAS } from "@/lib/i18n/idiomas";
  *
  * O que nenhum dos três prova: texto que vem do BANCO (nome de funil, rótulo de
  * etapa, conteúdo de mensagem) sai como o operador cadastrou, em qualquer
- * idioma. Isso é dado, não interface, e traduzir seria errado.
+ * idioma. Isso é dado, não interface, e traduzir seria errado. Nem a frase que
+ * chega à tela pela resposta de uma rota: pastas `api` ficam fora da varredura
+ * (`PASTAS_IGNORADAS`), e o que nasce como `throw` em `lib/**` e vira
+ * `t(err.message)` não é literal — issue #1046.
+ *
+ * ─── Só o espanhol é cobrado aqui, e é de propósito ────────────────────────
+ *
+ * O nível de cada idioma mora em `lib/i18n/registro.ts`. O espanhol é
+ * `completo`: toda frase de tela precisa dele, e isto reprova. Idioma
+ * `em_construcao` não reprova ninguém — a chave sem tradução cai no português —,
+ * e as mensagens abaixo dizem isso a quem contribui, com o nome do idioma lido
+ * do registro, para a frase não envelhecer.
  */
 
 const RAIZ = join(__dirname, "..", "..");
+
+/**
+ * O que a mensagem de falha diz a quem contribui. Curto e ANTES da lista de
+ * ofensores, que pode ter centenas de linhas e empurrar o conserto para fora
+ * da tela. Só cita comando e arquivo que existem.
+ */
+const EM_CONSTRUCAO =
+  IDIOMAS_EM_CONSTRUCAO.map((idioma) => idioma.nomeNativo).join(", ") || "nenhum hoje";
+const COMO_CONSERTAR =
+  'Conserto: uma linha em lib/i18n/dicionario.ts, no formato "texto em português": { es: "texto en español" }. ' +
+  "Não fala espanhol? Mande o PR assim mesmo e diga isso na descrição. " +
+  `Idiomas em construção (${EM_CONSTRUCAO}) não reprovam: a frase sem tradução aparece em português. ` +
+  "Confira com: pnpm test:unit tests/unit/i18n-espanhol-cobre-a-tela.test.ts";
 
 /** Diretórios cuja saída um cliente vê. `api` não renderiza tela. */
 const AREAS = ["app", "components"];
@@ -79,16 +105,6 @@ const FORA_DO_PRODUTO: Record<string, string> = {
  * nunca "não deu tempo".
  */
 const EM_PORTUGUES_DE_PROPOSITO: { arquivo: string; texto: string; motivo: string }[] = [
-  {
-    arquivo: "app/app/settings/profile/_form.tsx",
-    texto: "Português (BR)",
-    motivo: "nome de idioma se escreve no próprio idioma — quem lê espanhol precisa reconhecer a opção portuguesa",
-  },
-  {
-    arquivo: "app/app/settings/tenant/_form.tsx",
-    texto: "Português (BR)",
-    motivo: "idem: o seletor de idioma da organização lista cada língua no nome dela",
-  },
   {
     arquivo: "app/global-error.tsx",
     texto:
@@ -474,7 +490,7 @@ describe("toda chave usada na tela tem espanhol", () => {
       .map(([chave, onde]) => `${onde[0]} → t(${JSON.stringify(chave)})`);
     expect(
       semEspanhol,
-      `${semEspanhol.length} chamada(s) t() sem tradução em espanhol: a tela cai no português`,
+      `${semEspanhol.length} chamada(s) t() sem tradução em espanhol: a tela cai no português. ${COMO_CONSERTAR}`,
     ).toEqual([]);
   });
 });
@@ -487,7 +503,8 @@ describe("nenhuma prosa em português escapa de t()", () => {
       .map((a) => `${a.local} [${a.origem}] ${JSON.stringify(a.texto.slice(0, 90))}`);
     expect(
       vazando,
-      `${vazando.length} texto(s) em português renderizam crus — quem escolheu espanhol vê isto em português`,
+      `${vazando.length} texto(s) em português renderizam crus — quem escolheu espanhol vê isto em português. ` +
+        `Passe cada um por t(). ${COMO_CONSERTAR}`,
     ).toEqual([]);
   });
 });

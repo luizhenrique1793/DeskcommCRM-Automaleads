@@ -886,6 +886,28 @@ cron_merge() {  # cron_merge <marcador> <assinatura_legada> <linha_nova>
   printf '%s\n' "$nova"
 }
 
+# ── O segredo do cron mora num ARQUIVO, nunca na linha do crontab ────────────
+# O `cron` do Ubuntu registra no syslog a linha de comando inteira de cada
+# execução. Com `-H "Authorization: Bearer <segredo>"` escrito na linha, o
+# segredo que libera as rotas de cron (e a de atualização do agente) ia para o
+# log a cada minuto — medido numa VPS de produção em 2026-09-17: 24.827 linhas
+# no journal, legíveis por qualquer coisa que leia o log do sistema e copiadas
+# para cada relatório que alguém tira dele.
+#
+# Agora a linha aponta para `.env.cron-drain` (`curl -H @arquivo`, curl ≥ 7.55),
+# que nasce com 600 e é regravado a cada install/update a partir do `.env`:
+# trocar o segredo no `.env` e rodar o update basta para o cron acompanhar. O
+# nome casa com `.env*` de propósito — `.gitignore` e `.dockerignore` já o
+# deixam de fora.
+gravar_cabecalho_do_cron() {  # gravar_cabecalho_do_cron <arquivo> <segredo>
+  local arquivo="$1" segredo="$2" tmp
+  # `mktemp` cria com 600 desde o primeiro byte: um `printf > arquivo` seguido
+  # de `chmod` deixaria o segredo legível por um instante, e o `mv` troca de uma vez.
+  tmp="$(mktemp "${arquivo}.XXXXXX")" || return 1
+  if ! printf 'Authorization: Bearer %s\n' "$segredo" > "$tmp"; then rm -f "$tmp"; return 1; fi
+  chmod 600 "$tmp" && mv -f "$tmp" "$arquivo"
+}
+
 setup_event_log_drain_cron() {
   command -v crontab >/dev/null 2>&1 || { c_ylw "⚠ 'crontab' não encontrado — instale o pacote 'cron' e rode de novo pra ativar as automações."; return 0; }
 
@@ -903,7 +925,16 @@ setup_event_log_drain_cron() {
   local first_time=1
   if crontab -l 2>/dev/null | grep -qF -e "$url_drain"; then first_time=0; fi
 
-  local cron_line="* * * * * curl -fsS -H \"Authorization: Bearer ${secret}\" \"${url_drain}\" >/dev/null 2>&1 ${marcador}"
+  local cabecalho="${PROJECT_DIR:-$PWD}/.env.cron-drain"
+  gravar_cabecalho_do_cron "$cabecalho" "$secret" \
+    || { c_ylw "⚠ não consegui gravar ${cabecalho} — não ativei o cron das automações."; return 0; }
+
+  # A linha legada (com o Bearer escrito nela) sai pela assinatura da URL.
+  # ⚠️ Numa instalação existente isso só acontece a partir do update SEGUINTE ao
+  # que traz este conserto: o `update.sh` faz `source` deste arquivo ANTES do
+  # `git checkout` da tag, então no update que o traz quem roda aqui ainda é a
+  # versão anterior desta função.
+  local cron_line="* * * * * curl -fsS -H @\"${cabecalho}\" \"${url_drain}\" >/dev/null 2>&1 ${marcador}"
   # ⚠️ `|| true` OBRIGATÓRIO, e não é defensividade: `crontab -l` sai com status
   # 1 (sem stdout, só um aviso no stderr) quando o usuário NUNCA teve crontab —
   # o caso NORMAL de uma VPS recém-provisionada, que é o caso normal de quem

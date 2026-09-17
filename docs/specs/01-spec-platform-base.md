@@ -1603,7 +1603,7 @@ export function logWithCtx(orgId: string, requestId: string) {
 
 ### 11.3 Métricas custom
 
-Emitidas via OpenTelemetry → Vercel Observability ou Grafana Cloud:
+Emitidas via OpenTelemetry → o coletor da instalação (Grafana Cloud, Sentry ou equivalente):
 
 | Métrica | Tipo | Tags |
 |---|---|---|

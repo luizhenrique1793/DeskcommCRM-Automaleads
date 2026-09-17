@@ -1,6 +1,6 @@
 # Supabase CLI config — DeskcommCRM
 # Docs: https://supabase.com/docs/guides/cli/config
-# Este arquivo é versionado. Segredos vivem em .env.local / Vercel.
+# Este arquivo é versionado. Segredos vivem em .env.local (dev) ou no .env da instalação.
 
 project_id = "deskcomm-crm"
 

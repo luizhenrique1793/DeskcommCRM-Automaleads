@@ -9,13 +9,17 @@
 
 <!-- 1-3 frases, do ponto de vista de quem USA o sistema. Se resolve issue: Closes #123 -->
 
+<!-- Destino da mudança (opcional para quem contribui): núcleo, extensão, ambos ou
+     infraestrutura/documentação. Diga por quê, se já souber. A triagem completa essa
+     avaliação com você; não é necessário usar um SDK que ainda não foi entregue.
+     Critério: triagem/TRIAGEM.md, passe 2-bis. -->
+
 ---
 
 ### 📌 Contribuindo de um fork? Você está no lugar certo.
 
-**Duas coisas vão parecer erro seu e não são** — e nenhuma é motivo para fechar o PR:
+**Uma coisa vai parecer erro seu e não é** — e ela não é motivo para fechar o PR:
 
-- **`Vercel` vermelho** (`Authorization required to deploy`): esperado em PR de fork, porque a `main` faz deploy de produção. **Não entra no gate de merge.**
 - **Workflows parados** esperando aprovação: política do GitHub no primeiro PR de quem nunca contribuiu. Um mantenedor libera.
 
 <details>

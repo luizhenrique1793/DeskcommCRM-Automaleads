@@ -8,8 +8,8 @@
  * sugeria um cursor próprio em `watchdog_cursors` drenado DENTRO do tick do
  * `runFollowupTick`. Investiguei o consumidor de `event_log` REALMENTE em
  * produção neste repo — `lib/event-log/dispatcher.ts` + `drain.ts` +
- * `app/api/v1/cron/event-log-drain/route.ts` (roda a cada minuto, tanto no
- * Vercel quanto no cron do kit self-host — ver README.md) — e ele já resolve
+ * `app/api/v1/cron/event-log-drain/route.ts` (roda a cada minuto pelo serviço
+ * `scheduler` do kit self-host — ver README.md) — e ele já resolve
  * exatamente este problema: múltiplos consumidores por `event_type`,
  * idempotência via `consumed_by[]` (sem duplo efeito em re-drain), retry com
  * backoff, dead-letter. `watchdog_cursors` tem ZERO consumidores TS neste

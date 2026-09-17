@@ -327,8 +327,8 @@ function avisarUmaVez(chave: string, mensagem: string, contexto: Record<string, 
  * cai na camada do `.env`, que é uma instalação funcionando.
  *
  * O caso `42P01` (relation does not exist) é o rollback pela OUTRA ponta: código
- * novo sobre schema velho — o que acontece na Vercel, onde a `main` sobe sem
- * ninguém aplicar migration. Ele degrada para o `.env` igual, com um aviso.
+ * novo sobre schema velho — o que acontece quando a imagem nova sobe antes de o
+ * baseline ser aplicado. Ele degrada para o `.env` igual, com um aviso.
  */
 export async function marcaDaInstalacao(): Promise<LinhaDaMarca | null> {
   const memoria = memoEmVigor();
