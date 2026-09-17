@@ -19,6 +19,7 @@ import { Button } from "@/components/ui/button";
 import { apiClient } from "@/lib/api/client";
 import { copyToClipboard } from "@/lib/clipboard";
 import { Copy, CaretDown, CaretUp, Robot } from "@/lib/ui/icons";
+import { useT } from "@/hooks/i18n/useT";
 
 interface ToolMetaResumo {
   id: string;
@@ -31,6 +32,7 @@ interface ApiResponse {
 }
 
 export function ReferenciaDeCapacidades({ toolIds }: { toolIds: string[] }) {
+  const t = useT();
   // Aberto por padrão — a primeira versão nascia colapsada e discreta demais
   // (texto cinza pequeno), passando batido de quem rolava a tela procurando o
   // nome técnico pra citar no prompt (achado ao vivo com o usuário: ele achou
@@ -85,9 +87,9 @@ export function ReferenciaDeCapacidades({ toolIds }: { toolIds: string[] }) {
       >
         <span className="flex items-center gap-2 text-sm font-semibold">
           <Robot size={16} aria-hidden />
-          Nomes técnicos das {toolIds.length}{" "}
-          {toolIds.length === 1 ? "capacidade ligada" : "capacidades ligadas"} — copie pra citar
-          no prompt
+          {t("Nomes técnicos das")} {toolIds.length}{" "}
+          {toolIds.length === 1 ? t("capacidade ligada") : t("capacidades ligadas")}{" "}
+          {t("— copie pra citar no prompt")}
         </span>
         {aberto ? <CaretUp size={16} aria-hidden /> : <CaretDown size={16} aria-hidden />}
       </button>

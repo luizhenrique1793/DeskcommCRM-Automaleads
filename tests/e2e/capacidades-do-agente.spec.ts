@@ -76,7 +76,7 @@ const TOOLS_DO_SEED = [
   // "faltam 1 vaga". Com teto 25 essas mesmas 21 passam, a recusa nunca acontece
   // e o caso vira um clique que sempre dá certo — verde sem medir nada.
   //
-  // Oito reproduzem a MESMA aritmética no teto novo: 8 + 18 = 26 > 25, recusa
+  // Oito reproduziam a MESMA aritmética no teto de 25: 8 + 18 = 26 > 25, recusa
   // por 1 vaga; desligar uma deixa 7 + 18 = 25, que é o teto exato e passa.
   //
   // As escolhidas ficam FORA do pacote "Atender" de propósito — se alguma
@@ -87,6 +87,18 @@ const TOOLS_DO_SEED = [
   "crm_book_appointment",
   "crm_reschedule_appointment",
   "crm_list_pipelines",
+  // ⚠️ A NONA ENTROU COM O TETO INDO DE 25 PARA 29 (incorporação da pousada
+  // Automaleads — "Atender" foi de 18 para 21 vagas com 3 tools da pousada
+  // dentro dele).
+  "crm_create_lead",
+  // ⚠️ AS DUAS ÚLTIMAS ENTRARAM COM O TETO INDO DE 29 PARA 31 (o segundo
+  // defeito da mesma incorporação: `PACOTE_PADRAO_DO_ONBOARDING` é "vender"
+  // inteiro, e a partir dele nenhum outro pacote cabia mais — ver o
+  // cabeçalho de `TETO_TOOLS_POR_AGENTE`). Mesma aritmética de sempre:
+  // 11 + 21 ("Atender") = 32 > 31, recusa por 1 vaga; desligar uma deixa
+  // 10 + 21 = 31, o teto exato. Também FORA de "Atender".
+  "crm_update_lead",
+  "crm_list_stages",
 ];
 
 /** A capacidade que não pode entrar por pacote. */
@@ -205,37 +217,46 @@ test.describe("Configurar o que o agente pode fazer", () => {
 
     const antes = await consumo(page);
     // A CONSTANTE, não o literal: este arquivo prendia o "20" em quatro pontos,
-    // e o teto subiu para 25 quando o dono do produto ficou sem como ligar as
-    // capacidades de agenda. Literal em asserção transforma decisão de produto
-    // em quebra de CI, e faz a próxima pessoa "consertar" o teste em vez de ler
-    // por que o número mudou.
+    // e o teto já subiu quatro vezes (20→21→25→29→31) por motivos diferentes.
+    // Literal em asserção transforma decisão de produto em quebra de CI, e faz
+    // a próxima pessoa "consertar" o teste em vez de ler por que o número mudou.
     expect(antes).toMatch(new RegExp(`de ${TETO_TOOLS_POR_AGENTE}$`));
 
     // O TETO ENTRA NA JORNADA (issue #162), e entra antes do clique.
     //
     // Remedido na incorporação da Automaleads (catálogo de 57 para 69
-    // capacidades, três tools da pousada — leitura de disponibilidade, status
-    // da reserva e data atual — entraram também em "Atender", número que já
-    // apodreceu duas vezes: reconte com o script de contagem antes de confiar
-    // nele de novo): "Atender" exige 21 vagas (20 automáticas + a crítica que
-    // o pacote deliberadamente NÃO liga, contra as 18 de antes da pousada).
-    // Com as 8 do seed dá 29, 4 acima do teto de 25.
+    // capacidades, oito tools da pousada — reservas, cobrança PIX, três delas
+    // também em "Atender": disponibilidade, status da reserva e data atual —
+    // número que já apodreceu, reconte com o script de contagem antes de
+    // confiar nele de novo): "Atender" foi de 18 para 21 vagas (20 automáticas
+    // + a crítica que o pacote deliberadamente NÃO liga). "vender" sozinho
+    // passou a exigir 29 (26 automáticas + 3 críticas — a pousada reservou
+    // vaga pra cobrança PIX), acima do teto de 25 de antes — o MESMO defeito
+    // que motivou os saltos anteriores, então o teto subiu para 29.
     //
-    // ⚠️ AS 8 SÃO O QUE MANTÉM ESTE CASO VIVO. Eram 3, e 3 + 18 = 21 estourava o
-    // teto de 20. Quando o teto foi para 25 essas mesmas 21 passaram a caber: a
-    // recusa nunca aconteceria e o caso viraria um clique que sempre dá certo —
-    // verde sem medir nada, que é o pior desfecho para um teste de recusa. A
-    // pousada devolveu a folga que a agenda tinha fechado (18→21), mas não o
-    // bastante para reabrir esse buraco: 29 continua acima de 25.
-    // As 5 (agenda) + 3 (pipelines) ficam FORA de "Atender" de propósito, senão
-    // a união seria menor que a soma.
+    // Segundo defeito, mesma incorporação: `PACOTE_PADRAO_DO_ONBOARDING` é
+    // "vender" INTEIRO, e a partir desse ponto de partida nenhum outro pacote
+    // cabia mais em 29 (evoluir, o mais barato dos cinco, exigia 31) — o dono
+    // liga o primeiro pacote e o produto recusa todos os outros. Por isso o
+    // teto subiu de novo, para 31 (ver o cabeçalho de `TETO_TOOLS_POR_AGENTE`).
+    //
+    // Com o teto em 31, "Atender" (21) sozinho não estoura mais — mas ainda dá
+    // pra provar a recusa: com as 11 do seed dá 32, 1 acima do teto.
+    //
+    // ⚠️ AS 11 SÃO O QUE MANTÉM ESTE CASO VIVO — mesmo padrão dos saltos
+    // anteriores: a cada vez que o teto sobe, o seed cresce na MESMA proporção
+    // pra continuar estourando por exatamente 1 vaga. Sem isso a recusa nunca
+    // aconteceria e o caso viraria um clique que sempre dá certo — verde sem
+    // medir nada, o pior desfecho para um teste de recusa.
+    // Todas as 11 ficam FORA de "Atender" de propósito, senão a união seria
+    // menor que a soma e a conta acima não valeria.
     //
     // Antes da correção (issue #162) a tela aceitava o pacote mesmo passando do
     // teto e deixava o checkbox da crítica DESABILITADO — prometia uma escolha
     // que o produto não permitia fazer, sem dizer por quê. Agora recusa e diz
     // quantas vagas faltam, e o operador faz o que a própria tela manda.
     await page.getByTestId("switch-pacote-atender").click();
-    await expect(page.getByTestId("aviso-teto")).toContainText(/faltam? 4 vagas?/);
+    await expect(page.getByTestId("aviso-teto")).toContainText(/faltam? 1 vagas?/);
     await expect(
       page.getByTestId("pacote-atender"),
       "recusar significa NÃO aplicar: pacote meio-ligado seria o pior dos dois mundos",
@@ -322,26 +343,27 @@ test.describe("Configurar o que o agente pode fazer", () => {
       `${TOOLS_DO_SEED.length} de ${TETO_TOOLS_POR_AGENTE}`,
     );
 
-    // "Não perder o cliente" (reter), e não "Vender" — a pousada empurrou
-    // "vender" para 29 vagas (as 8 do seed já pertencem a ela + mais 21 pra
-    // ligar por inteiro), acima do teto de 25: ligar "vender" aqui seria o
-    // MESMO cenário de recusa que o teste anterior já prova, e não o que este
-    // teste quer medir (persistência ao salvar/recarregar). "reter" não tem
-    // sobreposição com o seed e cabe inteiro (8 + 6 = 14, dentro do teto).
-    await page.getByTestId("switch-pacote-reter").click();
-    await expect(page.getByTestId("pacote-reter")).toHaveAttribute("data-estado", "ligado");
+    // "Vender e mover o funil" — as 11 do seed JÁ pertencem a essa jornada
+    // (todas tagueadas "vender", pela mesma razão do teste anterior), e a
+    // pousada empurrou o pacote inteiro para 29 vagas (26 automáticas + 3
+    // críticas reservadas). Cabe com folga no teto de 31 (2 vagas de sobra) —
+    // liga por inteiro sem recusar, e é o mesmo motivo por que "vender" não
+    // serve pra provar recusa no teste anterior (ver o comentário lá).
+    await page.getByTestId("switch-pacote-vender").click();
+    await expect(page.getByTestId("pacote-vender")).toHaveAttribute("data-estado", "ligado");
     const consumoDepoisDeLigar = await consumo(page);
 
     await salvarRascunho(page);
 
     await page.reload();
     await page.getByTestId("tool-picker").waitFor({ state: "visible" });
-    await expect(page.getByTestId("pacote-reter")).toHaveAttribute("data-estado", "ligado");
+    await expect(page.getByTestId("pacote-vender")).toHaveAttribute("data-estado", "ligado");
     expect(await consumo(page)).toBe(consumoDepoisDeLigar);
 
-    // Devolve o estado como encontrou — pelo seed, não pela UI. "reter" não
-    // tem sobreposição com o seed, mas re-semear continua sendo o jeito mais
-    // simples de garantir o cenário exato do próximo teste.
+    // Devolve o estado como encontrou — pelo seed, não pela UI. Desligar
+    // "Vender e mover o funil" levaria junto as nove capacidades que já
+    // estavam ligadas (todas pertencem a essa jornada), e o teste deixaria o
+    // cenário do próximo diferente do que ele espera.
     seed("seed-e2e-capacidades.ts");
     await page.reload();
     await page.getByTestId("tool-picker").waitFor({ state: "visible" });

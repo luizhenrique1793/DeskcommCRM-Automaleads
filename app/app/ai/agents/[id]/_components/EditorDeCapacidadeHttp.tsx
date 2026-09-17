@@ -38,6 +38,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Copy } from "@/lib/ui/icons";
+import { useT } from "@/hooks/i18n/useT";
 
 import { testPousadaTool } from "@/app/actions/settings/testPousadaTool";
 import { montarUrlFinal } from "@/lib/pousada/http-capability-calls";
@@ -138,6 +139,7 @@ interface ChamadaEditorProps {
 }
 
 function ChamadaEditor({ draft, onChange, toolName, onCopiarDisponibilidade }: ChamadaEditorProps) {
+  const t = useT();
   const [bodyJson, setBodyJson] = React.useState(() =>
     JSON.stringify(draft.legacy_body_overrides, null, 2),
   );
@@ -159,13 +161,13 @@ function ChamadaEditor({ draft, onChange, toolName, onCopiarDisponibilidade }: C
     try {
       const parsed: unknown = JSON.parse(texto);
       if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-        setBodyJsonError('Precisa ser um objeto JSON, ex: {"campo": "valor"}.');
+        setBodyJsonError(t('Precisa ser um objeto JSON, ex: {"campo": "valor"}.'));
         return;
       }
       setBodyJsonError(null);
       onChange({ legacy_body_overrides: parsed as Record<string, unknown> });
     } catch {
-      setBodyJsonError("JSON inválido — confira vírgulas e aspas.");
+      setBodyJsonError(t("JSON inválido — confira vírgulas e aspas."));
     }
   }
 
@@ -187,11 +189,12 @@ function ChamadaEditor({ draft, onChange, toolName, onCopiarDisponibilidade }: C
       <div className="border-border/60 flex items-center justify-between rounded-md border p-3">
         <div>
           <Label htmlFor={`enabled-${draft.call_key}`} className="text-sm font-medium">
-            Usar esta configuração
+            {t("Usar esta configuração")}
           </Label>
           <p className="text-xs text-muted-foreground">
-            Desligado (ou sem nada preenchido): a capacidade continua funcionando exatamente como
-            hoje.
+            {t(
+              "Desligado (ou sem nada preenchido): a capacidade continua funcionando exatamente como hoje.",
+            )}
           </p>
         </div>
         <Switch
@@ -203,15 +206,15 @@ function ChamadaEditor({ draft, onChange, toolName, onCopiarDisponibilidade }: C
 
       {onCopiarDisponibilidade ? (
         <Button type="button" variant="outline" size="sm" onClick={onCopiarDisponibilidade}>
-          <Copy /> Copiar de &quot;Consultar disponibilidade&quot;
+          <Copy /> {t('Copiar de "Consultar disponibilidade"')}
         </Button>
       ) : null}
 
       <section className="space-y-3">
-        <h4 className="text-sm font-semibold">Conexão</h4>
+        <h4 className="text-sm font-semibold">{t("Conexão")}</h4>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-[140px_1fr]">
           <div className="space-y-1.5">
-            <Label>Método</Label>
+            <Label>{t("Método")}</Label>
             <Select
               value={draft.method ?? METODO_PADRAO}
               onValueChange={(v) =>
@@ -222,7 +225,7 @@ function ChamadaEditor({ draft, onChange, toolName, onCopiarDisponibilidade }: C
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value={METODO_PADRAO}>Padrão do sistema</SelectItem>
+                <SelectItem value={METODO_PADRAO}>{t("Padrão do sistema")}</SelectItem>
                 {METODOS.map((m) => (
                   <SelectItem key={m} value={m}>
                     {m}
@@ -232,32 +235,32 @@ function ChamadaEditor({ draft, onChange, toolName, onCopiarDisponibilidade }: C
             </Select>
           </div>
           <div className="space-y-1.5">
-            <Label>Base URL ou IP</Label>
+            <Label>{t("Base URL ou IP")}</Label>
             <Input
               value={draft.base_url ?? ""}
               onChange={(e) => onChange({ base_url: e.target.value })}
-              placeholder="https://pordosol.ddns.net:5004 (vazio = padrão atual)"
+              placeholder={t("https://pordosol.ddns.net:5004 (vazio = padrão atual)")}
             />
           </div>
         </div>
         <div className="space-y-1.5">
-          <Label>Endpoint</Label>
+          <Label>{t("Endpoint")}</Label>
           <Input
             value={draft.endpoint_path ?? ""}
             onChange={(e) => onChange({ endpoint_path: e.target.value })}
-            placeholder="/api/quartos/BuscarQuartosSemReservasEntreDatas (vazio = padrão atual)"
+            placeholder={t("/api/quartos/BuscarQuartosSemReservasEntreDatas (vazio = padrão atual)")}
             className="font-mono text-xs"
           />
         </div>
         <div className="space-y-1.5">
-          <Label>URL final</Label>
+          <Label>{t("URL final")}</Label>
           <p className="border-border/60 bg-muted/30 break-all rounded-md border p-2 font-mono text-xs text-muted-foreground">
-            {urlFinal ?? "— defina ao menos a Base URL (aqui ou na config atual) para calcular —"}
+            {urlFinal ?? t("— defina ao menos a Base URL (aqui ou na config atual) para calcular —")}
           </p>
         </div>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div className="space-y-1.5">
-            <Label>Timeout (ms)</Label>
+            <Label>{t("Timeout (ms)")}</Label>
             <Input
               type="number"
               min={1000}
@@ -266,12 +269,12 @@ function ChamadaEditor({ draft, onChange, toolName, onCopiarDisponibilidade }: C
               onChange={(e) =>
                 onChange({ timeout_ms: e.target.value === "" ? null : Number(e.target.value) })
               }
-              placeholder="15000 (padrão)"
+              placeholder={t("15000 (padrão)")}
             />
           </div>
           <div className="border-border/60 flex items-center justify-between rounded-md border p-2">
             <Label htmlFor={`tls-${draft.call_key}`} className="text-sm">
-              Verificar certificado TLS
+              {t("Verificar certificado TLS")}
             </Label>
             <Switch
               id={`tls-${draft.call_key}`}
@@ -283,7 +286,7 @@ function ChamadaEditor({ draft, onChange, toolName, onCopiarDisponibilidade }: C
       </section>
 
       <section className="space-y-3">
-        <h4 className="text-sm font-semibold">Autenticação</h4>
+        <h4 className="text-sm font-semibold">{t("Autenticação")}</h4>
         <Select
           value={draft.auth_type}
           onValueChange={(v) => onChange({ auth_type: v as CapabilityHttpAuthType })}
@@ -292,9 +295,9 @@ function ChamadaEditor({ draft, onChange, toolName, onCopiarDisponibilidade }: C
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            {(Object.keys(AUTH_LABELS) as CapabilityHttpAuthType[]).map((t) => (
-              <SelectItem key={t} value={t}>
-                {AUTH_LABELS[t]}
+            {(Object.keys(AUTH_LABELS) as CapabilityHttpAuthType[]).map((chave) => (
+              <SelectItem key={chave} value={chave}>
+                {t(AUTH_LABELS[chave])}
               </SelectItem>
             ))}
           </SelectContent>
@@ -305,10 +308,10 @@ function ChamadaEditor({ draft, onChange, toolName, onCopiarDisponibilidade }: C
               <div className="space-y-1.5">
                 <Label>
                   {draft.auth_type === "basic"
-                    ? "Usuário"
+                    ? t("Usuário")
                     : draft.auth_type === "api_key_query"
-                      ? "Nome do parâmetro"
-                      : "Nome do header"}
+                      ? t("Nome do parâmetro")
+                      : t("Nome do header")}
                 </Label>
                 <Input
                   value={draft.auth_key_name ?? ""}
@@ -318,21 +321,21 @@ function ChamadaEditor({ draft, onChange, toolName, onCopiarDisponibilidade }: C
               </div>
             ) : null}
             <div className="space-y-1.5">
-              <Label>{draft.auth_type === "basic" ? "Senha" : "Token / chave"}</Label>
+              <Label>{draft.auth_type === "basic" ? t("Senha") : t("Token / chave")}</Label>
               <Input
                 type="password"
                 value={draft.auth_secret ?? ""}
                 onChange={(e) =>
                   onChange({ auth_secret: e.target.value, auth_secret_clear: false })
                 }
-                placeholder="Deixe em branco para manter a credencial já salva"
+                placeholder={t("Deixe em branco para manter a credencial já salva")}
               />
               <button
                 type="button"
                 className="text-xs text-muted-foreground underline underline-offset-4"
                 onClick={() => onChange({ auth_secret: "", auth_secret_clear: true })}
               >
-                Remover credencial salva
+                {t("Remover credencial salva")}
               </button>
             </div>
           </div>
@@ -340,47 +343,47 @@ function ChamadaEditor({ draft, onChange, toolName, onCopiarDisponibilidade }: C
       </section>
 
       <section className="space-y-2">
-        <h4 className="text-sm font-semibold">Headers</h4>
+        <h4 className="text-sm font-semibold">{t("Headers")}</h4>
         <KeyValueListEditor
           rows={draft.headers}
           onChange={(rows) => onChange({ headers: rows })}
-          keyPlaceholder="nome do header"
-          valuePlaceholder="valor"
-          addLabel="Adicionar header"
+          keyPlaceholder={t("nome do header")}
+          valuePlaceholder={t("valor")}
+          addLabel={t("Adicionar header")}
         />
       </section>
 
       <section className="space-y-2">
-        <h4 className="text-sm font-semibold">Query parameters</h4>
+        <h4 className="text-sm font-semibold">{t("Query parameters")}</h4>
         <KeyValueListEditor
           rows={paramsParaLinhas(draft.query_params)}
           onChange={(rows) => onChange({ query_params: linhasParaParams(rows) })}
-          keyPlaceholder="nome do parâmetro"
-          valuePlaceholder="valor fixo"
+          keyPlaceholder={t("nome do parâmetro")}
+          valuePlaceholder={t("valor fixo")}
           withSource
-          addLabel="Adicionar query param"
+          addLabel={t("Adicionar query param")}
         />
       </section>
 
       <section className="space-y-2">
-        <h4 className="text-sm font-semibold">Path parameters</h4>
+        <h4 className="text-sm font-semibold">{t("Path parameters")}</h4>
         <p className="text-xs text-muted-foreground">
-          Preenche trechos <code>{"{assim}"}</code> no endpoint acima.
+          {t("Preenche trechos")} <code>{"{assim}"}</code> {t("no endpoint acima.")}
         </p>
         <KeyValueListEditor
           rows={paramsParaLinhas(draft.path_params)}
           onChange={(rows) => onChange({ path_params: linhasParaParams(rows) })}
-          keyPlaceholder="nome (bate com {chave} no endpoint)"
-          valuePlaceholder="valor fixo"
+          keyPlaceholder={t("nome (bate com {chave} no endpoint)")}
+          valuePlaceholder={t("valor fixo")}
           withSource
-          addLabel="Adicionar path param"
+          addLabel={t("Adicionar path param")}
         />
       </section>
 
       <section className="space-y-3">
-        <h4 className="text-sm font-semibold">Corpo da requisição</h4>
+        <h4 className="text-sm font-semibold">{t("Corpo da requisição")}</h4>
         <div className="space-y-1.5">
-          <Label>Tipo de body</Label>
+          <Label>{t("Tipo de body")}</Label>
           <Select
             value={draft.body_type}
             onValueChange={(v) => onChange({ body_type: v as "json" | "form" | "none" })}
@@ -391,12 +394,12 @@ function ChamadaEditor({ draft, onChange, toolName, onCopiarDisponibilidade }: C
             <SelectContent>
               <SelectItem value="json">JSON</SelectItem>
               <SelectItem value="form">Form</SelectItem>
-              <SelectItem value="none">Sem corpo</SelectItem>
+              <SelectItem value="none">{t("Sem corpo")}</SelectItem>
             </SelectContent>
           </Select>
         </div>
         <div className="space-y-1.5">
-          <Label>Campos fixos (sobrescreve por cima do corpo padrão)</Label>
+          <Label>{t("Campos fixos (sobrescreve por cima do corpo padrão)")}</Label>
           <Textarea
             className="font-mono text-xs"
             rows={4}
@@ -407,39 +410,40 @@ function ChamadaEditor({ draft, onChange, toolName, onCopiarDisponibilidade }: C
           {bodyJsonError ? <p className="text-xs text-destructive">{bodyJsonError}</p> : null}
         </div>
         <div className="space-y-1.5">
-          <Label>Mapeamento de campos (dado do agente → campo da API)</Label>
+          <Label>{t("Mapeamento de campos (dado do agente → campo da API)")}</Label>
           <KeyValueListEditor
             rows={bodyMapParaLinhas(draft.body_field_map)}
             onChange={(rows) => onChange({ body_field_map: linhasParaBodyMap(rows) })}
-            keyPlaceholder="campo na API, ex: reserva.observacao"
-            valuePlaceholder="valor fixo"
+            keyPlaceholder={t("campo na API, ex: reserva.observacao")}
+            valuePlaceholder={t("valor fixo")}
             withSource
-            addLabel="Adicionar mapeamento"
+            addLabel={t("Adicionar mapeamento")}
           />
         </div>
       </section>
 
       <section className="space-y-2">
-        <h4 className="text-sm font-semibold">Campos esperados no retorno</h4>
+        <h4 className="text-sm font-semibold">{t("Campos esperados no retorno")}</h4>
         <p className="text-xs text-muted-foreground">
-          Documentação — não muda o processamento da resposta, só ajuda a lembrar o que essa chamada
-          devolve.
+          {t(
+            "Documentação — não muda o processamento da resposta, só ajuda a lembrar o que essa chamada devolve.",
+          )}
         </p>
         <KeyValueListEditor
           rows={responseMapParaLinhas(draft.response_field_map)}
           onChange={(rows) => onChange({ response_field_map: linhasParaResponseMap(rows) })}
-          keyPlaceholder="nome amigável"
-          valuePlaceholder="caminho na resposta, ex: data.qrCode"
-          addLabel="Adicionar campo esperado"
+          keyPlaceholder={t("nome amigável")}
+          valuePlaceholder={t("caminho na resposta, ex: data.qrCode")}
+          addLabel={t("Adicionar campo esperado")}
         />
       </section>
 
       {toolName === "pousada_gerar_cobranca_pix" ? (
         <section className="space-y-3">
-          <h4 className="text-sm font-semibold">Configurações específicas desta capacidade</h4>
+          <h4 className="text-sm font-semibold">{t("Configurações específicas desta capacidade")}</h4>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div className="space-y-1.5">
-              <Label>% de entrada do PIX</Label>
+              <Label>{t("% de entrada do PIX")}</Label>
               <Input
                 type="number"
                 min={1}
@@ -454,11 +458,11 @@ function ChamadaEditor({ draft, onChange, toolName, onCopiarDisponibilidade }: C
                     },
                   })
                 }
-                placeholder="30 (padrão)"
+                placeholder={t("30 (padrão)")}
               />
             </div>
             <div className="space-y-1.5">
-              <Label>Prazo de expiração do PIX (segundos)</Label>
+              <Label>{t("Prazo de expiração do PIX (segundos)")}</Label>
               <Input
                 type="number"
                 min={60}
@@ -472,7 +476,7 @@ function ChamadaEditor({ draft, onChange, toolName, onCopiarDisponibilidade }: C
                     },
                   })
                 }
-                placeholder="3600 (padrão)"
+                placeholder={t("3600 (padrão)")}
               />
             </div>
           </div>
@@ -489,6 +493,7 @@ export function EditorDeCapacidadeHttp({
   toolLabel,
   exemploTestArgs,
 }: Props) {
+  const t = useT();
   const query = useCapabilityHttpConfig(toolName, open);
   const disponibilidadeQuery = useCapabilityHttpConfig(
     "pousada_consultar_disponibilidade",
@@ -543,9 +548,9 @@ export function EditorDeCapacidadeHttp({
         tool_name: toolName,
         calls: Object.values(drafts).map(sanitizarParaSalvar),
       });
-      toast.success("Configuração salva — vale para todos os agentes desta organização.");
+      toast.success(t("Configuração salva — vale para todos os agentes desta organização."));
     } catch {
-      toast.error("Não foi possível salvar. Confira os campos e tente de novo.");
+      toast.error(t("Não foi possível salvar. Confira os campos e tente de novo."));
     }
   }
 
@@ -555,19 +560,19 @@ export function EditorDeCapacidadeHttp({
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent className="w-full overflow-y-auto sm:max-w-2xl">
         <SheetHeader>
-          <SheetTitle>Configurar chamada HTTP — {toolLabel}</SheetTitle>
+          <SheetTitle>{t("Configurar chamada HTTP")} — {toolLabel}</SheetTitle>
           <SheetDescription>
-            Esta configuração vale para <strong>todos os agentes desta organização</strong>, não só
-            o agente de onde você abriu esta tela — é a mesma integração por trás.
+            {t("Esta configuração vale para")} <strong>{t("todos os agentes desta organização")}</strong>
+            {t(", não só o agente de onde você abriu esta tela — é a mesma integração por trás.")}
           </SheetDescription>
         </SheetHeader>
 
         <div className="mt-6 space-y-6">
           {query.isLoading || !drafts ? (
-            <p className="text-sm text-muted-foreground">Carregando…</p>
+            <p className="text-sm text-muted-foreground">{t("Carregando…")}</p>
           ) : calls.length === 0 ? (
             <p className="text-sm text-muted-foreground">
-              Esta capacidade não faz chamada HTTP nenhuma.
+              {t("Esta capacidade não faz chamada HTTP nenhuma.")}
             </p>
           ) : calls.length === 1 ? (
             <ChamadaEditor
@@ -583,7 +588,7 @@ export function EditorDeCapacidadeHttp({
                     {c.call_label}
                     {c.enabled ? (
                       <Badge variant="outline" className="ml-2 text-[10px]">
-                        ativa
+                        {t("ativa")}
                       </Badge>
                     ) : null}
                   </TabsTrigger>
@@ -612,7 +617,9 @@ export function EditorDeCapacidadeHttp({
                               auth_secret_clear: false,
                             });
                             toast.info(
-                              'Copiado de "Consultar disponibilidade" — a credencial não foi copiada, defina de novo se necessário.',
+                              t(
+                                'Copiado de "Consultar disponibilidade" — a credencial não foi copiada, defina de novo se necessário.',
+                              ),
                             );
                           }
                         : undefined
@@ -624,7 +631,7 @@ export function EditorDeCapacidadeHttp({
           )}
 
           <section className="border-border/60 space-y-2 border-t pt-4">
-            <Label>Testar agora (chama de verdade o sistema da pousada)</Label>
+            <Label>{t("Testar agora (chama de verdade o sistema da pousada)")}</Label>
             <Textarea
               className="font-mono text-xs"
               rows={4}
@@ -638,7 +645,7 @@ export function EditorDeCapacidadeHttp({
               onClick={handleTest}
               disabled={isTesting}
             >
-              {isTesting ? "Testando…" : "Testar agora"}
+              {isTesting ? t("Testando…") : t("Testar agora")}
             </Button>
             {testResult !== null ? (
               <pre
@@ -655,10 +662,10 @@ export function EditorDeCapacidadeHttp({
 
           <div className="border-border/60 flex justify-end gap-2 border-t pt-4">
             <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
-              Fechar
+              {t("Fechar")}
             </Button>
             <Button type="button" onClick={handleSave} disabled={save.isPending || !drafts}>
-              {save.isPending ? "Salvando…" : "Salvar configuração"}
+              {save.isPending ? t("Salvando…") : t("Salvar configuração")}
             </Button>
           </div>
         </div>

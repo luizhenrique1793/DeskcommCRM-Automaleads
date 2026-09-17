@@ -120,7 +120,7 @@ async function main(): Promise<void> {
     // "faltam 1 vaga". Com teto 25 essas mesmas 21 passam, a recusa nunca acontece
     // e o caso vira um clique que sempre dá certo — verde sem medir nada.
     //
-    // Oito reproduzem a MESMA aritmética no teto novo: 8 + 18 = 26 > 25, recusa
+    // Oito reproduziam a MESMA aritmética no teto de 25: 8 + 18 = 26 > 25, recusa
     // por 1 vaga; desligar uma deixa 7 + 18 = 25, que é o teto exato e passa.
     //
     // As escolhidas ficam FORA do pacote "Atender" de propósito — se alguma
@@ -131,6 +131,19 @@ async function main(): Promise<void> {
     "crm_book_appointment",
     "crm_reschedule_appointment",
     "crm_list_pipelines",
+    // ⚠️ A NONA ENTROU COM O TETO INDO DE 25 PARA 29 (incorporação da pousada
+    // Automaleads — "Atender" foi de 18 para 21 vagas com 3 tools da pousada
+    // dentro dele).
+    "crm_create_lead",
+    // ⚠️ AS DUAS ÚLTIMAS ENTRARAM COM O TETO INDO DE 29 PARA 31 (segundo
+    // defeito da mesma incorporação: `PACOTE_PADRAO_DO_ONBOARDING` é "vender"
+    // inteiro, e a partir dele nenhum outro pacote cabia mais — ver o
+    // cabeçalho de `TETO_TOOLS_POR_AGENTE`). Mesma aritmética de sempre:
+    // 11 + 21 ("Atender") = 32 > 31, recusa por 1 vaga; desligar uma deixa
+    // 10 + 21 = 31, o teto exato. Também FORA de "Atender" — estão em
+    // "vender" — pela mesma razão das outras.
+    "crm_update_lead",
+    "crm_list_stages",
   ];
 
   // REPÕE TODAS AS VERSÕES DRAFT DESTE AGENTE, não só a de maior número.

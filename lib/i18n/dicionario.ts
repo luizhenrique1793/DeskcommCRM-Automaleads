@@ -8899,6 +8899,190 @@ export const DICIONARIO: Traducoes = {
   "Um material marcado aqui foi arquivado no acervo — o agente não lê mais ele.": { es: "Un material marcado aquí fue archivado en el acervo — el agente ya no lo lee." },
   "Materiais marcados aqui foram arquivados no acervo — o agente não lê mais eles.": { es: "Materiales marcados aquí fueron archivados en el acervo — el agente ya no los lee." },
   "Desmarque para voltar a salvar.": { es: "Desmárcalo para volver a guardar." },
+
+  // ── Editor de capacidade HTTP (integração pousada/n8n-style) ──────────────
+  'Precisa ser um objeto JSON, ex: {"campo": "valor"}.': {
+    es: 'Debe ser un objeto JSON, ej: {"campo": "valor"}.',
+  },
+  "JSON inválido — confira vírgulas e aspas.": {
+    es: "JSON inválido — revisa comas y comillas.",
+  },
+  "Usar esta configuração": { es: "Usar esta configuración" },
+  "Desligado (ou sem nada preenchido): a capacidade continua funcionando exatamente como hoje.": {
+    es: "Apagado (o sin nada completado): la capacidad sigue funcionando exactamente como hoy.",
+  },
+  'Copiar de "Consultar disponibilidade"': {
+    es: 'Copiar de "Consultar disponibilidad"',
+  },
+  "Método": { es: "Método" },
+  "Padrão do sistema": { es: "Predeterminado del sistema" },
+  "Base URL ou IP": { es: "URL base o IP" },
+  "https://pordosol.ddns.net:5004 (vazio = padrão atual)": {
+    es: "https://pordosol.ddns.net:5004 (vacío = predeterminado actual)",
+  },
+  "Endpoint": { es: "Endpoint" },
+  "/api/quartos/BuscarQuartosSemReservasEntreDatas (vazio = padrão atual)": {
+    es: "/api/quartos/BuscarQuartosSemReservasEntreDatas (vacío = predeterminado actual)",
+  },
+  "URL final": { es: "URL final" },
+  "— defina ao menos a Base URL (aqui ou na config atual) para calcular —": {
+    es: "— define al menos la URL base (aquí o en la config actual) para calcular —",
+  },
+  "Timeout (ms)": { es: "Tiempo de espera (ms)" },
+  "15000 (padrão)": { es: "15000 (predeterminado)" },
+  "Verificar certificado TLS": { es: "Verificar certificado TLS" },
+  "Autenticação": { es: "Autenticación" },
+  "Nome do parâmetro": { es: "Nombre del parámetro" },
+  "Nome do header": { es: "Nombre del header" },
+  "Token / chave": { es: "Token / clave" },
+  "Deixe em branco para manter a credencial já salva": {
+    es: "Déjalo en blanco para mantener la credencial ya guardada",
+  },
+  "Remover credencial salva": { es: "Eliminar credencial guardada" },
+  "Headers": { es: "Headers" },
+  "nome do header": { es: "nombre del header" },
+  "valor": { es: "valor" },
+  "Adicionar header": { es: "Agregar header" },
+  "Query parameters": { es: "Query parameters" },
+  "nome do parâmetro": { es: "nombre del parámetro" },
+  "valor fixo": { es: "valor fijo" },
+  "Adicionar query param": { es: "Agregar query param" },
+  "Path parameters": { es: "Path parameters" },
+  "Preenche trechos": { es: "Completa los tramos" },
+  "no endpoint acima.": { es: "en el endpoint de arriba." },
+  "nome (bate com {chave} no endpoint)": {
+    es: "nombre (coincide con {chave} en el endpoint)",
+  },
+  "Adicionar path param": { es: "Agregar path param" },
+  "Corpo da requisição": { es: "Cuerpo de la solicitud" },
+  "Tipo de body": { es: "Tipo de body" },
+  "Sem corpo": { es: "Sin cuerpo" },
+  "Campos fixos (sobrescreve por cima do corpo padrão)": {
+    es: "Campos fijos (sobrescribe por encima del cuerpo predeterminado)",
+  },
+  "Mapeamento de campos (dado do agente → campo da API)": {
+    es: "Mapeo de campos (dato del agente → campo de la API)",
+  },
+  "campo na API, ex: reserva.observacao": {
+    es: "campo en la API, ej: reserva.observacao",
+  },
+  "Adicionar mapeamento": { es: "Agregar mapeo" },
+  "Campos esperados no retorno": { es: "Campos esperados en la respuesta" },
+  "Documentação — não muda o processamento da resposta, só ajuda a lembrar o que essa chamada devolve.": {
+    es: "Documentación — no cambia el procesamiento de la respuesta, solo ayuda a recordar lo que esa llamada devuelve.",
+  },
+  "nome amigável": { es: "nombre amigable" },
+  "caminho na resposta, ex: data.qrCode": {
+    es: "ruta en la respuesta, ej: data.qrCode",
+  },
+  "Adicionar campo esperado": { es: "Agregar campo esperado" },
+  "Configurações específicas desta capacidade": {
+    es: "Configuraciones específicas de esta capacidad",
+  },
+  "% de entrada do PIX": { es: "% de entrada del PIX" },
+  "30 (padrão)": { es: "30 (predeterminado)" },
+  "Prazo de expiração do PIX (segundos)": {
+    es: "Plazo de expiración del PIX (segundos)",
+  },
+  "3600 (padrão)": { es: "3600 (predeterminado)" },
+  "Configuração salva — vale para todos os agentes desta organização.": {
+    es: "Configuración guardada — vale para todos los agentes de esta organización.",
+  },
+  "Não foi possível salvar. Confira os campos e tente de novo.": {
+    es: "No se pudo guardar. Revisa los campos e inténtalo de nuevo.",
+  },
+  "Configurar chamada HTTP": { es: "Configurar llamada HTTP" },
+  "Esta configuração vale para": { es: "Esta configuración vale para" },
+  "todos os agentes desta organização": { es: "todos los agentes de esta organización" },
+  ", não só o agente de onde você abriu esta tela — é a mesma integração por trás.": {
+    es: ", no solo el agente desde donde abriste esta pantalla — es la misma integración detrás.",
+  },
+  "Esta capacidade não faz chamada HTTP nenhuma.": {
+    es: "Esta capacidad no hace ninguna llamada HTTP.",
+  },
+  'Copiado de "Consultar disponibilidade" — a credencial não foi copiada, defina de novo se necessário.': {
+    es: 'Copiado de "Consultar disponibilidad" — la credencial no fue copiada, defínela de nuevo si es necesario.',
+  },
+  "Testar agora (chama de verdade o sistema da pousada)": {
+    es: "Probar ahora (llama de verdad al sistema de la posada)",
+  },
+  "Testar agora": { es: "Probar ahora" },
+  "Salvar configuração": { es: "Guardar configuración" },
+
+  // ── Indicador "digitando..." (AgentForm) ──────────────────────────────────
+  'Mostrar "digitando…" enquanto processa': {
+    es: 'Mostrar "escribiendo…" mientras procesa',
+  },
+  "Sinaliza no WhatsApp que o agente está trabalhando na resposta — ajuda quando o turno demora (várias ferramentas em sequência). Hoje só tem efeito em canais que suportam esse indicador; nos demais o toggle fica sem efeito, sem erro.": {
+    es: "Señala en WhatsApp que el agente está trabajando en la respuesta — ayuda cuando el turno demora (varias herramientas en secuencia). Hoy solo tiene efecto en canales que soportan ese indicador; en los demás el interruptor queda sin efecto, sin error.",
+  },
+
+  // ── Referência de capacidades (nomes técnicos) ────────────────────────────
+  "Nomes técnicos das": { es: "Nombres técnicos de las" },
+  "— copie pra citar no prompt": { es: "— copia para citar en el prompt" },
+
+  // ── Central de avisos: seleção em lote (Automaleads) ──────────────────────
+  "Não consegui atualizar os avisos selecionados.": {
+    es: "No pude actualizar los avisos seleccionados.",
+  },
+  "Marcar resolvidos": { es: "Marcar resueltos" },
+  "Selecionar todos os avisos carregados": { es: "Seleccionar todos los avisos cargados" },
+  "Selecionar todos os": { es: "Seleccionar todos los" },
+  "carregados": { es: "cargados" },
+  "Selecionar aviso": { es: "Seleccionar aviso" },
+
+  // ── Gateway próprio (canal UAZAPI auto-hospedado) ─────────────────────────
+  "Instância registrada. Escaneie o QR (ou use o código) para logar.": {
+    es: "Instancia registrada. Escanea el QR (o usa el código) para iniciar sesión.",
+  },
+  "Sessão desconectada.": { es: "Sesión desconectada." },
+  "Não foi possível desconectar.": { es: "No se pudo desconectar." },
+  "gateway próprio": { es: "gateway propio" },
+  "Um número conectado por QR através de um servidor que você mesmo hospeda ou contratou. Cole o endereço do servidor e o token da instância — os dois ficam guardados cifrados.": {
+    es: "Un número conectado por QR a través de un servidor que tú mismo alojas o contrataste. Pega la dirección del servidor y el token de la instancia — los dos quedan guardados cifrados.",
+  },
+  "Aguardando login": { es: "Esperando inicio de sesión" },
+  "Instância registrada": { es: "Instancia registrada" },
+  "QR Code para conectar o WhatsApp": { es: "Código QR para conectar el WhatsApp" },
+  "Escaneie no WhatsApp do celular. O código expira e é renovado automaticamente enquanto esta tela estiver aberta.": {
+    es: "Escanéalo en el WhatsApp del celular. El código expira y se renueva automáticamente mientras esta pantalla esté abierta.",
+  },
+  "Digite este código no WhatsApp do celular, em Aparelhos conectados.": {
+    es: "Escribe este código en el WhatsApp del celular, en Dispositivos conectados.",
+  },
+  "Endereço do servidor": { es: "Dirección del servidor" },
+  "Id da instância": { es: "Id de la instancia" },
+  "id devolvido ao criar a instância": { es: "id devuelto al crear la instancia" },
+  "Token da instância": { es: "Token de la instancia" },
+  "cole o token": { es: "pega el token" },
+  "Guardado cifrado. Depois de gravar ele não é mostrado de novo — para trocar, cole o novo. Se a instância cair do lado do servidor (comum em planos de teste), gere um token novo lá e cole aqui para reconectar; URL e id já ficam preenchidos.": {
+    es: "Guardado cifrado. Después de grabarlo no se muestra de nuevo — para cambiarlo, pega el nuevo. Si la instancia cae del lado del servidor (común en planes de prueba), genera un token nuevo allá y pégalo aquí para reconectar; la URL y el id ya quedan completados.",
+  },
+  "Número para código de pareamento (opcional)": {
+    es: "Número para código de emparejamiento (opcional)",
+  },
+  "deixe vazio para usar QR": { es: "déjalo vacío para usar QR" },
+  "Gateway próprio": { es: "Gateway propio" },
+
+  // ── Aviso de canal desconectado no Inbox ──────────────────────────────────
+  "A conexão": { es: "La conexión" },
+  "A conexão desta conversa": { es: "La conexión de esta conversación" },
+  "está desconectada — nenhuma mensagem sai até ela voltar.": {
+    es: "está desconectada — ningún mensaje sale hasta que vuelva.",
+  },
+  "Peça para um administrador reconectar em": {
+    es: "Pídele a un administrador que reconecte en",
+  },
+  "Notas internas continuam funcionando normalmente.": {
+    es: "Las notas internas siguen funcionando normalmente.",
+  },
+
+  // ── Rótulos de tipo de autenticação (Editor de capacidade HTTP) ───────────
+  "Nenhuma": { es: "Ninguna" },
+  "Bearer token": { es: "Bearer token" },
+  "API key (header)": { es: "API key (header)" },
+  "API key (query param)": { es: "API key (query param)" },
+  "Basic auth": { es: "Basic auth" },
 };
 
 /**

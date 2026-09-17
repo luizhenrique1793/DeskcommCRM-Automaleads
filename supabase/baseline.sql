@@ -26342,16 +26342,12 @@ create index if not exists mcp_http_capability_calls_org_tool_idx
 
 alter table public.mcp_http_capability_calls enable row level security;
 
-drop policy if exists tenant_isolation_mcp_http_capability_calls_select on public.mcp_http_capability_calls;
-create policy tenant_isolation_mcp_http_capability_calls_select on public.mcp_http_capability_calls
-  for select
-  using (organization_id in (select * from public.fn_user_org_ids()));
-
-drop policy if exists tenant_isolation_mcp_http_capability_calls_modify on public.mcp_http_capability_calls;
-create policy tenant_isolation_mcp_http_capability_calls_modify on public.mcp_http_capability_calls
-  for all
-  using (organization_id in (select * from public.fn_user_org_ids()))
-  with check (organization_id in (select * from public.fn_user_org_ids()));
+-- As policies de tenant isolation NÃO nascem aqui: a 0269 já as substitui por
+-- versão role-gated (SELECT manager+, escrita admin+) mais abaixo neste
+-- arquivo, e recriar aqui a versão só-tenancy só para a 0269 derrubar de
+-- novo violava a doutrina de baseline (`baseline-nao-constroi-o-que-derruba`)
+-- — o `drop policy if exists` da 0269 já cobre o clone que aplicou só esta
+-- migration no passado.
 
 revoke all on public.mcp_http_capability_calls from anon;
 
