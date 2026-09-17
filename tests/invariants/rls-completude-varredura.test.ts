@@ -93,6 +93,15 @@ const PROVA_PROPRIA: readonly Excecao[] = [
       "por ACERTO ali.",
   },
   {
+    tabela: "mcp_http_capability_calls",
+    razao:
+      "tests/invariants/capacidades-http-rls.test.ts prova os dois eixos da " +
+      "0269: papel (viewer/agent não leem, manager lê, admin escreve, manager " +
+      "não escreve) e isolamento cross-tenant (manager de A não lê a linha de " +
+      "B). Fica fora de TABLES pelo mesmo motivo de webhook_lead_captures: o " +
+      "usuário semeado ali é `agent`, e o SELECT desta tabela exige `manager`.",
+  },
+  {
     tabela: "meta_templates",
     razao:
       "tests/invariants/meta-templates-rls.test.ts (\"membro da org B NÃO vê " +
