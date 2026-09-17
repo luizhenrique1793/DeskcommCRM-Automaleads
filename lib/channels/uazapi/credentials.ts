@@ -17,9 +17,27 @@
  * da instância — não-secreto, devolvido por `/instance/create` e
  * `/instance/status` — e o `token` fica SÓ aqui, cifrado, atrás de
  * `resolveUazapiCreds`.
+ *
+ * ─── Por que a busca leva a ORGANIZAÇÃO junto (issue #236) ──────────────────
+ * Mesma razão do canal parceiro/intermediado (`../zernio/credentials.ts`):
+ * `uazapi_instance_id` é identificador do PROVIDER, duas organizações podem
+ * ter a mesma instância por configuração legítima, e `maybeSingle()` com duas
+ * linhas devolve `data: null` + `PGRST116` — com o `error` descartado, as duas
+ * organizações caem na conta do `.env`. Filtro de aplicação aqui, invariante
+ * em `tests/unit/canal-consulta-por-organizacao.test.ts`.
+ *
+ * ⚠️ DÍVIDA DECLARADA: os outros dois providers (`meta_phone_number_id`,
+ * `zernio_account_id`) também têm índice único PARCIAL no banco
+ * (`channel_sessions_<provider>_ativo_unique`, migration 0165), que barra a
+ * colisão na ORIGEM. `uazapi_instance_id` ainda não tem o equivalente — falta
+ * uma migration nova que crie `channel_sessions_uazapi_instance_id_ativo_unique`
+ * pelo mesmo desenho (dedupe por `-conflito-<id>` antes do `create unique
+ * index`). Este arquivo sozinho impede o vazamento de credencial entre
+ * organizações; não impede duas linhas ativas com o mesmo `instance_id`.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { ARCHIVED_AT, queryTolerantToMissingArchived } from "../archived";
 import { decryptWebhookSecret } from "@/lib/webhooks/secrets";
 
 export interface UazapiCredentials {
@@ -28,6 +46,14 @@ export interface UazapiCredentials {
   baseUrl: string;
   /** De onde veio — aparece no log de diagnóstico, nunca no payload. */
   source: "session" | "env";
+}
+
+/** A chave da busca. `organizationId` NÃO é decoração: ver o cabeçalho. */
+export interface UazapiCredsLookup {
+  /** Resolvido de fonte confiável (sessão, linha já escopada, token do webhook). */
+  organizationId: string;
+  /** `channel_sessions.uazapi_instance_id` — o `sessionRef` deste canal. */
+  instanceId: string;
 }
 
 /**
@@ -60,15 +86,30 @@ export function uazapiCredsFromEnv(): UazapiCredentials | null {
  */
 export async function uazapiCredsForInstanceId(
   admin: SupabaseClient,
-  instanceId: string,
+  lookup: UazapiCredsLookup,
 ): Promise<UazapiCredentials | null> {
-  if (!instanceId) return null;
+  const { organizationId, instanceId } = lookup;
+  if (!organizationId || !instanceId) return null;
 
-  const { data } = await admin
-    .from("channel_sessions")
-    .select("uazapi_instance_id, uazapi_token_encrypted, uazapi_base_url")
-    .eq("uazapi_instance_id", instanceId)
-    .maybeSingle();
+  // `organization_id` À MÃO (service role bypassa RLS) e `archived_at is null`
+  // pelo MESMO recorte que os outros dois providers usam (ver o cabeçalho):
+  // fora do recorte não há trava nenhuma alcançando, e a busca deixaria de
+  // ser exata exatamente onde ninguém a garante.
+  const base = () =>
+    admin
+      .from("channel_sessions")
+      .select("uazapi_instance_id, uazapi_token_encrypted, uazapi_base_url")
+      .eq("organization_id", organizationId)
+      .eq("uazapi_instance_id", instanceId);
+  const { data, error } = await queryTolerantToMissingArchived(
+    () => base().is(ARCHIVED_AT, null).maybeSingle(),
+    () => base().maybeSingle(),
+  );
+  if (error) {
+    throw new Error(
+      `uazapi_creds_lookup_failed: ${error.code ?? "sem_codigo"} ${error.message ?? ""}`.trim(),
+    );
+  }
 
   const cifrado = data?.uazapi_token_encrypted;
   if (!data || !cifrado) return null;
@@ -91,9 +132,9 @@ export async function uazapiCredsForInstanceId(
  */
 export async function resolveUazapiCreds(
   admin: SupabaseClient,
-  instanceId: string,
+  lookup: UazapiCredsLookup,
 ): Promise<UazapiCredentials | null> {
-  return (await uazapiCredsForInstanceId(admin, instanceId)) ?? uazapiCredsFromEnv();
+  return (await uazapiCredsForInstanceId(admin, lookup)) ?? uazapiCredsFromEnv();
 }
 
 /**

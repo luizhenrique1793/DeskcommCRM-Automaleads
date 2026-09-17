@@ -93,6 +93,7 @@ export async function dispararDigitando(
     const destino = await resolverDestinoDigitando(pool, tenantId, conversationId);
     if (destino === null) return;
     await destino.sendTyping({
+      organizationId: tenantId,
       sessionRef: destino.sessionRef,
       to: destino.to,
       presence: 'composing',
@@ -123,6 +124,7 @@ export async function cancelarDigitando(
     const destino = await resolverDestinoDigitando(pool, tenantId, conversationId);
     if (destino === null) return;
     await destino.sendTyping({
+      organizationId: tenantId,
       sessionRef: destino.sessionRef,
       to: destino.to,
       presence: 'paused',

@@ -31,6 +31,9 @@ vi.mock("@/lib/env", () => ({
 
 vi.mock("@/lib/channels", () => ({
   DEFAULT_CHANNEL_PROVIDER: "waha",
+  CHANNEL_SESSION_REF_COLUMNS:
+    "provider, waha_session_name, meta_phone_number_id, zernio_account_id, uazapi_instance_id",
+  resolveSessionRef: () => "sessao-de-teste",
   getAdapter: () => ({
     fetchProfilePictureUrl: async (input: { recipient: string }) => {
       pedidos.push(input.recipient);

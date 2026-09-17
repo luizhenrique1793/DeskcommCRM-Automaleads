@@ -222,9 +222,10 @@ export interface GatewayLiveStatus {
  */
 export async function getGatewayLiveStatus(
   admin: SupabaseClient,
+  organizationId: string,
   instanceId: string,
 ): Promise<GatewayLiveStatus | null> {
-  const creds = await resolveUazapiCreds(admin, instanceId);
+  const creds = await resolveUazapiCreds(admin, { organizationId, instanceId });
   if (!creds) return null;
   const status = await uazapiClient.getStatus(creds);
   if (!status) return null;
@@ -244,10 +245,11 @@ export async function getGatewayLiveStatus(
  */
 export async function registerGatewayWebhook(
   admin: SupabaseClient,
+  organizationId: string,
   instanceId: string,
   url: string,
 ): Promise<boolean> {
-  const creds = await resolveUazapiCreds(admin, instanceId);
+  const creds = await resolveUazapiCreds(admin, { organizationId, instanceId });
   if (!creds) return false;
   return uazapiClient.setWebhook(creds, url).catch(() => false);
 }
@@ -259,10 +261,11 @@ export async function registerGatewayWebhook(
  */
 export async function startGatewayConnection(
   admin: SupabaseClient,
+  organizationId: string,
   instanceId: string,
   phone: string | null,
 ): Promise<void> {
-  const creds = await resolveUazapiCreds(admin, instanceId);
+  const creds = await resolveUazapiCreds(admin, { organizationId, instanceId });
   if (!creds) return;
   await uazapiClient.connect(creds, phone).catch(() => {});
 }
@@ -279,10 +282,11 @@ export async function startGatewayConnection(
  */
 export async function disconnectGateway(
   admin: SupabaseClient,
+  organizationId: string,
   instanceId: string,
   channelSessionId: string,
 ): Promise<boolean> {
-  const creds = await resolveUazapiCreds(admin, instanceId);
+  const creds = await resolveUazapiCreds(admin, { organizationId, instanceId });
   if (!creds) return false;
   await uazapiClient.disconnect(creds);
   const status: CanonicalChannelStatus = mapUazapiHealthStatus("disconnected");

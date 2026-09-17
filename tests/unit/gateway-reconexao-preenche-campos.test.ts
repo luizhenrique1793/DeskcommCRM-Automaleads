@@ -10,9 +10,12 @@ import { NextRequest } from "next/server";
  * chegar de volta na tela.
  */
 
-vi.mock("@/lib/auth/server", () => ({
-  requireAuth: vi.fn(async () => ({ id: "user-1" })),
-  resolveActiveOrg: vi.fn(async () => ({ orgId: "org-1", role: "admin" })),
+vi.mock("@/lib/auth/require-role", () => ({
+  requireRole: vi.fn(async () => ({
+    ok: true,
+    user: { id: "user-1" },
+    org: { orgId: "org-1", role: "admin" },
+  })),
 }));
 
 const findGatewaySessionMock = vi.fn();

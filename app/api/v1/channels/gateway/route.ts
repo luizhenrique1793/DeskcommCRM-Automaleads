@@ -11,8 +11,8 @@ import type { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
 import { fail, ok } from "@/lib/api/wrappers";
-import { requireAuth, resolveActiveOrg } from "@/lib/auth/server";
-import { ROLE_RANK } from "@/lib/auth/types";
+import { requireRole } from "@/lib/auth/require-role";
+import { requireSupportWrite } from "@/lib/impersonate/support";
 import {
   findGatewaySession,
   GATEWAY_CHANNEL_LABEL,
@@ -37,18 +37,6 @@ const conectarSchema = z.object({
   phone: z.string().trim().min(8).max(20).optional(),
 });
 
-type Gate = { ok: true; orgId: string } | { ok: false; resposta: NextResponse };
-
-async function adminGate(requestId: string): Promise<Gate> {
-  const user = await requireAuth();
-  const org = await resolveActiveOrg(user);
-  // Conectar um canal expõe a conta do WhatsApp da empresa: decisão de dono.
-  if (!org || ROLE_RANK[org.role] < ROLE_RANK.admin) {
-    return { ok: false, resposta: fail("forbidden", "admin_required", 403, { requestId }) };
-  }
-  return { ok: true, orgId: org.orgId };
-}
-
 /** Mesmo cálculo de `../partner/route.ts` — ver o comentário lá para o porquê. */
 function urlDoWebhook(req: NextRequest, token: string): string {
   const configurada = env.NEXT_PUBLIC_APP_URL;
@@ -63,11 +51,13 @@ function urlDoWebhook(req: NextRequest, token: string): string {
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
   const requestId = randomUUID();
-  const g = await adminGate(requestId);
-  if (!g.ok) return g.resposta;
+  // Conectar um canal expõe a conta do WhatsApp da empresa: decisão de dono.
+  const authz = await requireRole("admin", { requestId, resource: "channels_gateway" });
+  if (!authz.ok) return authz.response;
+  const orgId = authz.org.orgId;
 
   const admin = createAdminClient();
-  const sessao = await findGatewaySession(admin, g.orgId);
+  const sessao = await findGatewaySession(admin, orgId);
   const conectado = !!sessao && !sessao.archivedAt;
 
   if (!conectado || !sessao?.instanceId || !sessao.baseUrl) {
@@ -79,7 +69,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   // Ao vivo, não o que a última escrita gravou: é o QR/pairing atual, e o
   // ponto inteiro de expor este GET é o operador poder ficar olhando ele mudar.
-  const live = await getGatewayLiveStatus(admin, sessao.instanceId);
+  const live = await getGatewayLiveStatus(admin, orgId, sessao.instanceId);
 
   return ok(
     {
@@ -104,9 +94,14 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  const supportDenied = await requireSupportWrite();
+  if (supportDenied) return supportDenied;
+
   const requestId = randomUUID();
-  const g = await adminGate(requestId);
-  if (!g.ok) return g.resposta;
+  // Conectar um canal expõe a conta do WhatsApp da empresa: decisão de dono.
+  const authz = await requireRole("admin", { requestId, resource: "channels_gateway" });
+  if (!authz.ok) return authz.response;
+  const orgId = authz.org.orgId;
 
   const parsed = conectarSchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) {
@@ -143,11 +138,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
 
-  const existente = await findGatewaySession(admin, g.orgId);
+  const existente = await findGatewaySession(admin, orgId);
   const webhookToken = existente?.webhookPathToken ?? randomBytes(16).toString("hex");
 
   const { error } = await saveGatewaySession(admin, {
-    organizationId: g.orgId,
+    organizationId: orgId,
     existingId: existente?.id ?? null,
     instanceId,
     baseUrl: parsed.data.base_url.replace(/\/+$/, ""),
@@ -165,8 +160,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // Resolve pelo instance_id GRAVADO (não pelo token ainda em memória): o
   // seam decide como buscar a credencial, a rota não monta o objeto sozinha.
   const webhookUrl = urlDoWebhook(req, webhookToken);
-  const webhookOk = await registerGatewayWebhook(admin, instanceId, webhookUrl);
-  await startGatewayConnection(admin, instanceId, parsed.data.phone ?? null);
+  const webhookOk = await registerGatewayWebhook(admin, orgId, instanceId, webhookUrl);
+  await startGatewayConnection(admin, orgId, instanceId, parsed.data.phone ?? null);
 
   return ok(
     {

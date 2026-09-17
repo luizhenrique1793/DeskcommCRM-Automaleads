@@ -122,7 +122,7 @@ describe("saveGatewaySession — criação inicial", () => {
 // desconectado
 describe("disconnectGateway — desconectar", () => {
   it("desconecta no transporte e grava STOPPED (via mapper) na sessão", async () => {
-    const ok = await disconnectGateway(fakeAdmin(), "r183e2ef9597845", "sess-1");
+    const ok = await disconnectGateway(fakeAdmin(), "org-1", "r183e2ef9597845", "sess-1");
     expect(ok).toBe(true);
     expect(disconnectMock).toHaveBeenCalledWith(CREDS);
     const upd = ops.find((o) => o.tabela === "channel_sessions" && o.op === "update");
@@ -132,7 +132,7 @@ describe("disconnectGateway — desconectar", () => {
 
   it("sem credencial — não desconecta, não grava, devolve false", async () => {
     credsRef.current = null;
-    const ok = await disconnectGateway(fakeAdmin(), "r183e2ef9597845", "sess-1");
+    const ok = await disconnectGateway(fakeAdmin(), "org-1", "r183e2ef9597845", "sess-1");
     expect(ok).toBe(false);
     expect(disconnectMock).not.toHaveBeenCalled();
     expect(ops.some((o) => o.tabela === "channel_sessions")).toBe(false);

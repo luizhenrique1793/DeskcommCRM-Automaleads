@@ -7,31 +7,32 @@ import { randomUUID } from "node:crypto";
 import type { NextResponse } from "next/server";
 
 import { fail, ok } from "@/lib/api/wrappers";
-import { requireAuth, resolveActiveOrg } from "@/lib/auth/server";
-import { ROLE_RANK } from "@/lib/auth/types";
+import { requireRole } from "@/lib/auth/require-role";
 import { disconnectGateway, findGatewaySession } from "@/lib/channels/gateway";
+import { requireSupportWrite } from "@/lib/impersonate/support";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function POST(): Promise<NextResponse> {
+  const supportDenied = await requireSupportWrite();
+  if (supportDenied) return supportDenied;
+
   const requestId = randomUUID();
-  const user = await requireAuth();
-  const org = await resolveActiveOrg(user);
-  if (!org || ROLE_RANK[org.role] < ROLE_RANK.admin) {
-    return fail("forbidden", "admin_required", 403, { requestId });
-  }
+  const authz = await requireRole("admin", { requestId, resource: "channels_gateway" });
+  if (!authz.ok) return authz.response;
+  const orgId = authz.org.orgId;
 
   const admin = createAdminClient();
-  const sessao = await findGatewaySession(admin, org.orgId);
+  const sessao = await findGatewaySession(admin, orgId);
   if (!sessao?.instanceId || sessao.archivedAt) {
     return fail("not_found", "nenhuma conexão para desconectar", 404, { requestId });
   }
 
   // `disconnectGateway` grava o status CANÔNICO por dentro do seam — a rota
   // não escolhe a palavra (ver o comentário da função em `lib/channels/gateway.ts`).
-  const desconectou = await disconnectGateway(admin, sessao.instanceId, sessao.id);
+  const desconectou = await disconnectGateway(admin, orgId, sessao.instanceId, sessao.id);
   if (!desconectou) {
     return fail("invalid_request", "sem credencial gravada para esta conexão", 422, { requestId });
   }

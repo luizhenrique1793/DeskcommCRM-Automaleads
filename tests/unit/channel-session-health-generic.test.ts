@@ -110,7 +110,7 @@ describe("canal UAZAPI (não-WAHA) — pergunta ao adapter genérico", () => {
     const res = await GET(req(), { params: Promise.resolve({ id: SESSAO_ID }) });
     const body = (await res.json()) as { data: { status: string; last_health_check_at: string } };
 
-    expect(checkHealthMock).toHaveBeenCalledWith({ sessionRef: "r183e2ef9597845" });
+    expect(checkHealthMock).toHaveBeenCalledWith({ organizationId: ORG, sessionRef: "r183e2ef9597845" });
     expect(body.data.status).toBe("WORKING");
     expect(body.data.last_health_check_at).toBeTruthy();
 

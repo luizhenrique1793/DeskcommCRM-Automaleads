@@ -99,7 +99,10 @@ export const uazapiAdapter: ChannelAdapter = {
 
   async send(envelope: OutboundEnvelope): Promise<{ externalId: string | null }> {
     const admin = createAdminClient();
-    const creds = await resolveUazapiCreds(admin, envelope.sessionRef);
+    const creds = await resolveUazapiCreds(admin, {
+      organizationId: envelope.organizationId,
+      instanceId: envelope.sessionRef,
+    });
     // LANÇA, não devolve `{externalId: null}` — com `isConfigured` sempre
     // `true`, quem desiste é este ponto. Devolver null silenciosamente faria
     // `_handler.ts` gravar `status:'sent'` sem id, dizendo "enviado" para uma
@@ -129,9 +132,14 @@ export const uazapiAdapter: ChannelAdapter = {
    * chama baixa e persiste — pedir a menor faria a foto persistida ficar pior
    * que a que o cliente vê no próprio WhatsApp.
    */
-  async fetchProfilePictureUrl(input: { sessionRef: string; recipient: string }): Promise<string | null> {
+  async fetchProfilePictureUrl(
+    input: { organizationId: string; sessionRef: string; recipient: string },
+  ): Promise<string | null> {
     const admin = createAdminClient();
-    const creds = await resolveUazapiCreds(admin, input.sessionRef);
+    const creds = await resolveUazapiCreds(admin, {
+      organizationId: input.organizationId,
+      instanceId: input.sessionRef,
+    });
     if (!creds) return null;
     const details = await uazapiClient.chatDetails(creds, numeroParaChatDetails(input.recipient));
     return details?.image ?? null;
@@ -152,9 +160,12 @@ export const uazapiAdapter: ChannelAdapter = {
     return null;
   },
 
-  async checkHealth(input: { sessionRef: string }): Promise<ChannelHealth> {
+  async checkHealth(input: { organizationId: string; sessionRef: string }): Promise<ChannelHealth> {
     const admin = createAdminClient();
-    const creds = await resolveUazapiCreds(admin, input.sessionRef);
+    const creds = await resolveUazapiCreds(admin, {
+      organizationId: input.organizationId,
+      instanceId: input.sessionRef,
+    });
     if (!creds) return { reachable: false, status: null, detail: "sem_credencial_para_a_sessao" };
 
     try {
@@ -185,12 +196,16 @@ export const uazapiAdapter: ChannelAdapter = {
    * classe de risco não existe: ver cabeçalho de `../uazapi/client.ts`.
    */
   async fetchInboundMedia(input: {
+    organizationId: string;
     sessionRef: string;
     url: string;
     hintMime?: string | null;
   }): Promise<FetchedMedia> {
     const admin = createAdminClient();
-    const creds = await resolveUazapiCreds(admin, input.sessionRef);
+    const creds = await resolveUazapiCreds(admin, {
+      organizationId: input.organizationId,
+      instanceId: input.sessionRef,
+    });
     if (!creds) throw new Error("uazapi_not_configured: sem credencial para baixar a mídia.");
 
     // `url` aqui é o `messageid` (ver `../uazapi/ingest.ts`: `media_url` grava
@@ -207,12 +222,16 @@ export const uazapiAdapter: ChannelAdapter = {
    * pergunta `!!adapter.saveContact`, nunca `provider === "uazapi"`.
    */
   async saveContact(input: {
+    organizationId: string;
     sessionRef: string;
     phoneNumber: string;
     name: string;
   }): Promise<{ ok: true } | { ok: false; reason: string }> {
     const admin = createAdminClient();
-    const creds = await resolveUazapiCreds(admin, input.sessionRef);
+    const creds = await resolveUazapiCreds(admin, {
+      organizationId: input.organizationId,
+      instanceId: input.sessionRef,
+    });
     if (!creds) return { ok: false, reason: "uazapi_not_configured" };
     return uazapiClient.addContact(creds, {
       number: input.phoneNumber.replace(/\D/g, ""),
@@ -227,6 +246,7 @@ export const uazapiAdapter: ChannelAdapter = {
    * existe fallback de negócio para "digitando" não ter saído.
    */
   async sendTyping(input: {
+    organizationId: string;
     sessionRef: string;
     to: string;
     presence: "composing" | "recording" | "paused";
@@ -234,7 +254,10 @@ export const uazapiAdapter: ChannelAdapter = {
   }): Promise<void> {
     try {
       const admin = createAdminClient();
-      const creds = await resolveUazapiCreds(admin, input.sessionRef);
+      const creds = await resolveUazapiCreds(admin, {
+        organizationId: input.organizationId,
+        instanceId: input.sessionRef,
+      });
       if (!creds) return;
       await uazapiClient.sendPresence(creds, input.to, input.presence, input.durationMs);
     } catch {
@@ -243,6 +266,7 @@ export const uazapiAdapter: ChannelAdapter = {
   },
 
   async sendButtonCopy(input: {
+    organizationId: string;
     sessionRef: string;
     to: string;
     text: string;
@@ -252,7 +276,10 @@ export const uazapiAdapter: ChannelAdapter = {
   }): Promise<boolean> {
     try {
       const admin = createAdminClient();
-      const creds = await resolveUazapiCreds(admin, input.sessionRef);
+      const creds = await resolveUazapiCreds(admin, {
+        organizationId: input.organizationId,
+        instanceId: input.sessionRef,
+      });
       if (!creds) {
         console.error("[uazapi] sendButtonCopy sem credencial para sessionRef", input.sessionRef);
         return false;

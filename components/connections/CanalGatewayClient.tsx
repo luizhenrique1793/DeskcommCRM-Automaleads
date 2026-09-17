@@ -8,6 +8,7 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { apiClient } from "@/lib/api/client";
+import { useT } from "@/hooks/i18n/useT";
 
 /**
  * Conectar um número por um GATEWAY PRÓPRIO (servidor endereço + token de
@@ -40,6 +41,7 @@ interface Estado {
 const POLL_MS = 4000;
 
 export function CanalGatewayClient() {
+  const t = useT();
   const [estado, setEstado] = useState<Estado | null>(null);
   const [baseUrl, setBaseUrl] = useState("");
   const [instanceId, setInstanceId] = useState("");
@@ -103,10 +105,10 @@ export function CanalGatewayClient() {
       // O token sai da memória da tela assim que é gravado — mesma regra do
       // provedor parceiro: segredo não fica parado num input depois de usado.
       setToken("");
-      toast.success("Instância registrada. Escaneie o QR (ou use o código) para logar.");
+      toast.success(t("Instância registrada. Escaneie o QR (ou use o código) para logar."));
       await carregar();
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Não foi possível conectar.");
+      toast.error(e instanceof Error ? e.message : t("Não foi possível conectar."));
     } finally {
       setSalvando(false);
     }
@@ -116,16 +118,16 @@ export function CanalGatewayClient() {
     setDesconectando(true);
     try {
       await apiClient.post("/api/v1/channels/gateway/disconnect", {});
-      toast.success("Sessão desconectada.");
+      toast.success(t("Sessão desconectada."));
       await carregar();
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Não foi possível desconectar.");
+      toast.error(e instanceof Error ? e.message : t("Não foi possível desconectar."));
     } finally {
       setDesconectando(false);
     }
   };
 
-  const rotulo = estado?.label ?? "gateway próprio";
+  const rotulo = estado?.label ?? t("gateway próprio");
   const conectado = estado?.connected ?? false;
   const logado = estado?.status === "connected";
 
@@ -134,27 +136,27 @@ export function CanalGatewayClient() {
       <Card className="flex flex-col gap-4 p-4">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <h3 className="text-sm font-semibold">Conectar por {rotulo}</h3>
+            <h3 className="text-sm font-semibold">{t("Conectar por")} {rotulo}</h3>
             <p className="text-xs text-muted-foreground">
-              Um número conectado por QR através de um servidor que você mesmo hospeda ou
-              contratou. Cole o endereço do servidor e o token da instância — os dois ficam
-              guardados cifrados.
+              {t(
+                "Um número conectado por QR através de um servidor que você mesmo hospeda ou contratou. Cole o endereço do servidor e o token da instância — os dois ficam guardados cifrados.",
+              )}
             </p>
           </div>
           {logado ? (
-            <Badge variant="secondary">Conectado</Badge>
+            <Badge variant="secondary">{t("Conectado")}</Badge>
           ) : conectado ? (
-            <Badge variant="warning">Aguardando login</Badge>
+            <Badge variant="warning">{t("Aguardando login")}</Badge>
           ) : (
-            <Badge variant="outline">Não conectado</Badge>
+            <Badge variant="outline">{t("Não conectado")}</Badge>
           )}
         </div>
 
         {conectado && (
           <div className="rounded-md border border-border bg-muted/40 p-3 text-sm">
-            <p className="font-medium">{estado?.display_name ?? "Instância registrada"}</p>
+            <p className="font-medium">{estado?.display_name ?? t("Instância registrada")}</p>
             <p className="text-xs text-muted-foreground">
-              {estado?.phone_number ?? "sem número informado"} · {estado?.status ?? "—"}
+              {estado?.phone_number ?? t("sem número informado")} · {estado?.status ?? "—"}
             </p>
           </div>
         )}
@@ -164,12 +166,13 @@ export function CanalGatewayClient() {
             {/* eslint-disable-next-line @next/next/no-img-element -- base64 dinâmico, não vale otimizar */}
             <img
               src={estado.qrcode}
-              alt="QR Code para conectar o WhatsApp"
+              alt={t("QR Code para conectar o WhatsApp")}
               className="h-48 w-48"
             />
             <p className="text-xs text-muted-foreground">
-              Escaneie no WhatsApp do celular. O código expira e é renovado automaticamente
-              enquanto esta tela estiver aberta.
+              {t(
+                "Escaneie no WhatsApp do celular. O código expira e é renovado automaticamente enquanto esta tela estiver aberta.",
+              )}
             </p>
           </div>
         )}
@@ -177,14 +180,14 @@ export function CanalGatewayClient() {
           <div className="flex flex-col items-center gap-1 rounded-md border border-border p-3">
             <code className="text-lg font-semibold tracking-widest">{estado.paircode}</code>
             <p className="text-xs text-muted-foreground">
-              Digite este código no WhatsApp do celular, em Aparelhos conectados.
+              {t("Digite este código no WhatsApp do celular, em Aparelhos conectados.")}
             </p>
           </div>
         )}
 
         <div className="flex flex-col gap-3">
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="gateway-url">Endereço do servidor</Label>
+            <Label htmlFor="gateway-url">{t("Endereço do servidor")}</Label>
             <Input
               id="gateway-url"
               value={baseUrl}
@@ -194,49 +197,49 @@ export function CanalGatewayClient() {
             />
           </div>
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="gateway-instancia">Id da instância</Label>
+            <Label htmlFor="gateway-instancia">{t("Id da instância")}</Label>
             <Input
               id="gateway-instancia"
               value={instanceId}
               onChange={(e) => setInstanceId(e.target.value)}
-              placeholder="id devolvido ao criar a instância"
+              placeholder={t("id devolvido ao criar a instância")}
               autoComplete="off"
             />
           </div>
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="gateway-token">Token da instância</Label>
+            <Label htmlFor="gateway-token">{t("Token da instância")}</Label>
             <Input
               id="gateway-token"
               type="password"
               value={token}
               onChange={(e) => setToken(e.target.value)}
-              placeholder="cole o token"
+              placeholder={t("cole o token")}
               autoComplete="off"
             />
             <p className="text-xs text-muted-foreground">
-              Guardado cifrado. Depois de gravar ele não é mostrado de novo — para trocar, cole o
-              novo. Se a instância cair do lado do servidor (comum em planos de teste), gere um
-              token novo lá e cole aqui para reconectar; URL e id já ficam preenchidos.
+              {t(
+                "Guardado cifrado. Depois de gravar ele não é mostrado de novo — para trocar, cole o novo. Se a instância cair do lado do servidor (comum em planos de teste), gere um token novo lá e cole aqui para reconectar; URL e id já ficam preenchidos.",
+              )}
             </p>
           </div>
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="gateway-telefone">Número para código de pareamento (opcional)</Label>
+            <Label htmlFor="gateway-telefone">{t("Número para código de pareamento (opcional)")}</Label>
             <Input
               id="gateway-telefone"
               value={phone}
               onChange={(e) => setPhone(e.target.value)}
-              placeholder="deixe vazio para usar QR"
+              placeholder={t("deixe vazio para usar QR")}
               autoComplete="off"
             />
           </div>
 
           <div className="flex items-center gap-2">
             <Button onClick={conectar} disabled={salvando || !baseUrl || !instanceId || !token}>
-              {salvando ? "Verificando…" : conectado ? "Reconectar" : "Conectar"}
+              {salvando ? t("Verificando…") : conectado ? t("Reconectar") : t("Conectar")}
             </Button>
             {logado && (
               <Button variant="outline" onClick={desconectar} disabled={desconectando}>
-                {desconectando ? "Desconectando…" : "Desconectar"}
+                {desconectando ? t("Desconectando…") : t("Desconectar")}
               </Button>
             )}
           </div>

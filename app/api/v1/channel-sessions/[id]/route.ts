@@ -233,7 +233,7 @@ export async function GET(
       // STOPPED/FAILED) — cada adapter faz a própria tradução internamente
       // (ver `mapUazapiHealthStatus` no caso do UAZAPI). Esta rota não
       // traduz nada, só repassa.
-      const saude = await adapter.checkHealth({ sessionRef });
+      const saude = await adapter.checkHealth({ organizationId: activeOrg.orgId, sessionRef });
       if (saude.reachable && saude.status) liveStatus = saude.status;
       // Mesmo cuidado do ramo WAHA acima: só preenche o que falta,
       // nunca sobrescreve um número já gravado (ex.: corrigido à mão).

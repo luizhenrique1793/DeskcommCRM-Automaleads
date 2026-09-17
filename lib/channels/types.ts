@@ -388,7 +388,7 @@ export interface ChannelAdapter {
    * OPCIONAL como os demais métodos de canal: nem todo provider expõe isso, e
    * quem chama testa a presença em vez de perguntar QUAL provider é.
    */
-  saveContact?(input: {
+  saveContact?(input: ChannelTenantScope & {
     sessionRef: string;
     phoneNumber: string;
     name: string;
@@ -407,7 +407,7 @@ export interface ChannelAdapter {
    * OPCIONAL como os demais métodos de canal: nem todo provider expõe isso, e
    * quem chama testa a presença em vez de perguntar QUAL provider é.
    */
-  sendTyping?(input: {
+  sendTyping?(input: ChannelTenantScope & {
     sessionRef: string;
     to: string;
     /**
@@ -438,7 +438,7 @@ export interface ChannelAdapter {
    * OPCIONAL como os demais métodos de canal: nem todo provider expõe isso, e
    * quem chama testa a presença em vez de perguntar QUAL provider é.
    */
-  sendButtonCopy?(input: {
+  sendButtonCopy?(input: ChannelTenantScope & {
     sessionRef: string;
     to: string;
     text: string;

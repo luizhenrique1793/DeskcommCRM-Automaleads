@@ -1060,13 +1060,13 @@ export function AgentForm(props: Props) {
                 disabled={disabled}
               />
               <Label htmlFor="typing_indicator_enabled">
-                Mostrar &quot;digitando…&quot; enquanto processa
+                {t('Mostrar "digitando…" enquanto processa')}
               </Label>
             </div>
             <p className="text-xs text-muted-foreground">
-              Sinaliza no WhatsApp que o agente está trabalhando na resposta — ajuda quando o
-              turno demora (várias ferramentas em sequência). Hoje só tem efeito em canais que
-              suportam esse indicador; nos demais o toggle fica sem efeito, sem erro.
+              {t(
+                "Sinaliza no WhatsApp que o agente está trabalhando na resposta — ajuda quando o turno demora (várias ferramentas em sequência). Hoje só tem efeito em canais que suportam esse indicador; nos demais o toggle fica sem efeito, sem erro.",
+              )}
             </p>
           </Card>
 

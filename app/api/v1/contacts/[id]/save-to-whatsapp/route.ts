@@ -24,6 +24,8 @@ import { requireRole } from "@/lib/auth/require-role";
 import { capabilitiesOf, getAdapter, resolveSessionRef } from "@/lib/channels";
 import { CHANNEL_SESSION_REF_COLUMNS } from "@/lib/channels/session-ref";
 import type { ChannelSessionRef } from "@/lib/channels/session-ref";
+import { requireSupportWrite } from "@/lib/impersonate/support";
+import { nomeDoContato } from "@/lib/contacts/rotulo-do-contato";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export const dynamic = "force-dynamic";
@@ -36,6 +38,9 @@ interface RouteCtx {
 }
 
 export async function POST(req: NextRequest, ctx: RouteCtx): Promise<Response> {
+  const supportDenied = await requireSupportWrite();
+  if (supportDenied) return supportDenied;
+
   const requestId = randomUUID();
   const { id: contactId } = await ctx.params;
 
@@ -92,7 +97,7 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<Response> {
     );
   }
 
-  const nome = (contact.display_name ?? contact.name ?? "").trim();
+  const nome = nomeDoContato(contact);
   if (!nome) {
     return fail("invalid_request", "Este contato não tem nome para salvar na agenda.", 422, {
       requestId,
@@ -100,6 +105,7 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<Response> {
   }
 
   const resultado = await adapter.saveContact({
+    organizationId: activeOrg.orgId,
     sessionRef: resolveSessionRef(session as unknown as ChannelSessionRef),
     phoneNumber: contact.phone_number,
     name: nome,

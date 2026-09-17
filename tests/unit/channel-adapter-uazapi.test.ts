@@ -36,6 +36,8 @@ const CREDS = {
   source: "session" as const,
 };
 
+const ORG = "00000000-0000-4000-8000-000000000236";
+
 const ultimaChamada = () => ({
   url: String(fetchMock.mock.calls.at(-1)?.[0] ?? ""),
   init: (fetchMock.mock.calls.at(-1)?.[1] ?? {}) as {
@@ -142,6 +144,7 @@ describe("send — texto", () => {
       json: async () => ({ messageid: "3EB0ABC123", status: "Sent" }),
     });
     const r = await uazapiAdapter.send({
+      organizationId: ORG,
       sessionRef: CREDS.instanceId,
       to: "5511999999999",
       kind: "text",
@@ -160,7 +163,7 @@ describe("send — texto", () => {
     // pelo prefixo `adapter.codes.notConfigured`) saber que não saiu.
     credsRef.current = null;
     await expect(
-      uazapiAdapter.send({ sessionRef: "x", to: "5511999999999", kind: "text", body: "olá" }),
+      uazapiAdapter.send({ organizationId: ORG, sessionRef: "x", to: "5511999999999", kind: "text", body: "olá" }),
     ).rejects.toThrow(/^uazapi_not_configured/);
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -173,6 +176,7 @@ describe("send — mídia", () => {
   it("imagem vira type:'image' em /send/media", async () => {
     fetchMock.mockResolvedValueOnce({ status: 200, json: async () => ({ messageid: "m1" }) });
     await uazapiAdapter.send({
+      organizationId: ORG,
       sessionRef: CREDS.instanceId,
       to: "5511999999999",
       kind: "image",
@@ -192,6 +196,7 @@ describe("send — mídia", () => {
   it("documento cai em type:'document'", async () => {
     fetchMock.mockResolvedValueOnce({ status: 200, json: async () => ({ messageid: "m2" }) });
     await uazapiAdapter.send({
+      organizationId: ORG,
       sessionRef: CREDS.instanceId,
       to: "5511999999999",
       kind: "document",
@@ -206,6 +211,7 @@ describe("send — PTT (voice note)", () => {
   it("kind:'audio' vira type:'ptt', não 'audio' solto — é a bolha de voz, não arquivo", async () => {
     fetchMock.mockResolvedValueOnce({ status: 200, json: async () => ({ messageid: "m3" }) });
     await uazapiAdapter.send({
+      organizationId: ORG,
       sessionRef: CREDS.instanceId,
       to: "5511999999999",
       kind: "audio",
@@ -223,6 +229,7 @@ describe("fetchProfilePictureUrl", () => {
       json: async () => ({ image: "https://cdn/x.jpg", wa_name: "João", name: "João" }),
     });
     const url = await uazapiAdapter.fetchProfilePictureUrl!({
+      organizationId: ORG,
       sessionRef: CREDS.instanceId,
       recipient: "5511999999999",
     });
@@ -233,6 +240,7 @@ describe("fetchProfilePictureUrl", () => {
   it("sem credencial devolve null, sem chamar fetch", async () => {
     credsRef.current = null;
     const url = await uazapiAdapter.fetchProfilePictureUrl!({
+      organizationId: ORG,
       sessionRef: "x",
       recipient: "5511999999999",
     });
@@ -248,6 +256,7 @@ describe("fetchProfilePictureUrl", () => {
     // não reconheceria o contato.
     fetchMock.mockResolvedValueOnce({ status: 200, json: async () => ({ image: "https://cdn/x.jpg" }) });
     await uazapiAdapter.fetchProfilePictureUrl!({
+      organizationId: ORG,
       sessionRef: CREDS.instanceId,
       recipient: "5511999999999@c.us",
     });
@@ -257,6 +266,7 @@ describe("fetchProfilePictureUrl", () => {
   it("recipient LID (`<dígitos>@lid`) mantém o sufixo — mesma convenção de resolveRecipient", async () => {
     fetchMock.mockResolvedValueOnce({ status: 200, json: async () => ({ image: null }) });
     await uazapiAdapter.fetchProfilePictureUrl!({
+      organizationId: ORG,
       sessionRef: CREDS.instanceId,
       recipient: "123456789@lid",
     });
@@ -271,6 +281,7 @@ describe("resolvePhoneForIdentity", () => {
     // webhook (`sender_pn`/`sender_lid`) quando o UAZAPI já o resolveu; não
     // há endpoint para perguntar "que telefone é este LID" isoladamente.
     const r = await uazapiAdapter.resolvePhoneForIdentity!({
+      organizationId: ORG,
       sessionRef: CREDS.instanceId,
       identity: "lid:123456789",
     });
@@ -292,7 +303,7 @@ describe("checkHealth", () => {
         status: { connected: true, loggedIn: true, jid: "554488347632:8@s.whatsapp.net" },
       }),
     });
-    const h = await uazapiAdapter.checkHealth!({ sessionRef: CREDS.instanceId });
+    const h = await uazapiAdapter.checkHealth!({ organizationId: ORG, sessionRef: CREDS.instanceId });
     expect(h).toEqual({
       reachable: true,
       status: "WORKING",
@@ -309,7 +320,7 @@ describe("checkHealth", () => {
         status: { connected: true, loggedIn: true, jid: "554488347632:8@s.whatsapp.net" },
       }),
     });
-    const h = await uazapiAdapter.checkHealth!({ sessionRef: CREDS.instanceId });
+    const h = await uazapiAdapter.checkHealth!({ organizationId: ORG, sessionRef: CREDS.instanceId });
     expect(h.phoneNumber).toBe("554488347632");
   });
 
@@ -318,7 +329,7 @@ describe("checkHealth", () => {
       status: 200,
       json: async () => ({ instance: { status: "disconnected" }, status: { connected: false } }),
     });
-    const h = await uazapiAdapter.checkHealth!({ sessionRef: CREDS.instanceId });
+    const h = await uazapiAdapter.checkHealth!({ organizationId: ORG, sessionRef: CREDS.instanceId });
     expect(h).toEqual({ reachable: true, status: "STOPPED", detail: null, phoneNumber: null });
   });
 
@@ -327,26 +338,26 @@ describe("checkHealth", () => {
       status: 200,
       json: async () => ({ instance: { status: "connecting" }, status: { connected: false } }),
     });
-    const h = await uazapiAdapter.checkHealth!({ sessionRef: CREDS.instanceId });
+    const h = await uazapiAdapter.checkHealth!({ organizationId: ORG, sessionRef: CREDS.instanceId });
     expect(h.status).toBe("SCAN_QR_CODE");
   });
 
   it("401 (token recusado) → reachable:true, status:FAILED — não é 'não deu para perguntar'", async () => {
     fetchMock.mockResolvedValueOnce({ status: 401, json: async () => ({ error: "unauthorized" }) });
-    const h = await uazapiAdapter.checkHealth!({ sessionRef: CREDS.instanceId });
+    const h = await uazapiAdapter.checkHealth!({ organizationId: ORG, sessionRef: CREDS.instanceId });
     expect(h).toEqual({ reachable: true, status: "FAILED", detail: null });
   });
 
   it("erro de REDE → reachable:false — não inventa estado do canal", async () => {
     fetchMock.mockRejectedValueOnce(new Error("fetch failed: ECONNREFUSED"));
-    const h = await uazapiAdapter.checkHealth!({ sessionRef: CREDS.instanceId });
+    const h = await uazapiAdapter.checkHealth!({ organizationId: ORG, sessionRef: CREDS.instanceId });
     expect(h.reachable).toBe(false);
     expect(h.status).toBeNull();
   });
 
   it("sem credencial → reachable:false, sem chamar fetch", async () => {
     credsRef.current = null;
-    const h = await uazapiAdapter.checkHealth!({ sessionRef: "x" });
+    const h = await uazapiAdapter.checkHealth!({ organizationId: ORG, sessionRef: "x" });
     expect(h.reachable).toBe(false);
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -360,6 +371,7 @@ describe("saveContact", () => {
       json: async () => ({ success: true, contact: { jid: "5511999999999@s.whatsapp.net" } }),
     });
     const r = await uazapiAdapter.saveContact!({
+      organizationId: ORG,
       sessionRef: CREDS.instanceId,
       phoneNumber: "+55 11 99999-9999",
       name: "Maria Cliente",
@@ -375,6 +387,7 @@ describe("saveContact", () => {
       json: async () => ({ success: false, message: "número inválido" }),
     });
     const r = await uazapiAdapter.saveContact!({
+      organizationId: ORG,
       sessionRef: CREDS.instanceId,
       phoneNumber: "123",
       name: "X",
@@ -385,6 +398,7 @@ describe("saveContact", () => {
   it("sem credencial → ok:false, sem chamar fetch", async () => {
     credsRef.current = null;
     const r = await uazapiAdapter.saveContact!({
+      organizationId: ORG,
       sessionRef: "x",
       phoneNumber: "+5511999999999",
       name: "X",

@@ -188,6 +188,11 @@ describe("a sétima cópia não nasce", () => {
       motivo: "nome do CANAL conectado",
     },
     {
+      arquivo: "components/connections/CanalGatewayClient.tsx",
+      trecho: 'estado?.display_name ?? t("Instância registrada")',
+      motivo: "nome do CANAL conectado (gateway próprio), mesmo caso do parceiro acima",
+    },
+    {
       arquivo: "components/inbox/ConversationListItem.tsx",
       trecho: "canal?.phone_number ?? canal?.display_name ?? null",
       motivo: "número da EMPRESA por onde a conversa chegou, não o do cliente",

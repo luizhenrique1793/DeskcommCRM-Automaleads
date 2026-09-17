@@ -239,6 +239,7 @@ export async function retryQueuedMessages(
         }
         const filename = row.media_storage_path.split("/").pop() ?? undefined;
         ({ externalId } = await adapter.send({
+          organizationId: row.organization_id,
           sessionRef: resolveSessionRef(c.channel_sessions as ChannelSessionRef),
           to: chatId,
           providerConversationId: c.provider_conversation_id,
@@ -252,6 +253,7 @@ export async function retryQueuedMessages(
         }));
       } else {
         ({ externalId } = await adapter.send({
+          organizationId: row.organization_id,
           sessionRef: resolveSessionRef(c.channel_sessions as ChannelSessionRef),
           to: chatId,
           providerConversationId: c.provider_conversation_id,
