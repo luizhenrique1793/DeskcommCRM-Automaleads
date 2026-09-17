@@ -35,7 +35,12 @@ jobs:
         timeout-minutes: 5
 
       - name: Typecheck
-        run: pnpm typecheck
+        # O runner do GitHub tem ~7 GB; o `tsc` deste repo bate o limite padrão
+        # do V8 (~2 GB) e sai por "JavaScript heap out of memory" (exit 134),
+        # medido em duas rodadas seguidas em 2026-09-17. Sobe o teto do heap,
+        # não troca o comando — o typecheck local (fora do CI) não precisa
+        # disto porque o Node ali detecta a RAM da máquina e ajusta sozinho.
+        run: NODE_OPTIONS=--max-old-space-size=6144 pnpm typecheck
 
       - name: Lint
         run: pnpm lint
