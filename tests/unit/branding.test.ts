@@ -916,6 +916,16 @@ const HOSTS_DECLARADOS: Record<string, EntradaDeHost> = {
     motivo:
       "sufixo do iCalUID gravado no Google Calendar do cliente (lib/agenda/google/evento.ts). Identificador de fio que reconhecemos meses depois — já congelado como PROTOCOLO pela catraca de marca.",
   },
+  "pordosol.ddns.net": {
+    categoria: "FORNECEDOR",
+    motivo:
+      "endpoint do PMS proprietário da Pousada Pôr do Sol (lib/pousada/pms-client.ts) — o PMS não tem autenticação própria e exige headers fixos (referer/origin) simulando o front-end oficial dele, herdado do fluxo n8n original. É o destino que o cliente da integração fala; trocar quebraria a chamada. Em EditorDeCapacidadeHttp.tsx aparece como AMOSTRA — placeholder do campo de URL da capacidade HTTP, mostrando o formato real que este cliente usa.",
+  },
+  "seu-servidor.exemplo.com": {
+    categoria: "AMOSTRA",
+    motivo:
+      "placeholder do campo de URL do gateway próprio (CanalGatewayClient.tsx): mostra o FORMATO do que digitar, TLD `.exemplo.com` reservado — mesma natureza dos outros placeholders de URL acima.",
+  },
 };
 
 describe("catraca de host de terceiro no código que embarca", () => {
@@ -1075,6 +1085,10 @@ describe("catraca de host de terceiro no código que embarca", () => {
       // protocolo manda. Entrou aqui porque a régua nova do #914 passou a
       // enxergá-lo, e não porque o produto ganhou host novo.
       "s.whatsapp.net",
+      // Decisão escrita: placeholder do campo de URL do gateway próprio
+      // (CanalGatewayClient.tsx) — amostra de formato, TLD `.exemplo.com`
+      // reservado, mesma natureza dos outros placeholders de URL da lista.
+      "seu-servidor.exemplo.com",
       "tusitio.com",
     ]);
   });
