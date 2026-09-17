@@ -156,7 +156,7 @@ export function AgentInboxList({ canResolve }: { canResolve: boolean }) {
             <label className="flex items-center gap-2 px-1">
               <input
                 type="checkbox"
-                className="h-4 w-4 shrink-0 rounded border-border accent-primary"
+                className="h-4 w-4 shrink-0 rounded-md border-border accent-primary"
                 checked={todosCarregadosSelecionados}
                 onChange={alternarSelecionarTodos}
                 aria-label={t("Selecionar todos os avisos carregados")}
@@ -224,7 +224,7 @@ function InboxRow({
       {canResolve ? (
         <input
           type="checkbox"
-          className="mt-1 h-4 w-4 shrink-0 rounded border-border accent-primary"
+          className="mt-1 h-4 w-4 shrink-0 rounded-md border-border accent-primary"
           checked={selecionado}
           onChange={onToggleSelecao}
           aria-label={`${t("Selecionar aviso")}: ${item.title}`}

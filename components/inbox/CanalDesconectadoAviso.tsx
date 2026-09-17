@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { useT } from "@/hooks/i18n/useT";
 
 /**
  * A conexão desta conversa está fora do ar — e o atendente vê ANTES de tentar
@@ -21,18 +22,19 @@ import Link from "next/link";
  * que não responde. Por isso este aviso é só texto, sem seletor.
  */
 export function CanalDesconectadoAviso({ apelido }: { apelido: string | null }) {
+  const t = useT();
   return (
     <div className="border-t border-destructive/40 bg-destructive/10 px-4 py-3 text-xs text-destructive">
       <p>
-        {apelido ? `A conexão "${apelido}"` : "A conexão desta conversa"} está desconectada — nenhuma
-        mensagem sai até ela voltar.
+        {apelido ? `${t("A conexão")} "${apelido}"` : t("A conexão desta conversa")}{" "}
+        {t("está desconectada — nenhuma mensagem sai até ela voltar.")}
       </p>
-      <p className="mt-1 text-destructive/80">
-        Peça para um administrador reconectar em{" "}
+      <p className="mt-1 text-destructive">
+        {t("Peça para um administrador reconectar em")}{" "}
         <Link href="/app/connections" className="font-medium underline underline-offset-2">
-          Conexões
+          {t("Conexões")}
         </Link>
-        . Notas internas continuam funcionando normalmente.
+        . {t("Notas internas continuam funcionando normalmente.")}
       </p>
     </div>
   );

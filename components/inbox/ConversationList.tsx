@@ -2,7 +2,6 @@
 import { ehAFila } from "@/lib/inbox/comando-da-conversa";
 import { useEffect, useMemo } from "react";
 import { useT } from "@/hooks/i18n/useT";
-import type { InfiniteData, UseInfiniteQueryResult } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useChannelSessions } from "@/hooks/channels/useChannelSessions";
@@ -16,6 +15,7 @@ import { filtrosAuxiliaresAtivos } from "@/lib/inbox/filtros-ativos";
 import type {
   ConversationsFilters,
   ConversationWithContact,
+  useConversationsRealtime,
 } from "@/hooks/inbox/useConversationsRealtime";
 
 interface ListResponse {
@@ -25,7 +25,7 @@ interface ListResponse {
 
 interface Props {
   /** Query já montada no pai — evita duplicar subscription Realtime + refetch. */
-  listQuery: UseInfiniteQueryResult<InfiniteData<ListResponse>, Error>;
+  listQuery: ReturnType<typeof useConversationsRealtime>;
   filters: ConversationsFilters;
   selectedId: string | null;
   onSelect: (id: string) => void;
