@@ -6,6 +6,7 @@ import { z } from "zod";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { loadAuthUser, resolveActiveOrg } from "@/lib/auth/server";
 import { ROLE_RANK } from "@/lib/auth/types";
+import { supportWriteError } from "@/lib/impersonate/support";
 import type { McpContext, McpToolDefinition } from "@/lib/mcp/types";
 import {
   pousadaConsultarDisponibilidade,
@@ -46,6 +47,10 @@ export async function testPousadaTool(toolName: string, argsJson: string): Promi
 
   const authUser = await loadAuthUser();
   if (!authUser) return { ok: false, error: "unauthenticated" };
+  // Este painel EXECUTA a tool de verdade — inclusive `pousada_gerar_cobranca_pix`,
+  // que move dinheiro. Sessão de suporte/impersonate não pode disparar isso no
+  // tenant de outra pessoa.
+  if (supportWriteError(authUser.support)) return { ok: false, error: "forbidden_role" };
   const activeOrg = await resolveActiveOrg(authUser);
   if (!activeOrg) return { ok: false, error: "forbidden_tenant" };
   if (!authUser.is_platform_admin && ROLE_RANK[activeOrg.role] < ROLE_RANK.admin) {
