@@ -28,6 +28,7 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import { AgentInboxList } from "@/app/app/ai/inbox/_components/AgentInboxList";
 import {
   useAgentInbox,
+  useBulkUpdateInboxItems,
   useResolveAllInboxItems,
   useUpdateInboxItem,
   type AgentInboxItem,
@@ -36,6 +37,7 @@ import {
 vi.mock("@/hooks/ai/useAgentInbox", () => ({
   useAgentInbox: vi.fn(),
   useUpdateInboxItem: vi.fn(),
+  useBulkUpdateInboxItems: vi.fn(),
   useResolveAllInboxItems: vi.fn(),
 }));
 /** Todo texto que passar pelo tradutor sai marcado. O que não passar, sai cru. */
@@ -63,7 +65,7 @@ const resolverTodos = vi.fn();
 
 function lista(itens: AgentInboxItem[] = [aviso], extra: Record<string, unknown> = {}) {
   vi.mocked(useAgentInbox).mockReturnValue({
-    data: { items: itens, open_count: itens.length },
+    data: { pages: [{ data: { items: itens, open_count: itens.length } }] },
     isLoading: false,
     ...extra,
   } as unknown as ReturnType<typeof useAgentInbox>);
@@ -76,6 +78,10 @@ beforeEach(() => {
     mutate: vi.fn(),
     isPending: false,
   } as unknown as ReturnType<typeof useUpdateInboxItem>);
+  vi.mocked(useBulkUpdateInboxItems).mockReturnValue({
+    mutate: vi.fn(),
+    isPending: false,
+  } as unknown as ReturnType<typeof useBulkUpdateInboxItems>);
   vi.mocked(useResolveAllInboxItems).mockReturnValue({
     mutate: resolverTodos,
     isPending: false,

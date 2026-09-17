@@ -43,6 +43,7 @@ function listaFalsa({ itens = [], hasNextPage = false }: { itens?: unknown[]; ha
     isFetchingNextPage: false,
     fetchNextPage: vi.fn(),
     refetch: vi.fn(),
+    realtimeStatus: "subscribed",
   } as never;
 }
 

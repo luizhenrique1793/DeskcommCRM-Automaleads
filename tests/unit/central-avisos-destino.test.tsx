@@ -1,17 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { AgentInboxList } from "@/app/app/ai/inbox/_components/AgentInboxList";
-import { useAgentInbox, useResolveAllInboxItems, useUpdateInboxItem, type AgentInboxItem } from "@/hooks/ai/useAgentInbox";
+import { useAgentInbox, useBulkUpdateInboxItems, useResolveAllInboxItems, useUpdateInboxItem, type AgentInboxItem } from "@/hooks/ai/useAgentInbox";
 import { ApiError } from "@/lib/api/types";
-vi.mock("@/hooks/ai/useAgentInbox", () => ({ useAgentInbox: vi.fn(), useUpdateInboxItem: vi.fn(), useResolveAllInboxItems: vi.fn() }));
+vi.mock("@/hooks/ai/useAgentInbox", () => ({ useAgentInbox: vi.fn(), useUpdateInboxItem: vi.fn(), useBulkUpdateInboxItems: vi.fn(), useResolveAllInboxItems: vi.fn() }));
 vi.mock("@/hooks/i18n/useT", () => ({ useT: () => (s: string) => s }));
 vi.mock("@/hooks/i18n/useLocaleDeData", () => ({ useLocaleDeData: () => undefined }));
 const mutate = vi.fn();
 const item: AgentInboxItem = { id: "aviso", kind: "handoff", severity: "warn", title: "Atendimento aguardando", body: null, ref_kind: "conversation", ref_id: "ref", status: "open", created_at: new Date().toISOString(), destination: { estado: "disponivel", href: "/app/inbox/ref", rotulo: "Abrir conversa" } };
 function dados(value = item) {
-  vi.mocked(useAgentInbox).mockReturnValue({ data: { items: [value], open_count: 1 }, isLoading: false } as ReturnType<typeof useAgentInbox>);
+  vi.mocked(useAgentInbox).mockReturnValue({ data: { pages: [{ data: { items: [value], open_count: 1 } }] }, isLoading: false } as unknown as ReturnType<typeof useAgentInbox>);
 }
-beforeEach(() => { vi.clearAllMocks(); dados(); vi.mocked(useUpdateInboxItem).mockReturnValue({ mutate, isPending: false } as unknown as ReturnType<typeof useUpdateInboxItem>); vi.mocked(useResolveAllInboxItems).mockReturnValue({ mutate: vi.fn(), isPending: false } as unknown as ReturnType<typeof useResolveAllInboxItems>); });
+beforeEach(() => { vi.clearAllMocks(); dados(); vi.mocked(useUpdateInboxItem).mockReturnValue({ mutate, isPending: false } as unknown as ReturnType<typeof useUpdateInboxItem>); vi.mocked(useBulkUpdateInboxItems).mockReturnValue({ mutate: vi.fn(), isPending: false } as unknown as ReturnType<typeof useBulkUpdateInboxItems>); vi.mocked(useResolveAllInboxItems).mockReturnValue({ mutate: vi.fn(), isPending: false } as unknown as ReturnType<typeof useResolveAllInboxItems>); });
 describe("Central: navegação separada da resolução", () => {
   it("contexto é link, clique não muda status; resolver chama uma vez", () => {
     render(<AgentInboxList canResolve />);
@@ -43,7 +43,7 @@ describe("Central: navegação separada da resolução", () => {
     expect(refetch).toHaveBeenCalledOnce();
   });
   it("falha de refetch conserva itens carregados com aviso de desatualização", () => {
-    vi.mocked(useAgentInbox).mockReturnValue({ data: { items: [item], open_count: 1 }, isError: true, isLoading: false, refetch: vi.fn() } as unknown as ReturnType<typeof useAgentInbox>);
+    vi.mocked(useAgentInbox).mockReturnValue({ data: { pages: [{ data: { items: [item], open_count: 1 } }] }, isError: true, isLoading: false, refetch: vi.fn() } as unknown as ReturnType<typeof useAgentInbox>);
     render(<AgentInboxList canResolve />);
     expect(screen.getByText(item.title)).toBeVisible();
     expect(screen.getByRole("alert")).toHaveTextContent("pode estar desatualizada");
@@ -57,7 +57,7 @@ describe("Central: navegação separada da resolução", () => {
     expect(screen.getByRole("button", { name: "Marcar resolvido" })).toBeEnabled();
   });
   it.each([401, 403])("refetch %i retira dados e ações autorizadas anteriormente", status => {
-    vi.mocked(useAgentInbox).mockReturnValue({ data: { items: [item], open_count: 1 }, isError: true, error: new ApiError(status, "forbidden", undefined, "req"), isLoading: false, refetch: vi.fn() } as unknown as ReturnType<typeof useAgentInbox>);
+    vi.mocked(useAgentInbox).mockReturnValue({ data: { pages: [{ data: { items: [item], open_count: 1 } }] }, isError: true, error: new ApiError(status, "forbidden", undefined, "req"), isLoading: false, refetch: vi.fn() } as unknown as ReturnType<typeof useAgentInbox>);
     render(<AgentInboxList canResolve />);
     expect(screen.getByRole("alert")).toHaveTextContent("Seu acesso aos avisos não está disponível");
     expect(screen.queryByRole("link")).toBeNull();
