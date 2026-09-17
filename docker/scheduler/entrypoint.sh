@@ -62,10 +62,18 @@ CRONS="
 * * * * *|45|api/v1/cron/event-log-drain
 * * * * *|25|api/v1/cron/routing-worker
 * * * * *|25|api/v1/cron/recover-stuck-messages
+# Reenvio de mensagem que ficou 'queued' (canal fora do ar, cap de envio) e o
+# canal já voltou. A cada 2 min, não a cada 1: dar tempo do canal estabilizar
+# de verdade evita reenviar pra um canal que caiu e voltou instável.
+*/2 * * * *|45|api/v1/cron/retry-queued-messages
 */5 * * * *|25|api/v1/cron/storage-redaction?limit=50
 */5 * * * *|25|api/v1/cron/snooze-watcher
 */5 * * * *|60|api/v1/cron/webhook-log-retention
 */5 * * * *|45|api/v1/cron/channel-health
+# PIX (Cielo, Pousada Pôr do Sol): confirma pagamento pendente por polling —
+# o webhook da Cielo é best-effort e uma reserva não pode ficar presa
+# esperando ele. A cada minuto, mesma cadência do agent-dispatcher.
+* * * * *|25|api/v1/cron/pix-watcher
 */10 * * * *|60|api/v1/cron/contact-avatars
 */10 * * * *|60|api/v1/cron/agenda-google-refresh
 */15 * * * *|90|api/v1/cron/agenda-google-sync
