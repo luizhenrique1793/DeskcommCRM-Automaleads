@@ -49,8 +49,14 @@ const ACTION = join(process.cwd(), ".github/actions/preparar-node/action.yml");
  */
 const TETOS: Record<string, { minutos: number; razao: string }> = {
   "ci.yml::verify": {
-    minutos: 15,
-    razao: "trabalho real medido: p90 594s, máximo 609s em 51 verdes — folga de ~4m45",
+    minutos: 25,
+    razao:
+      "o teto de 15 nunca tinha sido exercitado de verdade nesta fork: o typecheck estourava " +
+      "o heap (OOM) antes de chegar perto dele. Consertado o OOM (NODE_OPTIONS no passo de " +
+      "Typecheck), medido uma corrida real completa: job 1129s (Unit tests sozinho 1002s), " +
+      "SEM sequer chegar ao passo de Kit self-host (pulado por falha do passo anterior, não " +
+      "por relógio). 25min dá margem sobre o único dado real que existe até agora — não é uma " +
+      "amostra de 51 verdes como a razão anterior, é declarado como a da invariants-majors",
   },
   // O agregado `invariants` NÃO tem teto de propósito: ele não roda a suíte, só
   // lê o desfecho de `needs`. O teto que denuncia a suíte crescendo vive na perna

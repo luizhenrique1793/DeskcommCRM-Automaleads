@@ -25,12 +25,9 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    # 15 nunca foi exercitado de verdade: o typecheck estourava o heap (OOM)
-    # bem antes disso. Consertado o OOM, "Unit tests" sozinho leva ~13-15min
-    # neste runner (medido em 2026-09-17, job cancelado aos 15min com o passo
-    # em 774s e ainda rodando) — e falta "Kit self-host" depois. 30 dá margem
-    # real sem virar cheque em branco.
-    timeout-minutes: 30
+    # Razão e medição: TETOS["ci.yml::verify"] em
+    # tests/unit/preambulo-do-ci-nao-come-o-relogio.test.ts — mudar só aqui reprova o gate.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
 
