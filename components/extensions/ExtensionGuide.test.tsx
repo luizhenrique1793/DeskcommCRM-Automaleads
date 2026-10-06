@@ -23,7 +23,7 @@ const GUIDE: ExtensionGuideView = {
     name: "rotina-comercial",
     version: "1.0.0",
     license: "MIT",
-    host_api: { min: 1, max: 1 },
+    host_api: { min: 1, max: 2 },
     permissions: ["navigation.tasks"],
     dependencies: [],
     data: { mode: "none" },

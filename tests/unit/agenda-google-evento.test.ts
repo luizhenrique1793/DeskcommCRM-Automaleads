@@ -16,6 +16,7 @@ import {
   type LeituraDeEvento,
   doEventoDoGoogle,
   paraEventoDoGoogle,
+  participantesDoAgendamento,
 } from "@/lib/agenda/google/evento";
 
 const ORG = "11111111-1111-4111-8111-111111111111";
@@ -70,6 +71,17 @@ describe("paraEventoDoGoogle", () => {
 
   it("o compromisso SEMPRE ocupa a agenda", () => {
     expect(paraEventoDoGoogle(agendamento()).transparency).toBe("opaque");
+  });
+
+  it("a observação vira descrição do evento, e o endereço vira o local", () => {
+    const corpo = paraEventoDoGoogle(agendamento());
+    expect(corpo.description).toBe("Primeira consulta");
+    expect(corpo.location).toBe("Rua das Acácias, 120");
+    // Em branco não manda a chave: o Google trata "" como descrição, e o
+    // evento nasceria com um campo vazio em vez de sem campo.
+    expect(paraEventoDoGoogle(agendamento({ description: "   " }))).not.toHaveProperty(
+      "description",
+    );
   });
 
   it("traduz os cinco status nossos nos três do Google", () => {
@@ -173,6 +185,26 @@ describe("paraEventoDoGoogle", () => {
     expect(corpo).not.toHaveProperty("attendees");
   });
 
+  it("o e-mail da ficha e o convidado digitado viram attendees, sem repetir", () => {
+    expect(
+      participantesDoAgendamento({
+        contactEmail: "lead@clinica.test",
+        contactName: "Ian",
+        guestEmail: "acompanhante@casa.test",
+      }),
+    ).toEqual([
+      { email: "lead@clinica.test", nome: "Ian", aguardandoResposta: true },
+      { email: "acompanhante@casa.test", aguardandoResposta: true },
+    ]);
+    expect(
+      participantesDoAgendamento({
+        contactEmail: "MESMO@clinica.test",
+        guestEmail: "mesmo@clinica.test",
+      }),
+    ).toEqual([{ email: "MESMO@clinica.test", aguardandoResposta: true }]);
+    expect(participantesDoAgendamento({ contactEmail: "  ", guestEmail: null })).toEqual([]);
+  });
+
   it("recusa a linha que não é traduzível, em vez de mandar evento pela metade", () => {
     expect(() => paraEventoDoGoogle(agendamento({ title: "   " }))).toThrow(/sem título/);
     expect(() => paraEventoDoGoogle(agendamento({ starts_at: "ontem" }))).toThrow(/starts_at inválido/);
@@ -183,6 +215,32 @@ describe("paraEventoDoGoogle", () => {
     expect(() =>
       paraEventoDoGoogle(agendamento({ participantes: [{ email: "  " }] })),
     ).toThrow(/participante sem e-mail/);
+  });
+
+  // ─── A CERCA (#1959) ────────────────────────────────────────────────────
+  // `AgendamentoParaGoogle` não tem `notes`, mas o `sync-executor.ts` chama esta
+  // função com `{ ...a, ... }` — o snapshot inteiro. Se o snapshot voltar a
+  // carregar `notes`, ele CHEGA aqui em tempo de execução, e o TypeScript não
+  // acusa nada (nem se os dois tipos ganharem o campo: medido). A cerca é de
+  // runtime. O caso sem observação é o que importa: foi exatamente o
+  // `a.description?.trim() || a.notes?.trim()` da #1959.
+  it.each([
+    ["com observação visível", "Primeira consulta", "Primeira consulta"],
+    ["sem observação (null)", null, undefined],
+    ["com observação em branco", "   ", undefined],
+  ])("⚠️ nunca vaza a anotação INTERNA (notes) para o Google — %s", (_rotulo, description, esperada) => {
+    const comNotaInterna = {
+      ...agendamento({ description }),
+      notes: "queixa clínica: paciente com ansiedade e dor torácica recorrente",
+    } as unknown as AgendamentoParaGoogle;
+    const corpo = paraEventoDoGoogle(comNotaInterna);
+    expect(corpo.description).toBe(esperada);
+    // Nenhum campo do corpo pode carregar o texto interno — pega também um
+    // espalhamento (`...a`) que criasse uma chave nova.
+    const serializa = JSON.stringify(corpo);
+    expect(serializa).not.toContain("queixa clínica");
+    expect(serializa).not.toContain("dor torácica");
+    expect("notes" in corpo).toBe(false);
   });
 });
 

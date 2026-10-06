@@ -161,6 +161,9 @@ describe("ingestão oficial — atribuição de anúncio no contato", () => {
       p_metadata: {
         ad_platform: "meta_ads",
         ad_source_id: "ARAkLkA8rmlFeiCktEJQ",
+        // O clique E o anúncio, do MESMO payload. Este referral traz os dois, e
+        // até agora o segundo morria no caminho.
+        ad_id: "120210000000000",
         ad_title: "Agende sua consulta",
         ad_source_url: "https://fb.me/anuncio123",
       },

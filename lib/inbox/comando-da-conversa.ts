@@ -65,8 +65,22 @@ export interface FatosDoComando {
   assignee_kind?: string | null;
   /** ISO, ou o literal `"infinity"` que o Postgres devolve para o silêncio durável. */
   bot_silenced_until?: string | null;
+  /**
+   * `conversations.last_handoff_reason` — distingue um handoff formal de uma
+   * PAUSA por resposta no celular (`MOTIVO_ATENDIMENTO_MANUAL`), que tem um
+   * motivo próprio na tela. Opcional: quem não passa, cai em `"pausado"`.
+   */
+  last_handoff_reason?: string | null;
   /** A trava do CONTATO — irrevogável pelo agente. */
   force_human?: boolean | null;
+  /**
+   * Conversa de GRUPO de WhatsApp (`conversations.is_group`). O automático nunca
+   * atende grupo (o banco nem emite `message.received` para ele), então grupo sem
+   * dono é conversa HUMANA esperando alguém — `aguardando`, na fila humana — e
+   * nunca "Automático atendendo". Espelho SQL: `p_is_group` de
+   * `fn_comando_da_conversa` (migration 0482).
+   */
+  is_group?: boolean | null;
   /**
    * O contato pediu para não receber mensagens (`contacts.is_blocked`).
    *
@@ -101,6 +115,9 @@ export type Comando =
   /** Acabou. Nem pessoa nem automático têm o que fazer aqui. */
   | { quem: "encerrada" };
 
+/** Motivo gravado por `pausarIaPorAtendimentoManual` (espelha `atendimento-manual.ts`). */
+const MOTIVO_ATENDIMENTO_MANUAL = "Atendimento manual pelo canal (resposta fora do CRM)";
+
 export type MotivoDoSilencio =
   /** Alguém assumiu. Ação: só devolver ao automático libera. */
   | "atendente_no_comando"
@@ -108,6 +125,12 @@ export type MotivoDoSilencio =
   | "contato_travado"
   /** Alguém pausou de propósito, ou o automático passou o caso para uma pessoa. */
   | "pausado"
+  /**
+   * Uma pessoa respondeu o cliente pelo CELULAR (fora do CRM). A pausa é
+   * durável: só o comando `#on` pelo celular ou "devolver ao automático" na tela
+   * religam a IA. Ação: devolver quando o atendimento humano terminar.
+   */
+  | "atendimento_pelo_celular"
   /** Janela deslizante do envio manual. Ação: NENHUMA — volta sozinho. */
   | "resposta_humana_recente"
   /**
@@ -168,7 +191,7 @@ const MENOS_INFINITO = "-infinity";
  * `conversations.status='resolved'` (só há leitores), então isto não muda nada
  * hoje — e passa a importar no instante em que o banco calcular o mesmo comando.
  */
-const STATUS_ENCERRADOS = new Set(["closed", "archived", "resolved"]);
+export const STATUS_ENCERRADOS = new Set(["closed", "archived", "resolved"]);
 
 /**
  * O silêncio, lido do jeito que o Postgres o entrega.
@@ -208,6 +231,7 @@ export function comandoDaConversa(fatos: FatosDoComando, agora: Date = new Date(
   const travado = fatos.force_human === true;
   const bloqueado = fatos.is_blocked === true;
   const encerrada = STATUS_ENCERRADOS.has(fatos.status);
+  const grupo = fatos.is_group === true;
 
   const comando: Comando = fatos.assigned_to_user_id
     ? {
@@ -219,7 +243,8 @@ export function comandoDaConversa(fatos: FatosDoComando, agora: Date = new Date(
       ? { quem: "encerrada" }
       : // Sem dono: quem manda depende do automático estar de pé. Calado e sem
         // dono é a conversa que o automático escalou e ninguém pegou — a fila.
-        silencio.vigente || travado || bloqueado
+        // Grupo entra junto: o automático nunca o atende, é sempre de humano.
+        grupo || silencio.vigente || travado || bloqueado
         ? { quem: "aguardando" }
         : fatos.automaticoDaOrg === false
           ? { quem: "ninguem" }
@@ -236,11 +261,13 @@ export function comandoDaConversa(fatos: FatosDoComando, agora: Date = new Date(
    */
   const comandoFinal: Comando = comando;
 
-  const automaticoAtivo = !encerrada && !travado && !bloqueado && !silencio.vigente;
+  const automaticoAtivo = !grupo && !encerrada && !travado && !bloqueado && !silencio.vigente;
 
   const motivo: MotivoDoSilencio | null = automaticoAtivo
     ? null
-    : encerrada
+    : grupo
+      ? null // Grupo não é automático pausado: o automático nunca o atende.
+      : encerrada
       ? null // Encerrada não é silêncio: é ausência de assunto. O estado já diz.
       : bloqueado
         ? // ANTES de `travado`, de propósito: quando as duas valem, é o opt-out que
@@ -256,7 +283,9 @@ export function comandoDaConversa(fatos: FatosDoComando, agora: Date = new Date(
             silencio.duravel
             ? fatos.assigned_to_user_id
               ? "atendente_no_comando"
-              : "pausado"
+              : fatos.last_handoff_reason === MOTIVO_ATENDIMENTO_MANUAL
+                ? "atendimento_pelo_celular"
+                : "pausado"
             : "resposta_humana_recente";
 
   return {
@@ -264,7 +293,8 @@ export function comandoDaConversa(fatos: FatosDoComando, agora: Date = new Date(
     automaticoAtivo,
     // `bloqueado` ANULA a trava devolvível: veja o comentário de `is_blocked` em
     // `FatosDoComando`. Devolver não desfaz opt-out, e o botão seria decorativo.
-    travaVigente: (travado || silencio.vigente) && !bloqueado,
+    // Grupo também: "Devolver ao automático" num grupo prometeria o que não existe.
+    travaVigente: (travado || silencio.vigente) && !bloqueado && !grupo,
     motivo,
     silencioAte: motivo === "resposta_humana_recente" ? silencio.ate : null,
   };
@@ -289,6 +319,7 @@ export const ROTULO_DO_COMANDO: Record<Comando["quem"], string> = {
 };
 
 export const ROTULO_DO_MOTIVO: Record<MotivoDoSilencio, string> = {
+  atendimento_pelo_celular: "Automático pausado — atendimento pelo celular (#on religa)",
   atendente_no_comando: "Automático pausado — alguém assumiu",
   contato_travado: "Automático pausado para este cliente",
   pausado: "Automático pausado",
@@ -333,19 +364,38 @@ export function comandosDaFila(automaticoDaOrg?: boolean): ComandoDoBanco[] {
 /**
  * A ORDEM DA FILA, num lugar só — mais tempo esperando primeiro.
  *
- * `last_inbound_at` é a última mensagem DO CLIENTE, e é a única das três datas
- * que mede espera: `last_message_at` anda quando o atendente responde (a conversa
- * que o cliente abandonou há dois dias volta ao topo assim que ele recebe uma
- * resposta hoje) e `created_at` pode ser de uma conversa antiga reaberta.
- * `nullsFirst: false` põe quem nunca recebeu mensagem no fim; o `id` é o
- * desempate, e sem ele duas conversas com o mesmo instante trocam de lugar entre
- * duas leituras — a linha "pula" sozinha na tela.
+ * ─── A régua é a mensagem mais ANTIGA sem resposta, não a última (issue #990) ─
+ *
+ * A ordem era por `last_inbound_at`, a ÚLTIMA mensagem do cliente — e essa coluna
+ * é reescrita a cada mensagem nova (`fn_mark_conversation_message`, migration
+ * 0267). O efeito era o oposto do pretendido: o cliente que insiste (pergunta,
+ * cobra, escreve de novo) REINICIAVA a própria espera e descia para o fim da
+ * fila, atrás de quem escreveu uma vez e ficou quieto. Não é uma lista
+ * desordenada na tela — é a pessoa que mais está tentando ser atendida sendo a
+ * última a ser atendida.
+ *
+ * A régua passa a ser `awaiting_since`: o instante da mensagem do cliente mais
+ * antiga que ninguém respondeu ainda (min(sent_at) dos inbound posteriores a
+ * `last_outbound_at`, no atendimento em curso). Ela é COLUNA, e não expressão,
+ * porque a ordem da Fila é um `order by` pedido ao PostgREST pela rota da lista e
+ * o PostgREST ordena por coluna — a expressão mora em `messages` e depende de
+ * `last_outbound_at`.
+ *
+ * `last_message_at` continua fora: ele anda quando o atendente responde (a
+ * conversa que o cliente abandonou há dois dias volta ao topo assim que ele
+ * recebe uma resposta hoje), e `created_at` pode ser de uma conversa antiga
+ * reaberta. `nullsFirst: false` põe quem nunca recebeu mensagem no fim; o `id` é
+ * o desempate, e sem ele duas conversas com o mesmo instante trocam de lugar
+ * entre duas leituras — a linha "pula" sozinha na tela.
  *
  * Quem consome: a rota da lista (`app/api/v1/conversations/_handler.ts`, a aba
- * Fila) e o mapa de posições (`lib/routing/queue.ts` — o "3º" que o atendente lê
- * na linha e o número que o cliente ouve no WhatsApp). Enquanto cada um escrevia
- * a sua, a mesma conversa poderia aparecer em 2º numa e 5ª na outra, ordenada por
- * uma pergunta e numerada por outra, sem nada ficar vermelho.
+ * Fila), o mapa de posições e o resumo da fila (`lib/routing/queue.ts` — o "3º"
+ * que o atendente lê na linha e o número que o cliente ouve no WhatsApp) e a
+ * pílula "Aguardando há…" com a hora do canto da linha
+ * (`components/inbox/ConversationListItem.tsx`, via `esperaDaConversa`). Enquanto
+ * cada um escrevia a sua, a mesma conversa podia aparecer em 2º numa e 5ª na
+ * outra — ordenada por uma pergunta e numerada por outra, com a espera da linha
+ * dizendo um tempo que a ordem não respeitava —, sem nada ficar vermelho.
  */
 /**
  * "Este pedido é o da Fila?" — a mesma pergunta na rota e na lista.
@@ -365,6 +415,30 @@ export function ehAFila(f: {
 }
 
 export const ORDEM_DA_ESPERA = {
-  coluna: "last_inbound_at",
+  coluna: "awaiting_since",
   opcoes: { ascending: true, nullsFirst: false },
 } as const;
+
+/**
+ * O INSTANTE que a Fila trata como espera, para quem já tem a linha na mão — a
+ * contraparte de `ORDEM_DA_ESPERA`, que é a COLUNA pedida ao banco.
+ *
+ * Existe porque o mesmo instante é mostrado em dois lugares da linha (a pílula
+ * "Aguardando há…" e a hora do canto) e o valor não pode sair de duas cadeias de
+ * fallback escritas à mão: `?? created_at` num lugar e `?? last_message_at` no
+ * outro é exatamente a divergência de 40px que a #464 fechou.
+ *
+ * `awaiting_since` é a régua (migration 0267). `last_inbound_at` fica no meio da
+ * cadeia por um motivo com prazo: entre o deploy deste código e a migration
+ * aplicada, a coluna ainda não vem na linha que o realtime entrega, e sem esse
+ * degrau a Fila inteira mostraria a data de criação — uma tela plausível e
+ * errada. `created_at` é o último degrau, para a conversa que nunca recebeu
+ * mensagem do cliente.
+ */
+export function esperaDaConversa(c: {
+  awaiting_since?: string | null;
+  last_inbound_at?: string | null;
+  created_at?: string | null;
+}): string | null {
+  return c.awaiting_since ?? c.last_inbound_at ?? c.created_at ?? null;
+}

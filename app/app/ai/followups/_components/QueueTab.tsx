@@ -36,6 +36,7 @@ import {
 import { Clock, MagnifyingGlass, Trash } from "@/lib/ui/icons";
 import { useT } from "@/hooks/i18n/useT";
 import { rotuloDoStatus, tomDoStatus } from "@/lib/followup/eventos-legiveis";
+import { useAuth } from "@/hooks/auth/AuthProvider";
 import { useFollowupFlows } from "@/hooks/followup/useFollowupFlows";
 import {
   useCancelFollowupEnrollment,
@@ -58,14 +59,22 @@ interface Props {
 const STATUS_OPTIONS: FollowupEnrollmentStatus[] = [
   "active",
   "waiting_reply",
+  "dormente",
   "paused_manual",
   "paused_handoff",
+  // O roteiro de atendimento em andamento (0394). Só aparece como opção com o
+  // módulo ligado — desligado, a fila fica como era.
+  "coletando",
   "completed",
   "cancelled",
   "dead",
 ];
 
-const LIVE_ENROLLMENT_STATUSES = new Set(["active", "waiting_reply", "paused_handoff", "paused_manual"]);
+// Aqui "vivo" INCLUI o dormente, e é o oposto de LIVE_STATUSES da reatividade:
+// quem espera a data do retorno tem de aparecer na fila. Um acompanhamento que
+// some da tela por 28 dias é uma ilha — ninguém sabe que ele existe nem o
+// cancela quando a cliente já voltou por outro caminho.
+const LIVE_ENROLLMENT_STATUSES = new Set(["active", "waiting_reply", "dormente", "paused_handoff", "paused_manual", "coletando"]);
 
 /**
  * O que ainda dá para desmarcar.
@@ -119,6 +128,8 @@ export function QueueTab({ canWrite }: Props) {
   }, [searchInput]);
 
   const { data: flows } = useFollowupFlows();
+  const { activeOrg } = useAuth();
+  const roteirosLigados = activeOrg?.modulos_ligados?.includes("fluxos_atendimento") === true;
   const filters = useMemo(
     () => ({
       status: status === "all" ? undefined : status,
@@ -157,7 +168,7 @@ export function QueueTab({ canWrite }: Props) {
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">{t("Todos os status")}</SelectItem>
-            {STATUS_OPTIONS.map((s) => (
+            {STATUS_OPTIONS.filter((s) => s !== "coletando" || roteirosLigados).map((s) => (
               <SelectItem key={s} value={s}>
                 {rotuloDoStatus(s, t)}
               </SelectItem>

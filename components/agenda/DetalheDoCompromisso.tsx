@@ -10,12 +10,23 @@ import { Button } from "@/components/ui/button";
 import { useT } from "@/hooks/i18n/useT";
 import { useTagDeIdioma } from "@/hooks/i18n/useLocaleDeData";
 import { showApiError } from "@/components/feedback/ApiErrorToast";
+import { rotuloDoLocal } from "@/lib/agenda/locais";
 
 type Detalhe = {
   meeting?: MeetingDetail | null;
   google_sync?: SyncDetail;
   id: string;
   title: string;
+  description: string | null;
+  /**
+   * A anotação INTERNA do compromisso — o resumo que o assistente grava ao
+   * marcar. Distinta de `description`, que é a observação publicável e sobe
+   * para o calendário do cliente; esta fica no CRM, e é o que quem vai atender
+   * precisa ler. A coluna era gravada e não aparecia em tela nenhuma.
+   */
+  notes: string | null;
+  location_kind: string | null;
+  location_details: string | null;
   starts_at: string;
   ends_at: string;
   time_zone: string;
@@ -154,6 +165,29 @@ export function DetalheDoCompromisso({
             <p data-testid="compromisso-horario">
               {formatoDeData.formatRange(new Date(a.starts_at), new Date(a.ends_at))}
             </p>
+            {rotuloDoLocal(a.location_kind, a.location_details) ? (
+              <p data-testid="compromisso-local">
+                {rotuloDoLocal(a.location_kind, a.location_details)}
+              </p>
+            ) : null}
+            {a.description?.trim() ? (
+              <p data-testid="compromisso-observacao" className="whitespace-pre-wrap">
+                {a.description}
+              </p>
+            ) : null}
+            {/*
+              A anotação INTERNA — o resumo que o assistente grava ao marcar, e o
+              que quem vai atender precisa ler. É distinta da observação acima:
+              aquela sobe para o calendário do cliente, esta fica no CRM. Com
+              rótulo, e não o texto solto, porque as duas são texto livre no mesmo
+              painel e sem rótulo ninguém sabe qual delas é interna.
+            */}
+            {a.notes?.trim() ? (
+              <div data-testid="compromisso-anotacao">
+                <p className="text-sm text-text-muted">{t("Anotação")}</p>
+                <p className="whitespace-pre-wrap">{a.notes}</p>
+              </div>
+            ) : null}
             <p>
               {t(
                 (

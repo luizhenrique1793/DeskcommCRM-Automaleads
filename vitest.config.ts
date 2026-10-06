@@ -1,6 +1,14 @@
 import { defineConfig } from "vitest/config";
 import path from "node:path";
 
+import { selecionarCercas } from "./vitest.cercas";
+
+// As guardas estruturais — o arquivo de teste que só lê o repositório (baseline
+// × cadeia, MANIFEST, varredura de anon, docs, workflows, i18n, fragmentos) e
+// não toca DOM; código do produto, só módulo puro. Quem entra é decidido pelo
+// import, em vitest.cercas.ts.
+const CERCAS = selecionarCercas(__dirname);
+
 export default defineConfig({
   // JSX automático já é o default do transform esbuild no Vite 7+ (vitest 4);
   // a opção `esbuild.jsx` saiu do tipo — provado pelos testes de componente.
@@ -33,6 +41,26 @@ export default defineConfig({
       // Bancada opcional: usa node:test, PostgreSQL próprio e Playwright com
       // configuração dedicada. Não depende do ambiente da suíte do produto.
       "experiments/extensoes/**",
+    ],
+    // Dois projetos, a mesma suíte: `pnpm test:unit` continua rodando TUDO,
+    // uma vez só. A divisão existe por duas razões medidas em 18/09/2026:
+    //
+    // 1. TEMPO. As cercas não tocam DOM, e o jsdom é o custo dominante: as
+    //    mesmas 103 cercas levaram 358 s com jsdom e 35 s em `node`, na mesma
+    //    máquina, no mesmo minuto. Na suíte longa elas pagavam jsdom à toa.
+    // 2. ORDEM. `pnpm cercas` (`--project cercas`) roda só elas, e o `verify`
+    //    as põe ANTES do typecheck: o vermelho estrutural — o que mais reprova
+    //    PR — chegava no fim da suíte, aos 7–12 min (runs 35341823692 e
+    //    35331913136), e passa a chegar no primeiro minuto.
+    projects: [
+      {
+        extends: true,
+        test: { name: "cercas", environment: "node", include: CERCAS },
+      },
+      {
+        extends: true,
+        test: { name: "produto", exclude: CERCAS },
+      },
     ],
   },
   resolve: {

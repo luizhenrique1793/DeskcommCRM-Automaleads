@@ -13,7 +13,7 @@ import { getQueuePosition, getQueuePositions } from "@/lib/routing/queue";
  * A ordem da aba Fila é uma decisão de produto: quem espera há mais tempo vem
  * primeiro, e é essa a posição que a tela numera e que o cliente ouve no
  * WhatsApp. Ela vive num `isQueue` de uma linha dentro do handler da lista —
- * trocar `last_inbound_at` por `last_message_at` ali não quebra nada, não avisa,
+ * trocar `awaiting_since` por `last_message_at` ali não quebra nada, não avisa,
  * não muda o tamanho da resposta: a lista continua populada e plausível, só
  * ordenada por OUTRA pergunta. "O atendente que espera desde ontem afunda embaixo
  * de quem escreveu agora" é um defeito de produto que se lê como normal.
@@ -91,7 +91,7 @@ function ordensPedidas(c: Chamada[]): string[] {
 }
 
 const ESPERA = [
-  "last_inbound_at crescente (nulos-por-último)",
+  "awaiting_since crescente (nulos-por-último)",
   "id crescente (nulos-por-último)",
 ];
 
@@ -101,7 +101,7 @@ const ATIVIDADE = [
 ];
 
 describe("a Fila pede ao banco a ordem por tempo de espera", () => {
-  it("⭐ a aba Fila: `last_inbound_at` crescente, quem espera mais primeiro", async () => {
+  it("⭐ a aba Fila: `awaiting_since` crescente, quem espera mais primeiro", async () => {
     const c = await listar({ comando: ["aguardando"] });
     expect(ordensPedidas(c)).toEqual(ESPERA);
   });
@@ -152,7 +152,7 @@ describe("a posição da linha sai da MESMA ordenação da lista", () => {
     const entrada = "2026-09-16T12:00:00.000Z";
     await getQueuePosition(client, "org-1", entrada, new Date());
     const ltes = chamadas.filter((x) => x.metodo === "lte").map((x) => x.args.join(":"));
-    expect(ltes).toContain(`last_inbound_at:${entrada}`);
+    expect(ltes).toContain(`awaiting_since:${entrada}`);
   });
 });
 

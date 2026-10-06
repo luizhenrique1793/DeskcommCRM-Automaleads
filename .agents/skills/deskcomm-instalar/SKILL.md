@@ -106,8 +106,9 @@ Se precisar do modo sem perguntas (`--yes` com `.env` pronto), duas armadilhas m
 - **não copie** as linhas `APP_IMAGE`, `WORKER_IMAGE`, `SCHEDULER_IMAGE` e `*_PULL_POLICY` do
   `.env.hostgator.example` — elas apontam para o canal móvel `stable`, e a instalação deve ficar
   presa a uma versão numerada. Deixe ausentes; o instalador põe a última versão publicada.
-- escreva `SENTRY_DSN=off` se a pessoa **não** quer enviar relatórios de erro. Com o `.env` copiado
-  do exemplo, a pergunta de telemetria não aparece e a instalação sai enviando (issue #668).
+- telemetria não é consentida por automação: se `SENTRY_DSN` estiver ausente, `--yes` grava
+  `SENTRY_DSN=off`. Só deixe `SENTRY_DSN=` vazio quando a pessoa já tiver aceitado explicitamente
+  o Sentry da comunidade; nas reexecuções essa escolha é preservada.
 
 A chave de IA é **opcional** (issue #670, resolvida): dá para instalar sem conta em provedor de IA
 e cadastrar depois em IA › Credenciais — a tela final da instalação lembra quem pulou, com o

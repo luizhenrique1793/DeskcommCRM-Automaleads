@@ -14,20 +14,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { useLoseLead } from "@/hooks/kanban/useUpdateLead";
 import { useMotivosDePerdaDoFunil } from "@/hooks/kanban/useMotivosDePerdaDoFunil";
-import { CANONICAL_LOST_REASONS } from "@/lib/schemas/leads";
-import type { CanonicalLostReason } from "@/lib/schemas/leads";
+import { rotuloDoMotivoDePerda } from "@/lib/schemas/leads";
 import { OUTRO, motivoDePerdaAceito, opcoesDeMotivoDePerda } from "@/lib/leads/motivos-de-perda-do-funil";
-
-const REASON_LABELS: Record<(typeof CANONICAL_LOST_REASONS)[number], string> = {
-  requested_by_customer: "Cliente solicitou cancelamento",
-  price: "Preço",
-  no_response: "Sem resposta do cliente",
-  product_unavailable: "Produto indisponível",
-  cancelled_by_store: "Cancelado pela loja",
-  cancelled_by_customer: "Cancelado pelo cliente",
-  payment_failed: "Falha no pagamento",
-  other: "Outro motivo",
-};
 
 interface LoseLeadDialogProps {
   open: boolean;
@@ -72,9 +60,20 @@ export function LoseLeadDialog({
   // O que CONTINUA recusado antes do clique é o texto digitado fora de
   // canônico ∪ cadastrado (`outroRecusado` abaixo) — esse o trigger nega mesmo,
   // com 22023, e é ele que a issue #918 pede para barrar na tela.
+  //
+  // ⚠️ A CHECAGEM VALE SEM FUNIL CONFIGURADO TAMBÉM. `fn_validate_lost_reason_
+  // required` não tem caso especial para `settings.lost_reasons` ausente/vazio
+  // — ele só amplia `v_canonical` com o que houver, e sem nada cadastrado o
+  // conjunto aceito é SÓ o canônico (8 códigos em inglês). Um texto livre como
+  // "Cliente mudou de ideia" nunca é um desses códigos, então SEMPRE batia com
+  // 22023 `lost_reason_invalid` no clique — reproduzido em produção
+  // (crm.fabrasoftware.com.br) com "Lead optou em outra solução". Gatear esta
+  // checagem em `funilConfigurado` fazia a tela mentir: para o funil sem
+  // motivos cadastrados (o caso comum, inclusive toda instalação nova), o
+  // texto do "Detalhe" NUNCA era aceito pelo servidor, e a pessoa só descobria
+  // depois de já ter clicado "Confirmar".
   const outroRecusado =
     reasonCode === OUTRO &&
-    funilConfigurado &&
     textoOutro.length > 0 &&
     !motivoDePerdaAceito(textoOutro, cadastrados);
 
@@ -123,7 +122,7 @@ export function LoseLeadDialog({
                   checked={reasonCode === opcao.valor}
                   onChange={(e) => setReasonCode(e.target.value)}
                 />
-                <span>{opcao.doFunil ? opcao.valor : t(REASON_LABELS[opcao.valor as CanonicalLostReason] ?? opcao.valor)}</span>
+                <span>{opcao.doFunil ? opcao.valor : t(rotuloDoMotivoDePerda(opcao.valor))}</span>
               </label>
             ))}
           </div>
@@ -157,14 +156,17 @@ export function LoseLeadDialog({
                 </p>
               )}
               {/*
-                SEM condição de erro, e só com funil configurado: é lá que o
+                Com funil configurado é dica permanente (mostra assim que
+                "Outro" é escolhido, mesmo sem ter digitado nada) — é lá que o
                 texto livre é recusado, e quem quiser o motivo COM AS PRÓPRIAS
                 PALAVRAS precisa cadastrá-lo. Deixar o detalhe em branco continua
-                valendo — grava "Outro" —, e é por isso que esta frase é uma
-                dica e não um aviso de erro. Sem funil configurado não aparece,
-                porque lá o texto livre já passa e a frase seria ruído.
+                valendo — grava "Outro". SEM funil configurado o texto livre
+                também é recusado (`outroRecusado` acima, sem gate de
+                `funilConfigurado` — o servidor não abre exceção para funil
+                vazio), então a dica aparece assim que há o que corrigir, em vez
+                de ficar plantada antes de a pessoa digitar qualquer coisa.
               */}
-              {funilConfigurado && (
+              {(funilConfigurado || outroRecusado) && (
                 <p className="text-xs text-muted-foreground">
                   {t("Para usar um motivo que não está aqui, cadastre em Configurações › Funis.")}
                 </p>

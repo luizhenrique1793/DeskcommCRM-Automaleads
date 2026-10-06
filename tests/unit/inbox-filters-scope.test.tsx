@@ -14,7 +14,7 @@
  * valendo — inbox filtrado, às vezes vazio, sem nada na tela dizendo por quê.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import { InboxFilters, visibleInboxTabs, type InboxFiltersValue } from "@/components/inbox/InboxFilters";
 import type * as CanaisModule from "@/hooks/channels/useChannelSessions";
@@ -36,8 +36,13 @@ vi.mock("@/hooks/channels/useChannelSessions", async (original) => {
 });
 /** `undefined` = vocabulário ainda carregando — não é "zero etiquetas". */
 const tagsRef: { current: string[] | undefined } = { current: [] };
+/** A OUTRA caixa: marcadores do contato. Separada para os casos da união. */
+const tagsDoContatoRef: { current: string[] | undefined } = { current: [] };
 vi.mock("@/hooks/inbox/useConversationTags", () => ({
   useConversationTagVocabulary: () => ({ data: tagsRef.current }),
+}));
+vi.mock("@/hooks/contacts/useContactTagVocabulary", () => ({
+  useContactTagVocabulary: () => ({ data: tagsDoContatoRef.current }),
 }));
 vi.mock("@/hooks/inbox/useConversationCounts", () => ({
   useConversationCounts: () => ({ data: { unassigned: 3, mine: 2, all: 5 } }),
@@ -71,6 +76,8 @@ const SELETOR = "Filtrar por número de WhatsApp";
 beforeEach(() => {
   setOrg("agent", "own_and_unassigned");
   canaisRef.current = [];
+  tagsRef.current = [];
+  tagsDoContatoRef.current = [];
 });
 afterEach(cleanup);
 
@@ -100,6 +107,56 @@ describe("visibleInboxTabs (lógica pura de visões)", () => {
 });
 
 describe("InboxFilters render — 3 visões + escopo", () => {
+  it("centraliza a aba selecionada e indica as abas fora da coluna", () => {
+    setOrg("manager", "all");
+    let onResize: ResizeObserverCallback = () => {};
+    const disconnect = vi.fn();
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(callback: ResizeObserverCallback) { onResize = callback; }
+      observe() {}
+      disconnect = disconnect;
+    });
+
+    try {
+      const onChange = vi.fn();
+      const { rerender } = render(<InboxFilters value={VALUE} onChange={onChange} />);
+      const list = screen.getByRole("tablist");
+      let width = 180;
+      Object.defineProperty(list, "clientWidth", { configurable: true, get: () => width });
+      Object.defineProperty(list, "scrollWidth", { configurable: true, value: 520 });
+      vi.spyOn(list, "getBoundingClientRect").mockReturnValue({ left: 0 } as DOMRect);
+      const all = screen.getByRole("tab", { name: /Todas/ });
+      Object.defineProperty(all, "offsetWidth", { configurable: true, value: 40 });
+      vi.spyOn(all, "getBoundingClientRect").mockImplementation(
+        () => ({ left: 210 - list.scrollLeft }) as DOMRect,
+      );
+      rerender(<InboxFilters value={{ ...VALUE, tab: "all" }} onChange={onChange} />);
+      expect(list.scrollLeft).toBe(140);
+      expect(screen.getByRole("button", { name: "Aba anterior" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Próxima aba" })).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Próxima aba" }));
+      expect(onChange).toHaveBeenCalledWith({ ...VALUE, tab: "closed" });
+
+      width = 260;
+      act(() => onResize([], {} as ResizeObserver));
+      expect(list.scrollLeft).toBe(100);
+
+      const archived = screen.getByRole("tab", { name: /Arquivadas/ });
+      Object.defineProperty(archived, "offsetWidth", { configurable: true, value: 60 });
+      vi.spyOn(archived, "getBoundingClientRect").mockImplementation(
+        () => ({ left: 430 - list.scrollLeft }) as DOMRect,
+      );
+      rerender(<InboxFilters value={{ ...VALUE, tab: "archived" }} onChange={onChange} />);
+      expect(list.scrollLeft).toBe(260);
+      expect(screen.getByRole("button", { name: "Aba anterior" })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Próxima aba" })).not.toBeInTheDocument();
+      expect(screen.getByRole("tab", { name: /Arquivadas/ })).toHaveAttribute("data-state", "active");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(disconnect).toHaveBeenCalled();
+  });
+
   it("agent em modo own*: mostra Minhas e Fila, esconde Todas", () => {
     setOrg("agent", "own_and_unassigned");
     render(<InboxFilters value={VALUE} onChange={() => {}} />);
@@ -169,9 +226,33 @@ describe("InboxFilters — seletor de número e o filtro órfão", () => {
     render(
       <InboxFilters value={{ ...VALUE, tag: "etiqueta-orfa" }} onChange={() => {}} />,
     );
+    // ⚠️ `getByLabelText` continua valendo (#1274): o seletor deixou de ser um
+    // `Select` (que era `role="combobox"`) e virou um botão de menu, mas o RÓTULO
+    // ACESSÍVEL é o mesmo — e é por ele que se procura o controle, e por ele que
+    // o dicionário de tradução o indexa.
     const seletor = screen.getByLabelText("Filtrar por tag");
     expect(seletor).toBeInTheDocument();
     expect(seletor).toHaveTextContent("etiqueta-orfa");
+  });
+
+  /**
+   * O filtro da lista casa a caixa da CONVERSA ou a do CONTATO; o seletor tem
+   * de oferecer as duas. Cada caso abaixo vigia um lado: ler só a conversa
+   * esconde o marcador do contato (o relato do #1206), e ler só o contato
+   * esconde o que o atendente ou a IA marcou na conversa.
+   */
+  it("marcador que só existe no CONTATO faz o seletor aparecer", () => {
+    setOrg("manager", "all");
+    tagsDoContatoRef.current = ["vip"];
+    render(<InboxFilters value={VALUE} onChange={() => {}} />);
+    expect(screen.getByLabelText("Filtrar por tag")).toBeInTheDocument();
+  });
+
+  it("marcador que só existe na CONVERSA faz o seletor aparecer", () => {
+    setOrg("manager", "all");
+    tagsRef.current = ["reclamacao"];
+    render(<InboxFilters value={VALUE} onChange={() => {}} />);
+    expect(screen.getByLabelText("Filtrar por tag")).toBeInTheDocument();
   });
 
   it("CONTROLE: sem vocabulário e SEM filtro, o seletor de tag não aparece", () => {

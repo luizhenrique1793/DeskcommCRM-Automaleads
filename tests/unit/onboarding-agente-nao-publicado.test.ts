@@ -63,6 +63,7 @@ vi.mock("@/lib/auth/server", () => ({
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: () => clienteFalso() }));
 
 import { createDefaultAgent, type CreateAgentResult } from "@/app/actions/onboarding/createDefaultAgent";
+import { audit } from "@/lib/audit";
 
 /**
  * Construtor de consulta no formato do PostgREST: encadeável, thenable, e com
@@ -119,7 +120,15 @@ function clienteFalso() {
       order: () => b,
       limit: () => b,
       single: () => resolver(),
-      maybeSingle: () => resolver(),
+      // `single`/`maybeSingle` prometem UMA linha; quando o dublê da tabela
+      // responde lista (é o caso de `ai_provider_credentials`, que passou a ter
+      // consulta de mais de uma), quem chamou `maybeSingle` recebe a primeira —
+      // e `null` quando não há nenhuma, que é o contrato do PostgREST.
+      maybeSingle: () =>
+        resolver().then((r) => ({
+          ...r,
+          data: Array.isArray(r.data) ? (r.data[0] ?? null) : r.data,
+        })),
       then: (ok: (r: Resposta) => unknown, no?: (e: unknown) => unknown) => resolver().then(ok, no),
     };
     return b;
@@ -149,6 +158,22 @@ interface Mundo {
    * significa "usa a chave da instalação".
    */
   credencial?: { id: string } | null;
+  /**
+   * As credenciais da organização COMO O PASSO "CONFIGURAR IA" GRAVA: cada uma
+   * com o provedor da chave colada e com `validated_at` — nulo enquanto o
+   * provedor não confirmar.
+   *
+   * A #1007 depende disso: o defeito é a busca presa ao provedor da instalação,
+   * e um dublê que devolvesse a mesma credencial para qualquer provedor pedido
+   * esconderia o defeito (o teste passaria verde ANTES do conserto).
+   */
+  credenciais?: {
+    id: string;
+    provider?: string;
+    validated_at?: string | null;
+    is_active?: boolean;
+    created_at?: string;
+  }[];
   /**
    * A instalação tem chave deste provedor no ambiente? É o caso mais comum do
    * kit — a pessoa cola a chave no `.env` e nunca abre a tela de Credenciais.
@@ -185,6 +210,11 @@ interface Mundo {
   funilPadrao?: { id: string } | null;
   /** Erro ao gravar as regras da casa. */
   erroMemoria?: ErroDb;
+  /**
+   * `organizations.onboarded_at`. Preenchido = organização já configurada,
+   * o retrato de uma aba antiga do passo da IA (#2113).
+   */
+  onboardedAt?: string | null;
 }
 
 const CANAL = {
@@ -334,6 +364,11 @@ function montarBanco(mundo: Mundo = {}): Estado {
 
     if (c.table === "organizations") {
       if (c.op === "update") {
+        // `.is("onboarded_at", null)` numa org já configurada: o PostgREST
+        // não atinge linha nenhuma e devolve `[]`.
+        if ("onboarded_at" in c.filtros && c.filtros.onboarded_at === null && mundo.onboardedAt) {
+          return { data: [], error: null };
+        }
         estado.onboardingState = (c.payload?.onboarding_state as Record<string, unknown>) ?? {};
         return { data: null, error: null };
       }
@@ -345,7 +380,7 @@ function montarBanco(mundo: Mundo = {}): Estado {
         if (mundo.erroSettings) return { data: null, error: mundo.erroSettings };
         return { data: { settings: mundo.settings ?? null }, error: null };
       }
-      return { data: { onboarding_state: estado.onboardingState, onboarded_at: null }, error: null };
+      return { data: { onboarding_state: estado.onboardingState, onboarded_at: mundo.onboardedAt ?? null }, error: null };
     }
 
     if (c.table === "org_memory_versions") {
@@ -371,7 +406,47 @@ function montarBanco(mundo: Mundo = {}): Estado {
 
 
     if (c.table === "ai_provider_credentials") {
-      return { data: mundo.credencial ?? null, error: null };
+      // Filtro a filtro, como o PostgREST faria — e não "a mesma credencial para
+      // qualquer provedor pedido", que é justamente o dublê complacente que
+      // esconderia a #1007 (o defeito é a busca presa ao provedor da instalação:
+      // com um dublê assim, o teste passa verde ANTES do conserto).
+      //
+      // `credencial` (singular) é o atalho dos casos que já existiam: UMA
+      // credencial, que vale para o provedor que for perguntado. `credenciais`
+      // (lista) é o retrato de quem colou a chave no passo "Configurar IA":
+      // cada uma com o SEU provedor e com o SEU `validated_at`.
+      const QUALQUER_PROVEDOR = "qualquer-provedor-perguntado";
+      const linhas = (
+        mundo.credenciais ??
+        (mundo.credencial
+          ? [{ id: mundo.credencial.id, provider: QUALQUER_PROVEDOR, validated_at: "2026-09-10T00:00:00.000Z" }]
+          : [])
+      ).map((l) => ({
+        id: l.id,
+        provider: l.provider ?? QUALQUER_PROVEDOR,
+        validated_at: l.validated_at ?? null,
+        is_active: l.is_active ?? true,
+        created_at: l.created_at ?? "2026-09-10T00:00:00.000Z",
+      }));
+
+      let filtradas = linhas;
+      if (c.filtros.provider !== undefined) {
+        filtradas = filtradas.filter(
+          (l) => l.provider === QUALQUER_PROVEDOR || l.provider === c.filtros.provider,
+        );
+      }
+      if (c.filtros.is_active !== undefined) {
+        filtradas = filtradas.filter((l) => l.is_active === c.filtros.is_active);
+      }
+      if ("validated_at" in c.filtros) {
+        filtradas = filtradas.filter((l) => l.validated_at === c.filtros.validated_at);
+      }
+      if ("not:validated_at" in c.filtros) {
+        filtradas = filtradas.filter((l) => l.validated_at !== c.filtros["not:validated_at"]);
+      }
+      // `.order("created_at", { ascending: false })`: a colada mais recente primeiro.
+      filtradas = [...filtradas].sort((a, b) => b.created_at.localeCompare(a.created_at));
+      return { data: filtradas, error: null };
     }
 
     if (c.table === "crm_pipelines") {
@@ -480,6 +555,21 @@ describe("onboarding: publicação impossível não pode terminar em silêncio",
     expect(estado.versoes).toHaveLength(1);
     expect(estado.versoes[0]).toMatchObject({ channel_session_id: "canal-1", status: "published" });
     expect(estado.agentes[0]?.published_version_id).toBe("versao-1");
+  });
+
+  it("aba antiga do passo numa org já configurada: o agente publicado deixa estado, auditoria e evento", async () => {
+    // A guarda do #2113 é só das boas-vindas. Aqui o agente já foi criado e
+    // publicado antes de o passo ser registrado; recusar o registro deixaria
+    // um agente no ar sem rastro e a tela dizendo "Falha".
+    const estado = montarBanco({ onboardedAt: "2026-01-01T00:00:00.000Z" });
+    vi.mocked(audit).mockClear();
+
+    const res = await clicar();
+
+    expect(res).toBe("redirecionou");
+    expect(estado.versoes).toHaveLength(1);
+    expect(estado.eventos).toHaveLength(1);
+    expect(vi.mocked(audit)).toHaveBeenCalled();
   });
 
   it("sem canal nenhum é rascunho CONHECIDO: segue o wizard e não alarma", async () => {
@@ -800,6 +890,102 @@ describe("onboarding: qual chave o funcionário usa", () => {
     // O agente EXISTE (o passo aconteceu); o que não existe é a versão.
     expect(estado.agentes).toHaveLength(1);
     expect(estado.versoes).toHaveLength(0);
+  });
+
+  it("#1007: chave colada em OUTRO provedor NÃO publica — vale o provedor DA ORGANIZAÇÃO", async () => {
+    // A decisão do dono: a IA escolhida no onboarding vale para a EMPRESA
+    // inteira. Quem cola a chave de outro provedor grava a escolha em
+    // `organizations.settings.llm` no passo da chave; publicar aqui ADOTANDO a
+    // credencial validada de openai poria o atendente num provedor em que a
+    // empresa não está (o provider da versão vence o da organização em
+    // `resolveOrgLlmConfig`).
+    //
+    // Caso INVERTIDO de propósito: era este o comportamento antigo ("adota a
+    // credencial que existir") e é esta a guarda da decisão — no dia em que
+    // alguém "consertar" isso voltando a adotar, o caso reprova e diz por quê.
+    const estado = montarBanco({
+      chaveDaInstalacao: false,
+      credenciais: [
+        { id: "cred-openai", provider: "openai", validated_at: "2026-09-15T10:00:00.000Z" },
+      ],
+      modelosPorProvedor: { anthropic: "claude-sonnet-9", openai: "gpt-5-mini" },
+    });
+
+    const r = await clicar();
+
+    expect(r).not.toBe("redirecionou");
+    const res = r as Exclude<CreateAgentResult, { ok: false }>;
+    expect(res.publish_blocked_by).toBe("chave");
+    // O provedor nomeado na resposta é o DA ORGANIZAÇÃO, nunca o da chave colada.
+    expect(res.provider).toBe("anthropic");
+    // E a credencial de openai nem como pendência aparece: não é do provedor
+    // que a empresa escolheu.
+    expect(res.chave_em_verificacao).toBeUndefined();
+    // Rascunho: o agente EXISTE (o passo aconteceu); a versão, não.
+    expect(estado.versoes).toHaveLength(0);
+    expect(estado.agentes[0]?.published_version_id ?? null).toBeNull();
+    expect(redirects).toEqual([]);
+  });
+
+  it("#1007 (controle): com chave da INSTALAÇÃO o provedor dela segue vencendo", async () => {
+    // A adoção não pode roubar o caminho que já funcionava: quem instalou pelo
+    // kit tem chave no ambiente, e uma credencial colada para OUTRO provedor não
+    // é motivo para trocar o provedor do atendente.
+    const estado = montarBanco({
+      chaveDaInstalacao: true,
+      credenciais: [
+        { id: "cred-openai", provider: "openai", validated_at: "2026-09-15T10:00:00.000Z" },
+      ],
+      modelosPorProvedor: { anthropic: "claude-sonnet-9", openai: "gpt-5-mini" },
+    });
+
+    await clicar();
+
+    expect(estado.versoes).toHaveLength(1);
+    expect(estado.versoes[0]!.provider).toBe("anthropic");
+    expect(estado.versoes[0]!.model).toBe("claude-sonnet-9");
+    expect(estado.versoes[0]!.credential_id).toBeNull();
+  });
+
+  it("#1007: chave colada e ainda NÃO confirmada — o aviso nomeia o provedor DA ORGANIZAÇÃO", async () => {
+    // `chave_em_verificacao` existe para a tela trocar "cole a chave" por
+    // "espere um instante". Depois da decisão, quem pode estar pendente é só a
+    // chave do provedor da EMPRESA — é nele que a publicação procura.
+    //
+    // Caso INVERTIDO: aqui a pendência é de OUTRO provedor (openai numa empresa
+    // anthropic) e nomeá-la era o defeito antigo. Se a busca voltar a ser "de
+    // qualquer provedor", o campo reaparece como "openai" e este caso reprova.
+    const outroProvedor = montarBanco({
+      chaveDaInstalacao: false,
+      credenciais: [{ id: "cred-openai", provider: "openai", validated_at: null }],
+      modelosPorProvedor: { anthropic: "claude-sonnet-9" },
+    });
+
+    const r1 = await clicar();
+
+    expect(r1).not.toBe("redirecionou");
+    const res1 = r1 as Exclude<CreateAgentResult, { ok: false }>;
+    expect(res1.publish_blocked_by).toBe("chave");
+    expect(res1.provider).toBe("anthropic");
+    expect(res1.chave_em_verificacao).toBeUndefined();
+    expect(outroProvedor.versoes).toHaveLength(0);
+
+    // A outra metade: a pendência NO provedor da empresa (o que acontece de
+    // verdade no passo da chave, que grava `settings.llm` e cria a credencial
+    // sem `validated_at`) continua nomeada — senão a tela perde o aviso certo.
+    const provedorDaEmpresa = montarBanco({
+      chaveDaInstalacao: false,
+      credenciais: [{ id: "cred-anthropic", provider: "anthropic", validated_at: null }],
+      modelosPorProvedor: { anthropic: "claude-sonnet-9" },
+    });
+
+    const r2 = await clicar();
+
+    expect(r2).not.toBe("redirecionou");
+    const res2 = r2 as Exclude<CreateAgentResult, { ok: false }>;
+    expect(res2.publish_blocked_by).toBe("chave");
+    expect(res2.chave_em_verificacao).toBe("anthropic");
+    expect(provedorDaEmpresa.versoes).toHaveLength(0);
   });
 
   it("o funcionário nasce no formato ATUAL do produto, não no legado", async () => {

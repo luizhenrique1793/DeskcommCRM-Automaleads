@@ -88,7 +88,7 @@ describe("capacidade num roteador é do MODELO, não do provedor", () => {
 describe("o aviso de boot lê a mesma régua que a execução", () => {
   it("OPENROUTER_API_KEY conta como chave de IA configurada", () => {
     const fonte = readFileSync("lib/env.ts", "utf8");
-    const condicao = /if \(!env\.AI_GATEWAY_API_KEY && !env\.ANTHROPIC_API_KEY([^)]*)\)/.exec(fonte);
+    const condicao = /if \(\s*!env\.AI_GATEWAY_API_KEY\s*&&\s*!env\.ANTHROPIC_API_KEY([^)]*)\)/.exec(fonte);
     expect(condicao, "não achei o aviso de chave de IA no lib/env.ts — instrumento cego").not.toBeNull();
     expect(
       condicao?.[1],
@@ -128,5 +128,16 @@ describe("o instalador grava o provedor escolhido no banco", () => {
     const fonte = readFileSync("scripts/bootstrap-owner.ts", "utf8");
     expect(fonte).toContain("aplicarProvedorEscolhido");
     expect(fonte).toMatch(/process\.env\.AI_PROVIDER/);
+  });
+
+  it("e os dois gravam o MODELO do provedor escolhido, não só o provedor", () => {
+    // Trocar só o provider deixava `{openai, claude-sonnet-5}`: o gatilho semeia
+    // o par da Anthropic, e o id dela ia à OpenAI. A escolha em si é provada em
+    // `lib/ai/agents/escolher-modelo.test.ts`; aqui, que os dois a usam.
+    const bootstrap = readFileSync("scripts/bootstrap-owner.ts", "utf8");
+    expect(bootstrap).toMatch(/escolherModeloNoCatalogo\(admin, escolhido\)/);
+    expect(bootstrap).toMatch(/default_model: modelo/);
+    const instalador = readFileSync("hostgator-setup-kit/install.sh", "utf8");
+    expect(instalador).toMatch(/'\{llm,default_model\}'/);
   });
 });

@@ -20,7 +20,22 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Plus, Trash, CaretUp, CaretDown } from "@/lib/ui/icons";
-import { createAutomationRuleSchema, TRIGGER_EVENTS } from "@/lib/schemas/webhooks";
+import { acoesQueFechamLaco, createAutomationRuleSchema, TRIGGER_EVENTS } from "@/lib/schemas/webhooks";
+import {
+  DIAS_MAX,
+  DIAS_MIN,
+  GATILHO_DE_DATA_DO_FUNIL,
+  configDoGatilhoDeData,
+} from "@/lib/automation/gatilho-de-data-do-funil";
+import {
+  DIRECOES_DO_SILENCIO,
+  GATILHO_ETAPA_PARADA,
+  GATILHO_SILENCIO,
+  configDaEtapaParada,
+  configDoSilencio,
+  type DirecaoDoSilencio,
+} from "@/lib/automation/gatilhos-de-tempo";
+import { camposDoFunil } from "@/lib/leads/campos-do-funil";
 import {
   useCreateAutomationRule,
   useUpdateAutomationRule,
@@ -65,6 +80,17 @@ const LEAD_FIELDS: CuratedField[] = [
   // utm_* entram pelo webhook em source_metadata (decisão da rota inbound),
   // não em custom_fields — o path aqui tem que apontar pra onde o dado mora.
   { value: "lead.source_metadata.utm_source", label: "Origem (utm_source)", op: "eq" },
+  // Os quatro níveis que a ficha do contato mostra, com as MESMAS palavras —
+  // dois vocabulários para o mesmo dado fariam o operador montar a regra sobre
+  // um campo e ler o resultado em outro.
+  { value: "lead.source_metadata.utm_campaign", label: "Campanha (utm_campaign)", op: "eq" },
+  { value: "lead.source_metadata.utm_adset", label: "Conjunto (utm_adset)", op: "eq" },
+  { value: "lead.source_metadata.utm_ad", label: "Anúncio (utm_ad)", op: "eq" },
+  {
+    value: "lead.source_metadata.utm_placement",
+    label: "Posicionamento (utm_placement)",
+    op: "eq",
+  },
 ];
 const STAGE_FIELD: CuratedField = {
   value: "event.to_stage_id",
@@ -104,23 +130,83 @@ const AGENDAMENTO_FIELDS: CuratedField[] = [
 const CURATED_FIELDS: Record<TriggerEvent, CuratedField[]> = {
   "lead.created": LEAD_FIELDS,
   "lead.stage_changed": [...LEAD_FIELDS, STAGE_FIELD],
+  // #1528 — os quatro do encerramento/reabertura/atribuição: as condições são
+  // as do NEGÓCIO (é dele o desfecho). O motivo da perda não é condição — quem
+  // filtra por motivo de perda filtra o campo livre na própria etapa/linha; o
+  // que dá para filtrar aqui é o que o lead é (funil, tags, origem).
+  "lead.won": LEAD_FIELDS,
+  "lead.lost": LEAD_FIELDS,
+  "lead.reopened": LEAD_FIELDS,
+  "lead.assigned": LEAD_FIELDS,
   "message.received": MESSAGE_FIELDS,
+  // O que a regra quer filtrar numa falha é o MOTIVO (só o 131047, só o
+  // timeout) e de QUEM é o contato — `event.erro.codigo` é o mesmo valor que a
+  // coluna `messages.error_code` grava, então quem compara com o webhook da
+  // Meta compara com o mesmo texto aqui.
+  "message.failed": [
+    { value: "event.erro.codigo", label: "Código do erro", op: "eq" },
+    { value: "contact.tags", label: "Tags do contato", op: "contains", lista: true },
+  ],
   "lead.tag_added": [...LEAD_FIELDS, TAG_ADDED_FIELD],
   "contact.tag_added": [TAG_ADDED_FIELD],
   "appointment.created": AGENDAMENTO_FIELDS,
   "appointment.confirmed": AGENDAMENTO_FIELDS,
   "appointment.rescheduled": AGENDAMENTO_FIELDS,
   "appointment.cancelled": AGENDAMENTO_FIELDS,
+  // Mesmos campos dos irmãos (#1612): quem filtra o desfecho quer filtrar por
+  // QUEM é o contato e de QUEM é o atendimento — "só a Limpeza, e só quem tem
+  // a tag cliente". A situação em si NÃO vira condição: ela é o gatilho. Um
+  // gatilho "compareceu" com a condição "situação = compareceu" é uma regra
+  // que só pode ser verdadeira, e que parece filtro sem filtrar nada.
+  "appointment.completed": AGENDAMENTO_FIELDS,
+  "appointment.no_show": AGENDAMENTO_FIELDS,
   // O aniversário não tem campo próprio para filtrar: o que a organização quer
   // decidir é sobre QUEM faz aniversário, e não sobre a data. Por isso os campos
   // são os do contato — "só quem tem a tag cliente", tipicamente.
   "contact.birthday": CONTACT_FIELDS,
+  // A data do funil dispara sobre o NEGÓCIO, então as condições são as do lead:
+  // "só os que estão com a etiqueta vip", "só o que veio do Instagram". O
+  // campo de data em si NÃO entra como condição — quem o escolhe é a
+  // configuração do gatilho, logo acima.
+  "lead.date_field_due": LEAD_FIELDS,
+  // #1540 — gatilhos por TEMPO: o N e a direção são da CONFIGURAÇÃO do gatilho,
+  // não da condição. Como condição sobra o que a regra sempre quis filtrar —
+  // funil (via etapa/tags) e tags do contato.
+  "lead.silent_for": LEAD_FIELDS,
+  "lead.stage_stale": [...LEAD_FIELDS, STAGE_FIELD],
 };
 
 const OP_LABELS: Record<Op, string> = { eq: "é", neq: "não é", contains: "contém" };
 
 function emptyCondition(): ConditionRow {
   return { field: "", op: "eq", value: "" };
+}
+
+/**
+ * O que a regra de data precisa guardar além do gatilho (#989). Os campos do
+ * funil são a CHAVE (`pipelines.settings.fields[].key`), não o rótulo: é a
+ * chave que endereça o valor em `crm_leads.custom_fields`, e é por ela que a
+ * varredura procura.
+ */
+interface ConfigDaData {
+  pipeline_id: string;
+  campo: string;
+  dias: string;
+}
+
+const DIAS_PADRAO = "7";
+
+/**
+ * O que os gatilhos por TEMPO (#1540) guardam além do nome deles: N dias, de
+ * QUEM é o silêncio (só no `lead.silent_for`) e se a agenda protege.
+ *
+ * Mesmo desenho da `ConfigDaData` — o leitor é o MESMO que a varredura usa, e
+ * se ele não reconhecer o que está guardado a tela não inventa nada.
+ */
+interface ConfigDoTempo {
+  dias: string;
+  direcao: DirecaoDoSilencio;
+  proteger_pela_agenda: boolean;
 }
 
 export function RuleEditor({ open, onOpenChange, rule }: Props) {
@@ -131,6 +217,16 @@ export function RuleEditor({ open, onOpenChange, rule }: Props) {
   const [conditions, setConditions] = React.useState<ConditionRow[]>([]);
   const [advancedRows, setAdvancedRows] = React.useState<Record<number, boolean>>({});
   const [actions, setActions] = React.useState<ActionItem[]>([]);
+  const [configDaData, setConfigDaData] = React.useState<ConfigDaData>({
+    pipeline_id: "",
+    campo: "",
+    dias: DIAS_PADRAO,
+  });
+  const [configDoTempo, setConfigDoTempo] = React.useState<ConfigDoTempo>({
+    dias: DIAS_PADRAO,
+    direcao: "da_equipe",
+    proteger_pela_agenda: false,
+  });
 
   const create = useCreateAutomationRule();
   const update = useUpdateAutomationRule();
@@ -151,9 +247,36 @@ export function RuleEditor({ open, onOpenChange, rule }: Props) {
     );
     setAdvancedRows({});
     setActions((rule?.actions as ActionItem[] | undefined) ?? []);
+    // A configuração salva volta pelo MESMO leitor que a varredura usa: se ela
+    // não reconhece o que está guardado, a tela não inventa nada e o operador
+    // reescolhe — em vez de a tela mostrar um funil que o cron ignora.
+    const guardada = configDoGatilhoDeData(rule?.trigger_config);
+    setConfigDaData(
+      guardada
+        ? {
+            pipeline_id: guardada.pipeline_id,
+            campo: guardada.campo,
+            dias: String(guardada.dias),
+          }
+        : { pipeline_id: "", campo: "", dias: DIAS_PADRAO },
+    );
+    const silencioGuardado = configDoSilencio(rule?.trigger_config);
+    const etapaGuardada = configDaEtapaParada(rule?.trigger_config);
+    const tempoGuardado = silencioGuardado ?? etapaGuardada;
+    setConfigDoTempo({
+      dias: tempoGuardado ? String(tempoGuardado.dias) : DIAS_PADRAO,
+      direcao: silencioGuardado ? silencioGuardado.direcao : "da_equipe",
+      proteger_pela_agenda: tempoGuardado ? tempoGuardado.proteger_pela_agenda : false,
+    });
   }, [open, rule]);
 
   const curatedFields = triggerEvent ? CURATED_FIELDS[triggerEvent] : [];
+  const ehGatilhoDeData = triggerEvent === GATILHO_DE_DATA_DO_FUNIL;
+  const ehGatilhoDeTempo =
+    triggerEvent === GATILHO_SILENCIO || triggerEvent === GATILHO_ETAPA_PARADA;
+  const camposDeData = camposDoFunil(
+    (pipelinesRes?.data ?? []).find((p) => p.id === configDaData.pipeline_id)?.settings ?? null,
+  ).filter((campo) => campo.type === "date");
 
   const updateCondition = (idx: number, patch: Partial<ConditionRow>) => {
     setConditions((prev) => prev.map((c, i) => (i === idx ? { ...c, ...patch } : c)));
@@ -197,6 +320,24 @@ export function RuleEditor({ open, onOpenChange, rule }: Props) {
         .filter((c) => c.field.trim() && c.value.trim())
         .map((c) => ({ field: c.field.trim(), op: c.op, value: c.value.trim() })),
       actions,
+      // `Number("")` é 0 — o que gravaria "avisar no dia" para quem não
+      // digitou nada. O campo vazio vira `NaN`, que o schema recusa com a
+      // mensagem certa em vez de aceitar um zero silencioso.
+      trigger_config: ehGatilhoDeData
+        ? {
+            pipeline_id: configDaData.pipeline_id,
+            campo: configDaData.campo,
+            dias: configDaData.dias.trim() === "" ? Number.NaN : Number(configDaData.dias),
+          }
+        : ehGatilhoDeTempo
+          ? {
+              // O mesmo cuidado do gatilho de data: campo vazio vira NaN e o
+              // schema recusa com a mensagem certa, em vez de gravar N=0.
+              dias: configDoTempo.dias.trim() === "" ? Number.NaN : Number(configDoTempo.dias),
+              ...(triggerEvent === GATILHO_SILENCIO ? { direcao: configDoTempo.direcao } : {}),
+              proteger_pela_agenda: configDoTempo.proteger_pela_agenda,
+            }
+          : undefined,
     };
     const parsed = createAutomationRuleSchema.safeParse(payload);
     if (!parsed.success) {
@@ -262,6 +403,167 @@ export function RuleEditor({ open, onOpenChange, rule }: Props) {
                 ))}
               </SelectContent>
             </Select>
+
+            {/* O gatilho de DATA só sabe onde olhar se a regra disser o funil e o
+                campo: o campo de data pertence a UM funil. Sem esta escolha a
+                regra é salva e nunca dispara — por isso o schema da API também
+                a recusa. */}
+            {ehGatilhoDeData ? (
+              <div className="space-y-3 rounded-sm border border-border p-3">
+                <p className="text-sm text-muted-foreground">
+                  {t(
+                    "O aviso sai no dia em que faltarem N dias para a data, uma vez por negócio. Para avisar DEPOIS da data, use N negativo — -60 confirma a entrega 60 dias após o casamento.",
+                  )}
+                </p>
+                <div className="flex flex-wrap items-end gap-3">
+                  <div className="flex-1 basis-52 space-y-1">
+                    <Label>{t("Funil do campo")}</Label>
+                    <Select
+                      value={configDaData.pipeline_id}
+                      onValueChange={(v) =>
+                        // Trocar de funil zera o campo: a chave de um funil não
+                        // existe no outro, e manter a antiga seria gravar uma
+                        // regra que não acha o valor.
+                        setConfigDaData((prev) => ({ ...prev, pipeline_id: v, campo: "" }))
+                      }
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder={t("Escolha o funil")} />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {(pipelinesRes?.data ?? []).map((pipeline) => (
+                          <SelectItem key={pipeline.id} value={pipeline.id}>
+                            {pipeline.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="flex-1 basis-52 space-y-1">
+                    <Label>{t("Campo de data")}</Label>
+                    <Select
+                      value={configDaData.campo}
+                      onValueChange={(v) => setConfigDaData((prev) => ({ ...prev, campo: v }))}
+                      disabled={camposDeData.length === 0}
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder={t("Escolha o campo")} />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {camposDeData.map((campo) => (
+                          <SelectItem key={campo.key} value={campo.key}>
+                            {campo.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="w-40 space-y-1">
+                    <Label htmlFor="dias-da-data">{t("Faltam N dias")}</Label>
+                    <Input
+                      id="dias-da-data"
+                      type="number"
+                      inputMode="numeric"
+                      value={configDaData.dias}
+                      min={DIAS_MIN}
+                      max={DIAS_MAX}
+                      onChange={(e) =>
+                        setConfigDaData((prev) => ({ ...prev, dias: e.target.value }))
+                      }
+                    />
+                  </div>
+                </div>
+                {configDaData.pipeline_id && camposDeData.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">
+                    {t(
+                      "Este funil ainda não tem campo de data. Cadastre um em Funis → Campos personalizados para poder escolhê-lo aqui.",
+                    )}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
+
+            {/* #1540 — os gatilhos por TEMPO: N dias, de quem é o silêncio, e a
+                proteção de agenda. Sem esta escolha a regra é salva e a
+                varredura não sabe onde olhar — por isso o schema da API também
+                a recusa. */}
+            {ehGatilhoDeTempo ? (
+              <div className="space-y-3 rounded-sm border border-border p-3">
+                <p className="text-sm text-muted-foreground">
+                  {triggerEvent === GATILHO_SILENCIO
+                    ? t(
+                        "O lembrete sai quando se passarem N dias sem mensagem na direção escolhida. Chegando mensagem nova, o relógio zera — e um novo silêncio de N dias gera outro lembrete. Nada é enviado ao cliente.",
+                      )
+                    : t(
+                        "O lembrete sai quando se passarem N dias com o card na mesma etapa. Mudando a etapa, o relógio zera. Nada é enviado ao cliente.",
+                      )}
+                </p>
+                <div className="flex flex-wrap items-end gap-3">
+                  <div className="w-40 space-y-1">
+                    <Label htmlFor="dias-do-tempo">{t("Depois de N dias")}</Label>
+                    <Input
+                      id="dias-do-tempo"
+                      type="number"
+                      inputMode="numeric"
+                      value={configDoTempo.dias}
+                      min={1}
+                      max={3650}
+                      onChange={(e) =>
+                        setConfigDoTempo((prev) => ({ ...prev, dias: e.target.value }))
+                      }
+                    />
+                  </div>
+
+                  {triggerEvent === GATILHO_SILENCIO ? (
+                    <div className="flex-1 basis-52 space-y-1">
+                      <Label>{t("Silêncio de")}</Label>
+                      <Select
+                        value={configDoTempo.direcao}
+                        onValueChange={(v) =>
+                          setConfigDoTempo((prev) => ({
+                            ...prev,
+                            direcao: v as DirecaoDoSilencio,
+                          }))
+                        }
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder={t("De quem é o silêncio")} />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {DIRECOES_DO_SILENCIO.map((direcao) => (
+                            <SelectItem key={direcao} value={direcao}>
+                              {t(
+                                direcao === "da_equipe"
+                                  ? "Da equipe (nós não falamos)"
+                                  : direcao === "do_cliente"
+                                    ? "Do cliente (ele não respondeu)"
+                                    : "De qualquer um",
+                              )}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  ) : null}
+                </div>
+
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={configDoTempo.proteger_pela_agenda}
+                    onChange={(e) =>
+                      setConfigDoTempo((prev) => ({
+                        ...prev,
+                        proteger_pela_agenda: e.target.checked,
+                      }))
+                    }
+                  />
+                  {t("Não gerar lembrete quando o cliente tiver compromisso marcado")}
+                </label>
+              </div>
+            ) : null}
           </section>
 
           <section className="space-y-3">
@@ -434,11 +736,15 @@ export function RuleEditor({ open, onOpenChange, rule }: Props) {
                 <SelectValue placeholder={t("Adicionar ação")} />
               </SelectTrigger>
               <SelectContent>
-                {(Object.keys(ACTION_LABELS) as ActionType[]).map((actionType) => (
-                  <SelectItem key={actionType} value={actionType}>
-                    {t(ACTION_LABELS[actionType])}
-                  </SelectItem>
-                ))}
+                {/* Os gatilhos de ganho/perda/reabertura/responsável não oferecem
+                    as ações que regravam o lead: fechariam laço (#1528). */}
+                {(Object.keys(ACTION_LABELS) as ActionType[])
+                  .filter((actionType) => !acoesQueFechamLaco(triggerEvent, [{ type: actionType }]).length)
+                  .map((actionType) => (
+                    <SelectItem key={actionType} value={actionType}>
+                      {t(ACTION_LABELS[actionType])}
+                    </SelectItem>
+                  ))}
               </SelectContent>
             </Select>
           </section>

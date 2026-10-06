@@ -24,6 +24,20 @@
  * Os dois sentidos, porque só um deles pegaria metade dos casos:
  *   - linha do MANIFEST sem arquivo ⇒ registro fantasma (o defeito acima);
  *   - arquivo sem linha no MANIFEST ⇒ mudança de schema que ninguém registrou.
+ *
+ * ## A segunda fonte: o cabeçalho da própria migration (02/10/2026)
+ *
+ * Migration nova NÃO acrescenta mais linha no MANIFEST: a descrição vive numa
+ * linha `-- manifest: <o quê e por quê>` dentro do próprio `.sql`. O motivo é
+ * medido: todo PR com migration acrescentava UMA linha no FIM da mesma tabela,
+ * o `merge=union` do `.gitattributes` só vale para o git local, e o GitHub
+ * ignora driver de merge — cada migration que entrava na main deixava todos os
+ * outros PRs com migration CONFLICTING (#2009, #2049, #2078, #2080, #2091,
+ * #2137 no mesmo dia). Um arquivo por migration não tem com quem conflitar.
+ *
+ * "Registrada" passa a ser: linha no MANIFEST (histórico, e PR antigo ainda em
+ * voo) OU cabeçalho com descrição não vazia. Nos dois ao mesmo tempo, não:
+ * duas fontes para o mesmo fato divergem.
  */
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -96,12 +110,39 @@ function nomesDoManifest(): string[] {
     .map((m) => m[1]!);
 }
 
+/**
+ * A descrição que a migration carrega no próprio arquivo. Só conta com texto
+ * depois dos dois-pontos: `-- manifest:` vazio é migration sem descrição.
+ */
+const CABECALHO = /^-- manifest:[ \t]*(\S.*)$/m;
+
+/** `0522_slug` → descrição, para as migrations que se descrevem no cabeçalho. */
+function descricoesDoCabecalho(): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const f of readdirSync(DIR).filter((f) => f.endsWith(".sql"))) {
+    const m = CABECALHO.exec(readFileSync(join(DIR, f), "utf8"));
+    if (m) out.set(f.slice(0, -4).replace(/^\d{14}_/, ""), m[1]!.trim());
+  }
+  return out;
+}
+
 /** `20260805120000_0104_slug.sql` → `0104_slug`. */
 function nomesDeMigration(): string[] {
   return readdirSync(DIR)
     .filter((f) => f.endsWith(".sql"))
     .map((f) => f.slice(0, -4))
     .map((f) => (/^\d{14}_/.test(f) ? f.slice(15) : f));
+}
+
+
+/** Só linhas do MANIFEST com timestamp de 14 dígitos — as históricas `*(wave N)*` ficam de fora. */
+function timestampsDoManifest(): { timestamp: string; nome: string }[] {
+  const LINHA_TS = /^\| `(\d{14})` \| `(\d{4,5}_[a-z0-9_]+)`/;
+  return readFileSync(MANIFEST, "utf8")
+    .split("\n")
+    .map((l) => LINHA_TS.exec(l))
+    .filter((m): m is RegExpExecArray => m !== null)
+    .map((m) => ({ timestamp: m[1]!, nome: m[2]! }));
 }
 
 describe("MANIFEST × arquivos de migration", () => {
@@ -123,14 +164,54 @@ describe("MANIFEST × arquivos de migration", () => {
     ).toEqual([]);
   });
 
-  it("toda migration tem linha no MANIFEST", () => {
-    const registrados = new Set(nomesDoManifest());
+  it("toda migration tem descrição — no cabeçalho `-- manifest:` ou (histórico) no MANIFEST", () => {
+    const registrados = new Set([...nomesDoManifest(), ...descricoesDoCabecalho().keys()]);
     const semRegistro = nomesDeMigration()
       .filter((f) => !registrados.has(f))
       .filter((f) => !DIVERGENCIAS_CONHECIDAS.semLinha.includes(f as never));
     expect(
       semRegistro,
-      "mudança de schema sem linha no MANIFEST — a tripla da doutrina ficou incompleta",
+      "migration sem descrição — ponha uma linha `-- manifest: <o quê e por quê>` no cabeçalho do .sql (NÃO acrescente linha no MANIFEST.md: é o arquivo que conflitava em todo PR)",
+    ).toEqual([]);
+  });
+
+  it("nenhuma migration se descreve nos dois lugares (uma fonte só)", () => {
+    const noManifest = new Set(nomesDoManifest());
+    const nosDois = [...descricoesDoCabecalho().keys()].filter((n) => noManifest.has(n));
+    expect(
+      nosDois,
+      "descrita no cabeçalho E no MANIFEST — apague a linha do MANIFEST.md e fique com o `-- manifest:` do .sql",
+    ).toEqual([]);
+  });
+
+  /**
+   * REGRA SEPARADA das duas abaixo, e não um detalhe delas: aquelas comparam
+   * ARQUIVOS (`nomesDeMigration()`, `arquivosComTimestamp()`); esta compara
+   * LINHAS do MANIFEST. A diferença não é acadêmica — ela foi medida.
+   *
+   * `supabase/migrations/MANIFEST.md` é declarado `merge=union` no
+   * `.gitattributes`: o git CONCATENA os dois lados sem deduplicar. Numa branch
+   * que recebe a `main` mais de uma vez, ou que renumerou uma migration, isso
+   * **reintroduz a linha antiga** — e as quatro asserções existentes passam:
+   * a linha duplicada aponta para um arquivo que existe, a migration tem linha
+   * (duas), e as duas checagens de duplicidade olham arquivos, não linhas.
+   *
+   * Medido em 2026-09-19: a `main` carregava `0310_csv_como_material_de_conhecimento`
+   * em DUAS linhas idênticas (325 e 326) com UM arquivo só, e este arquivo de
+   * teste passava 6/6 sobre ela — verde sobre o caso exato que deveria reprovar.
+   * A linha duplicada saiu no mesmo PR que este caso entrou, então não há dívida
+   * congelada aqui: se esta asserção ficar vermelha, é porque o union acabou de
+   * reintroduzir alguma coisa.
+   */
+  it("nenhuma linha do MANIFEST se repete (o merge=union concatena sem deduplicar)", () => {
+    const porNome = new Map<string, number>();
+    for (const nome of nomesDoManifest()) porNome.set(nome, (porNome.get(nome) ?? 0) + 1);
+    const repetidos = [...porNome.entries()]
+      .filter(([, n]) => n > 1)
+      .map(([nome, n]) => `${nome}: ${n} linhas`);
+    expect(
+      repetidos,
+      "linha repetida no MANIFEST — o arquivo é merge=union e concatena sem deduplicar; traga a main de novo e apague a linha reintroduzida",
     ).toEqual([]);
   });
 
@@ -171,6 +252,33 @@ describe("MANIFEST × arquivos de migration", () => {
     expect(
       duplicados,
       "duas migrations com o mesmo timestamp — a ordem de aplicação vira desempate do runner",
+    ).toEqual([]);
+  });
+
+
+  // Timestamp na coluna 1 é a PK de schema_migrations no CLI. Casar só por
+  // NNNN_slug (acima) deixa a coluna mentir em silêncio — issue #1264: MANIFEST
+  // dizia 20260911160000 e o arquivo era 20260911170000_0238_…. Linhas
+  // históricas sem timestamp (`*(wave N)*`) ficam de fora de propósito.
+  it("quando a linha do MANIFEST tem timestamp, ele bate com o do arquivo", () => {
+    const porNome = new Map(
+      arquivosComTimestamp().map(({ timestamp, arquivo }) => {
+        const nome = arquivo.replace(/\.sql$/, "").replace(/^\d{14}_/, "");
+        return [nome, timestamp] as const;
+      }),
+    );
+    const divergentes = timestampsDoManifest()
+      .filter(({ nome, timestamp }) => {
+        const noArquivo = porNome.get(nome);
+        return noArquivo !== undefined && noArquivo !== timestamp;
+      })
+      .map(
+        ({ nome, timestamp }) =>
+          `${nome}: MANIFEST=${timestamp} arquivo=${porNome.get(nome)}`,
+      );
+    expect(
+      divergentes,
+      "timestamp do MANIFEST diverge do nome do arquivo — a coluna que o CLI usa como PK mentiu",
     ).toEqual([]);
   });
 

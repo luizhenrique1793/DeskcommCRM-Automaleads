@@ -2,6 +2,7 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { apiClient } from "@/lib/api/client";
+import type { RodadaDoBanco } from "@/lib/system/update-run";
 
 export interface SystemVersion {
   current_version: string;
@@ -44,6 +45,13 @@ export interface SystemVersion {
      * uma versão que o run não descreve). A tela deixa de mostrar o aviso dela.
      */
     superseded?: boolean;
+    /**
+     * O que a rodada contou sobre o banco — se a base estava ocupada (disputa),
+     * quantas retentativas custou e em qual passada fechou. Vem da linha do run;
+     * ausente quando ninguém mediu (rodada que não passou pelo banco), e a tela
+     * fica calada nesse caso em vez de afirmar zero.
+     */
+    rodada_do_banco?: RodadaDoBanco | null;
   } | null;
 }
 

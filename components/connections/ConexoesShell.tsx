@@ -4,13 +4,17 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 import { CanalGatewayClient } from "./CanalGatewayClient";
+import { RedesSociaisClient } from "./RedesSociaisClient";
+import { CanalGraphParceiroClient } from "./CanalGraphParceiroClient";
 import { CanalOficialClient } from "./CanalOficialClient";
 import { CanalParceiroClient } from "./CanalParceiroClient";
 import { CanalVozClient } from "./CanalVozClient";
 import { ConnectionsClient } from "./ConnectionsClient";
 import { TemplatesClient } from "./TemplatesClient";
 import { TemplatesParceiroClient } from "./TemplatesParceiroClient";
+import { TelefoniaClient } from "./TelefoniaClient";
 import { useT } from "@/hooks/i18n/useT";
+import { rotaDeTemplates } from "@/lib/channels/templates-fonte";
 
 /**
  * Conexões — TODOS os canais em um lugar só.
@@ -38,24 +42,40 @@ import { useT } from "@/hooks/i18n/useT";
 export function ConexoesShell({
   wahaConfigured,
   wacallsConfigured,
+  graphParceiro = null,
 }: {
   wahaConfigured: boolean;
   wacallsConfigured: boolean;
+  /**
+   * O canal parceiro que espelha a Cloud API (recorte do #1130) é OPCIONAL DA
+   * INSTALAÇÃO e nasce desligado (decisão do dono, doc 54). `null` = a
+   * instalação não o liga, e a aba nem é montada — nem por `?aba=` na URL.
+   * O rótulo vem do servidor porque a tela não pode nomear provider.
+   */
+  graphParceiro?: { label: string } | null;
 }) {
   const t = useT();
   const router = useRouter();
   const params = useSearchParams();
   const abaParam = params.get("aba");
   const aba =
-    abaParam === "oficial"
+    abaParam === "sociais"
+      ? "sociais"
+      : abaParam === "oficial"
       ? "oficial"
       : abaParam === "parceiro"
         ? "parceiro"
         : abaParam === "gateway"
           ? "gateway"
-          : abaParam === "voz"
-            ? "voz"
-            : "numeros";
+          : abaParam === "telefonia"
+            ? "telefonia"
+            : abaParam === "sociais"
+              ? "sociais"
+              : abaParam === "voz"
+                ? "voz"
+                : abaParam === "graph" && graphParceiro
+                  ? "graph"
+                  : "numeros";
   const sub = params.get("sub") === "templates" ? "templates" : "conexao";
 
   const irPara = (proximaAba: string, proximaSub?: string): void => {
@@ -70,7 +90,7 @@ export function ConexoesShell({
 
   return (
     <Tabs value={aba} onValueChange={(v) => irPara(v, sub)} className="flex flex-col gap-4">
-      <TabsList>
+      <TabsList className="h-auto max-w-full flex-wrap justify-start">
         {/* Rótulos pelo que o usuário RECONHECE, não pelo nome técnico do motor por
             trás: ele sabe se leu um QR ou se tem conta na Meta; a sigla do provedor
             não diz nada a quem instalou o sistema para vender.
@@ -93,7 +113,10 @@ export function ConexoesShell({
             que a própria pessoa (ou o self-host) hospeda, endereço + token —
             distinto tanto do QR embutido quanto de uma conta parceira BSP. */}
         <TabsTrigger value="gateway">{t("Gateway próprio")}</TabsTrigger>
+        <TabsTrigger value="telefonia">{t("Telefone")}</TabsTrigger>
+        <TabsTrigger value="sociais">{t("Redes sociais")}</TabsTrigger>
         <TabsTrigger value="voz">{t("Chamada de voz")}</TabsTrigger>
+        {graphParceiro && <TabsTrigger value="graph">{graphParceiro.label}</TabsTrigger>}
       </TabsList>
 
       <TabsContent value="numeros" className="mt-0">
@@ -103,10 +126,38 @@ export function ConexoesShell({
       <TabsContent value="gateway" className="mt-0">
         <CanalGatewayClient />
       </TabsContent>
+      <TabsContent value="telefonia" className="mt-0">
+        <TelefoniaClient />
+      </TabsContent>
+      <TabsContent value="sociais" className="mt-0"><RedesSociaisClient /></TabsContent>
 
       <TabsContent value="voz" className="mt-0">
         <CanalVozClient wacallsConfigured={wacallsConfigured} />
       </TabsContent>
+
+      {graphParceiro && (
+        <TabsContent value="graph" className="mt-0">
+          {/* Sub-abas como nas demais: conectar e gerenciar modelos são tarefas
+              diferentes. O componente de modelos é o MESMO do outro parceiro,
+              apontado para a rota desta fonte. */}
+          <Tabs value={sub} onValueChange={(v) => irPara("graph", v)} className="flex flex-col gap-4">
+            <TabsList>
+              <TabsTrigger value="conexao">{t("Conexão")}</TabsTrigger>
+              <TabsTrigger value="templates">{t("Modelos")}</TabsTrigger>
+            </TabsList>
+            <TabsContent value="conexao" className="mt-0">
+              <CanalGraphParceiroClient />
+            </TabsContent>
+            <TabsContent value="templates" className="mt-0">
+              {/* Editar e apagar valem aqui como no outro parceiro: desde a
+                  #1734 o alvo resolve o id da variante (nome + idioma) antes de
+                  falar com a plataforma, então a tela apaga UMA tradução, não
+                  todas (#1728 era este o motivo de ficar desligado). */}
+              <TemplatesParceiroClient rota={rotaDeTemplates("graph")} />
+            </TabsContent>
+          </Tabs>
+        </TabsContent>
+      )}
 
       <TabsContent value="parceiro" className="mt-0">
         {/* Sub-abas como no canal oficial, e pelo mesmo motivo: conectar e

@@ -1,3 +1,5 @@
+import type { SocialMessage } from "../social/parser";
+import { ehCanalDeConversa } from "@/lib/channels/canais-de-conversa";
 /**
  * Ingestão do canal intermediado: webhook → contato, conversa, mensagem.
  *
@@ -23,16 +25,23 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { logger } from "@/lib/logger";
+import { corpoDaLocalizacao } from "@/lib/messaging/localizacao";
 import { encontrarContatoPorTelefone } from "@/lib/channels/contato-por-telefone";
 import { canonicalPhoneBR } from "@/lib/channels/phone-variants";
 import { marcarConversaComMensagem } from "@/lib/channels/marcar-conversa";
 
 import { extrairAtribuicaoMeta } from "@/lib/channels/atribuicao-de-anuncio-oficial";
 import { estamparAtribuicaoDoContato } from "@/lib/leads/atribuicao-de-anuncio";
+import { extrairEEstamparAtribuicaoGoogle } from "@/lib/plataformas-de-anuncio/google/atribuicao";
 import { pausarIaPorAtendimentoManual } from "@/lib/escalacao/atendimento-manual";
+import {
+  ehNumeroInternoDeAviso,
+  registrarMensagemIgnorada,
+} from "@/lib/escalacao/numero-interno-de-aviso";
 
 import { aplicarEfeitosPosEntrada } from "../pos-entrada";
 
+import { completarLocalizacao, pedirNovaBuscaDoPino, pinoFicouSemCoordenadas } from "./localizacao";
 import { parseZernioInbound, type ZernioIdentity, type ZernioInboundMessage } from "./webhook";
 
 export interface ZernioIngestResult {
@@ -68,10 +77,18 @@ export function waIdentityFrom(identity: ZernioIdentity): string | null {
  */
 export async function ingestZernioInbound(
   admin: SupabaseClient,
-  input: { organizationId: string; channelSessionId: string; payload: unknown },
+  input: {
+    organizationId: string;
+    channelSessionId: string;
+    payload: unknown;
+    socialMessage?: SocialMessage;
+  },
 ): Promise<ZernioIngestResult> {
-  const msg = parseZernioInbound(input.payload);
-  if (!msg) return { status: "ignored", reason: "evento_sem_interesse" };
+  const lida = input.socialMessage ?? parseZernioInbound(input.payload);
+  if (!lida) return { status: "ignored", reason: "evento_sem_interesse" };
+  // O pino do WhatsApp chega como "📍 Location", sem coordenadas: elas moram
+  // só na API. Rede social não manda pino — a busca é só do WhatsApp.
+  const msg = input.socialMessage ? lida : await completarLocalizacao(admin, input.organizationId, lida);
 
   // Evento de DESFECHO: a mensagem já existe (ou nem é nossa). Só atualiza o
   // status — inserir aqui criaria uma segunda linha para a mesma mensagem, uma
@@ -84,6 +101,7 @@ export async function ingestZernioInbound(
         ...(msg.errorReason ? { error_message: msg.errorReason, error_code: "zernio_error" } : {}),
       })
       .eq("organization_id", input.organizationId)
+      .eq("channel_session_id", input.channelSessionId)
       .eq("external_id", msg.externalId)
       // Não rebaixa: `read` chegando depois de `delivered` é progresso, mas um
       // `delivered` atrasado depois de `read` voltaria o tique para trás. A
@@ -91,9 +109,32 @@ export async function ingestZernioInbound(
       .not("status", "in", "(read)")
       .select("id");
     const afetadas = (data ?? []).length;
+    await carimbarHoraDoDesfecho(admin, input, msg);
     return afetadas > 0
       ? { status: "ingested", reason: `status_${msg.status}` }
       : { status: "ignored", reason: "mensagem_desconhecida" };
+  }
+
+  // ── O NÚMERO INTERNO DE AVISOS NÃO VIRA ATENDIMENTO ─────────────────────
+  //
+  // Antes da resolução pela thread E do upsert do contato — os DOIS caminhos
+  // criam conversa, e é o nascimento dela que dispara o pedido de rodízio pelo
+  // banco. Só o ramo do telefone é alcançável aqui: a âncora opaca deste canal
+  // é do provedor, não o identificador de privacidade do WhatsApp, e casar por
+  // ela exigiria um segundo campo na configuração sem consumidor nenhum hoje.
+  if (
+    msg.identity.phone &&
+    (await ehNumeroInternoDeAviso(admin, input.organizationId, {
+      kind: "phone",
+      phone: msg.identity.phone,
+      lid: null,
+    }))
+  ) {
+    await registrarMensagemIgnorada(admin, input.organizationId, {
+      direction: "inbound",
+      sessionId: input.channelSessionId,
+    });
+    return { status: "ignored", reason: "numero_interno_de_aviso" };
   }
 
   // ─── A THREAD é a prova de identidade, e vem ANTES da âncora ─────────────
@@ -109,8 +150,34 @@ export async function ingestZernioInbound(
   // (âncora preferida) e a saída só traz o telefone do participante. Resolver
   // pela thread primeiro fecha isso na origem, e de quebra deixa a ingestão
   // imune a qualquer identidade nova que o provider invente depois.
-  const existente = await conversaPelaThread(admin, input.organizationId, msg.conversationId);
+  const existente = await conversaPelaThread(
+    admin,
+    input.organizationId,
+    msg.conversationId,
+    input.channelSessionId,
+  );
   if (existente) {
+    if (input.socialMessage) {
+      // A plataforma vai CRUA para uma coluna com CHECK. Num clone cujo banco
+      // ainda não conhece esta rede, o INSERT volta 23514 — e como o provedor
+      // REENTREGA o webhook, isso vira 500 eterno, com a tela mostrando a conta
+      // ligada e a conversa nunca aparecendo. Recusar aqui troca o laço infinito
+      // por uma linha de log que diz o nome da rede e o que falta.
+      if (!ehCanalDeConversa(input.socialMessage.platform)) {
+        logger.error("zernio: rede sem canal correspondente no banco — conversa não atualizada", {
+          organization_id: input.organizationId,
+          platform: input.socialMessage.platform,
+          detalhe: "falta o valor no CHECK de conversations.channel (migration)",
+        });
+        return { status: "ignored", reason: "canal_desconhecido" };
+      }
+      const { error } = await admin
+        .from("conversations")
+        .update({ channel: input.socialMessage.platform })
+        .eq("organization_id", input.organizationId)
+        .eq("id", existente.id);
+      if (error) throw new Error("social_conversation_update_failed");
+    }
     const inseridaNaExistente = await insertMessage(admin, {
       organizationId: input.organizationId,
       conversationId: existente.id,
@@ -136,21 +203,42 @@ export async function ingestZernioInbound(
           inseridaNaExistente,
         );
       }
-      await efeitosDaEntrada(admin, input, msg, existente.contact_id, existente.id, inseridaNaExistente);
+      if (!input.socialMessage && pinoFicouSemCoordenadas(msg)) {
+        await pedirNovaBuscaDoPino(admin, input.organizationId, inseridaNaExistente, msg);
+      }
+      await efeitosDaEntrada(
+        admin,
+        input,
+        msg,
+        existente.contact_id,
+        existente.id,
+        inseridaNaExistente,
+      );
+      if (input.socialMessage && msg.direction === "outbound") {
+        await pausarIaPorAtendimentoManual(admin, {
+          organizationId: input.organizationId,
+          conversationId: existente.id,
+          canal: "zernio",
+        });
+      }
     }
     return inseridaNaExistente === "duplicate"
       ? { status: "duplicate", conversationId: existente.id }
       : { status: "ingested", conversationId: existente.id, messageId: inseridaNaExistente };
   }
 
-  const identity = waIdentityFrom(msg.identity);
+  const identity = input.socialMessage
+    ? `${input.socialMessage.platform}:${msg.accountId}:${input.socialMessage.participantId}`
+    : waIdentityFrom(msg.identity);
   if (!identity) {
     // Evento sem âncora utilizável. Recusar é o certo: criar contato anônimo
     // faria a próxima mensagem da MESMA pessoa virar um segundo contato.
     return { status: "ignored", reason: "sem_identidade_utilizavel" };
   }
 
-  const contactId = await upsertContact(admin, input.organizationId, msg, identity);
+  const contactId = input.socialMessage
+    ? await upsertSocialContact(admin, input.organizationId, identity, msg.identity.displayName)
+    : await upsertContact(admin, input.organizationId, msg, identity);
   if (!contactId) return { status: "ignored", reason: "contato_nao_resolvido" };
 
   const conversationId = await upsertConversation(admin, {
@@ -160,6 +248,24 @@ export async function ingestZernioInbound(
     providerConversationId: msg.conversationId,
   });
   if (!conversationId) return { status: "ignored", reason: "conversa_nao_resolvida" };
+  if (input.socialMessage) {
+    // Mesma guarda do ramo acima: sem ela, rede nova = 23514 reentregue para
+    // sempre. Ver `lib/channels/canais-de-conversa.ts`.
+    if (!ehCanalDeConversa(input.socialMessage.platform)) {
+      logger.error("zernio: rede sem canal correspondente no banco — conversa não atualizada", {
+        organization_id: input.organizationId,
+        platform: input.socialMessage.platform,
+        detalhe: "falta o valor no CHECK de conversations.channel (migration)",
+      });
+      return { status: "ignored", reason: "canal_desconhecido" };
+    }
+    const { error } = await admin
+      .from("conversations")
+      .update({ channel: input.socialMessage.platform })
+      .eq("organization_id", input.organizationId)
+      .eq("id", conversationId);
+    if (error) throw new Error("social_conversation_update_failed");
+  }
 
   const inserted = await insertMessage(admin, {
     organizationId: input.organizationId,
@@ -174,6 +280,9 @@ export async function ingestZernioInbound(
   await marcarConversa(admin, input.organizationId, conversationId, msg);
   if (msg.attachments[0]?.url) {
     await pedirPersistenciaDaMidia(admin, input.organizationId, conversationId, inserted);
+  }
+  if (!input.socialMessage && pinoFicouSemCoordenadas(msg)) {
+    await pedirNovaBuscaDoPino(admin, input.organizationId, inserted, msg);
   }
   await efeitosDaEntrada(admin, input, msg, contactId, conversationId, inserted);
 
@@ -208,7 +317,12 @@ export async function ingestZernioInbound(
  */
 async function efeitosDaEntrada(
   admin: SupabaseClient,
-  input: { organizationId: string; channelSessionId: string; requestId?: string },
+  input: {
+    organizationId: string;
+    channelSessionId: string;
+    requestId?: string;
+    socialMessage?: Pick<SocialMessage, "platform">;
+  },
   msg: ZernioInboundMessage,
   contactId: string,
   conversationId: string,
@@ -221,7 +335,12 @@ async function efeitosDaEntrada(
   // regra de primeiro-toque: `estamparAtribuicaoDoContato` só grava se o
   // contato ainda não tem `ad_platform`.
   const atribuicao = extrairAtribuicaoMeta(msg.referral);
-  if (atribuicao) await estamparAtribuicaoDoContato(admin, contactId, atribuicao);
+  if (atribuicao) await estamparAtribuicaoDoContato(admin, input.organizationId, contactId, atribuicao);
+
+  // Irmão do bloco acima, para o Google: o dado não vem no `referral` (que é
+  // exclusivo da Meta), vem no PRÓPRIO texto da mensagem — ver o cabeçalho de
+  // `lib/plataformas-de-anuncio/google/atribuicao.ts`. Best-effort, mesma postura.
+  await extrairEEstamparAtribuicaoGoogle(admin, input.organizationId, contactId, msg.text);
 
   await aplicarEfeitosPosEntrada(admin, {
     organizationId: input.organizationId,
@@ -233,6 +352,9 @@ async function efeitosDaEntrada(
     nomeDoContato: msg.identity.displayName,
     requestId: input.requestId,
     origem: "zernio_webhook",
+    // A rede é o canal que os dois ramos acima já gravaram em
+    // `conversations.channel`; sem ela o negócio nasce como WhatsApp.
+    canal: input.socialMessage?.platform,
   });
 }
 
@@ -282,6 +404,7 @@ async function marcarConversa(
     at: msg.sentAt ?? new Date().toISOString(),
     canal: "zernio",
   });
+
 }
 
 /**
@@ -301,14 +424,17 @@ async function pedirPersistenciaDaMidia(
   conversationId: string,
   messageId: string,
 ): Promise<void> {
-  const { error } = await admin.rpc("emit_event" as never, {
-    p_event_type: "media.persist_requested",
-    p_entity_kind: "message",
-    p_entity_id: messageId,
-    p_payload: { message_id: messageId, conversation_id: conversationId },
-    p_metadata: { source: "zernio_webhook" },
-    p_organization_id: organizationId,
-  } as never);
+  const { error } = await admin.rpc(
+    "emit_event" as never,
+    {
+      p_event_type: "media.persist_requested",
+      p_entity_kind: "message",
+      p_entity_id: messageId,
+      p_payload: { message_id: messageId, conversation_id: conversationId },
+      p_metadata: { source: "zernio_webhook" },
+      p_organization_id: organizationId,
+    } as never,
+  );
   if (error) {
     logger.warn("[zernio] emit media.persist_requested falhou", {
       messageId,
@@ -322,11 +448,13 @@ async function conversaPelaThread(
   admin: SupabaseClient,
   organizationId: string,
   providerConversationId: string,
+  channelSessionId: string,
 ): Promise<{ id: string; contact_id: string } | null> {
   const { data } = await admin
     .from("conversations")
     .select("id, contact_id")
     .eq("organization_id", organizationId)
+    .eq("channel_session_id", channelSessionId)
     .eq("provider_conversation_id", providerConversationId)
     .maybeSingle();
   const row = data as { id: string; contact_id: string | null } | null;
@@ -342,7 +470,9 @@ async function upsertContact(
   const kind = identity.startsWith("phone:") ? "phone" : "lid";
   const valor = identity.slice(identity.indexOf(":") + 1);
   const phoneBruto = kind === "phone" ? valor : msg.identity.phone;
-  const existente = phoneBruto ? await encontrarContatoPorTelefone(admin, organizationId, phoneBruto) : null;
+  const existente = phoneBruto
+    ? await encontrarContatoPorTelefone(admin, organizationId, phoneBruto)
+    : null;
   const phone = existente?.phone_number
     ? canonicalPhoneBR(existente.phone_number)
     : phoneBruto
@@ -478,8 +608,10 @@ async function insertMessage(
       // duplicada na tela.
       sent_via: "external_device",
       status: msg.direction === "outbound" ? (msg.status ?? "sent") : "delivered",
-      type: temAnexo ? tipoDoAnexo(primeiro?.type) : "text",
-      body: msg.text,
+      type: temAnexo ? tipoDoAnexo(primeiro?.type) : msg.location ? "location" : "text",
+      // O pino vira link do mapa no corpo: é o que o agente lê e o que a
+      // prévia da conversa mostra. As coordenadas ficam no metadata para a tela.
+      body: msg.location ? corpoDaLocalizacao(msg.location) : msg.text,
       // A URL do anexo NÃO é pública: é endpoint autenticado do provider, e a
       // plataforma descarta a mídia depois de um tempo. Ela é PONTEIRO, não
       // conteúdo — e é por isso que grava aqui e o worker baixa os bytes já.
@@ -491,7 +623,11 @@ async function insertMessage(
       ...(temAnexo && primeiro?.url
         ? { media_url: primeiro.url, media_mime: mimeDoAnexo(primeiro.type) }
         : {}),
-      metadata: temAnexo ? { provider_attachments: msg.attachments } : {},
+      metadata: temAnexo
+        ? { provider_attachments: msg.attachments }
+        : msg.location
+          ? { location: msg.location }
+          : {},
       ...(msg.sentAt ? { sent_at: msg.sentAt } : {}),
     })
     .select("id")
@@ -580,3 +716,100 @@ export async function aplicarEdicaoZernio(
 
   return (data ?? []).length > 0 ? "aplicado" : "sem_alvo";
 }
+
+/** Concurrent first messages share a database uniqueness constraint. */
+async function upsertSocialContact(
+  admin: SupabaseClient,
+  org: string,
+  identity: string,
+  name: string | null,
+): Promise<string> {
+  // Contato FUNDIDO não é alvo: ele aponta para o vencedor da fusão, e
+  // escrever nele é escrever num cadastro que ninguém mais lê — o mesmo motivo
+  // de `contato-por-telefone`. Aqui a guarda ainda evita um segundo defeito: o
+  // índice único é PARCIAL (`where ... and is_merged_into is null`), então duas
+  // linhas com a mesma identidade — uma mesclada, uma viva — são estado
+  // legítimo, e sem o filtro o `.maybeSingle()` estoura.
+  const { data: existing, error: readError } = await admin
+    .from("contacts")
+    .select("id")
+    .eq("organization_id", org)
+    .eq("social_identity", identity)
+    .is("is_merged_into", null)
+    .maybeSingle();
+  if (readError) throw new Error("social_contact_lookup_failed");
+  if (existing) return existing.id as string;
+  const { data, error } = await admin
+    .from("contacts")
+    .insert({
+      organization_id: org,
+      social_identity: identity,
+      name,
+      display_name: name,
+      source: "social",
+    })
+    .select("id")
+    .single();
+  if (error?.code === "23505") {
+    const { data: winner, error: retryError } = await admin
+      .from("contacts")
+      .select("id")
+      .eq("organization_id", org)
+      .eq("social_identity", identity)
+      // Mesma guarda da busca acima: quem perdeu a corrida procura o VIVO.
+      // O `.single()` reclama de zero e de duas — sem o filtro, uma ficha
+      // mesclada com a mesma identidade tornaria "duas" alcançável.
+      .is("is_merged_into", null)
+      .single();
+    if (retryError || !winner) throw new Error("social_contact_race_failed");
+    return winner.id as string;
+  }
+  if (error || !data) throw new Error("social_contact_create_failed");
+  return data.id as string;
+}
+
+/**
+ * A HORA do desfecho — `delivered_at` e `read_at` — e não só o estado.
+ *
+ * O canal oficial direto já carimbava as duas (`lib/channels/meta/status-update.ts`);
+ * por aqui só o `status` mudava, e as colunas ficavam nulas para sempre: a
+ * conversa mostrava o tique certo, mas "quanto o cliente demorou para ler" não
+ * tinha como ser medido. Medido numa instalação real (24/09/2026): 41 mensagens
+ * entregues no dia, nenhuma com `delivered_at`.
+ *
+ * Cada coluna é gravada UMA vez (`is null`): o primeiro evento que a alcança é o
+ * que vale. Por isso é um update à parte do de `status` — aquele recusa rebaixar
+ * `read` para `delivered`, e um `delivered` atrasado ainda precisa carimbar a
+ * entrega. Um `read` sem `delivered` antes (a ordem do webhook não é garantida)
+ * carimba as duas com a mesma hora: quem leu, recebeu.
+ *
+ * Best-effort: o carimbo é métrica; falhar aqui não pode derrubar a ingestão.
+ */
+async function carimbarHoraDoDesfecho(
+  admin: SupabaseClient,
+  input: { organizationId: string; channelSessionId: string },
+  msg: ZernioInboundMessage,
+): Promise<void> {
+  const colunas =
+    msg.status === "read" ? (["delivered_at", "read_at"] as const)
+    : msg.status === "delivered" ? (["delivered_at"] as const)
+    : [];
+  const quando = msg.statusAt ?? new Date().toISOString();
+  for (const coluna of colunas) {
+    const { error } = await admin
+      .from("messages")
+      .update({ [coluna]: quando })
+      .eq("organization_id", input.organizationId)
+      .eq("channel_session_id", input.channelSessionId)
+      .eq("external_id", msg.externalId)
+      .is(coluna, null);
+    if (error) {
+      logger.warn("[zernio] hora do desfecho não gravada", {
+        organization_id: input.organizationId,
+        coluna,
+        erro: error.message,
+      });
+    }
+  }
+}
+

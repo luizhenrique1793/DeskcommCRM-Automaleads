@@ -10,6 +10,7 @@
  * Auth: cookie session, role >= admin.
  */
 import { randomUUID } from "node:crypto";
+import { valorDaInstalacao } from "@/lib/instalacao/config";
 import type { NextRequest } from "next/server";
 
 import { ok, fail } from "@/lib/api/wrappers";
@@ -32,7 +33,8 @@ export async function GET(
   const authz = await requireRole("admin", {
     requestId,
     resource: "lgpd_requests",
-    allowPlatformAdmin: true,
+    allowPlatformAdmin: "leitura",
+    permiteOrgSuspensa: true,
   });
   if (!authz.ok) return authz.response;
   const t = (texto: string) => traduzir(texto, authz.user.idioma);
@@ -59,6 +61,10 @@ export async function GET(
 
   // collectExportData — read-only, never writes
   const payload = await collectExportData({
+      // O piso do encarregado é resolvido AQUI e injetado: o coletor de LGPD
+      // não consulta configuração, para a coleta sem identificador continuar
+      // visitando só `organizations` (tests/invariants/agenda-meet-export).
+      dpoDaInstalacao: (await valorDaInstalacao("LGPD_DPO_EMAIL")).valor?.trim() || null,
     organizationId: orgId,
     requestId: id,
     contactId: request.contact_id,
@@ -102,6 +108,9 @@ export async function GET(
       ...m,
       // Mask message body if it contains likely PII patterns — keep structural info
       body: m.body ? "[masked]" : null,
+      // A transcrição/OCR da mídia é o mesmo conteúdo do titular em outra forma:
+      // mascara pela mesma régua do `body`, senão o spread acima a entrega crua.
+      media_derived_text: m.media_derived_text ? "[masked]" : null,
     })),
     leads: payload.leads.slice(0, SAMPLE_LIMIT),
     orders: payload.orders.slice(0, SAMPLE_LIMIT),

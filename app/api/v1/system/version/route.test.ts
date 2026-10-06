@@ -10,6 +10,19 @@ vi.mock("@/lib/auth/server", () => ({
   mfaEmDivida: vi.fn(async () => false),
 }));
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: vi.fn() }));
+// A escrita da instalação passa por requirePlatformAdminEscrita (scope 'full' +
+// MFA em dia): o dublê entrega a linha REAL de `platform_admins`, para que a
+// regra rode de verdade em vez de ser encenada.
+const pa = vi.hoisted(() => ({ row: null as Record<string, unknown> | null }));
+vi.mock("@/lib/supabase/server", () => ({
+  createClient: async () => ({
+    auth: { getUser: async () => ({ data: { user: { id: "11111111-1111-4111-8111-111111111111" } } }) },
+    from: () => {
+      const q = { select: () => q, eq: () => q, is: () => q, maybeSingle: async () => ({ data: pa.row }) };
+      return q;
+    },
+  }),
+}));
 vi.mock("@/lib/audit", () => ({ audit: vi.fn(async () => undefined) }));
 
 const OWNER = { id: "11111111-1111-4111-8111-111111111111", email: "dono@x.com", is_platform_admin: true };
@@ -42,6 +55,7 @@ let runSelectError: { message: string } | null;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  pa.row = { user_id: "11111111-1111-4111-8111-111111111111", scope: "full", mfa_required: false, revoked_at: null };
   inserted = null;
   runRow = null;
   runUpdatePatch = null;
@@ -309,6 +323,65 @@ describe("GET /api/v1/system/version", () => {
     expect(body.data.run.superseded).toBe(false);
   });
 
+  /**
+   * O ESTADO PERSISTIDO DA RODADA CHEGANDO À TELA — o coração do #1040.
+   *
+   * O kit grava disputa/retentativas/passada nas três colunas do run; quem
+   * conta isso para quem clicou é ESTA rota. Se ela devolvesse só
+   * sucesso/falha (o `status`), a tela continuaria contando uma história mais
+   * simples que a acontecida — o aviso morreria no `.update.log`, no disco da
+   * VPS, exatamente como o issue descreve.
+   */
+  it("⭐ devolve a rodada do banco do run — disputa, retentativas e passada", async () => {
+    versionRow.current_version = "1.0.0";
+    runRow = {
+      id: "55555555-5555-4555-8555-555555555555",
+      status: "success",
+      last_step: "app",
+      dispatched_at: new Date().toISOString(),
+      from_version: "1.0.0",
+      to_version: "1.1.0",
+      log_tail: "deadlock detected … 2ª passada fechou",
+      disputa_de_banco: true,
+      retentativas_do_banco: 1,
+      passada_do_banco: 2,
+    };
+    vi.mocked(loadAuthUser).mockResolvedValue(OWNER as never);
+    const { GET } = await import("../version/route");
+    const body = await (await GET(get())).json();
+
+    expect(body.data.run.status).toBe("success");
+    expect(body.data.run.rodada_do_banco).toEqual({
+      disputa: true,
+      retentativas: 1,
+      passada: 2,
+    });
+  });
+
+  it("coluna nula é 'não medido': a rota devolve null, não zero", async () => {
+    // Rodada que não passou pelo banco (atualização só de código) deixa as três
+    // colunas nulas. `null` é o que mantém a tela calada; `0` viraria a frase
+    // "não houve disputa" para uma disputa que ninguém mediu.
+    versionRow.current_version = "1.0.0";
+    runRow = {
+      id: "55555555-5555-4555-8555-555555555555",
+      status: "success",
+      last_step: "codigo",
+      dispatched_at: new Date().toISOString(),
+      from_version: "1.0.0",
+      to_version: "1.1.0",
+      log_tail: "",
+      disputa_de_banco: null,
+      retentativas_do_banco: null,
+      passada_do_banco: null,
+    };
+    vi.mocked(loadAuthUser).mockResolvedValue(OWNER as never);
+    const { GET } = await import("../version/route");
+    const body = await (await GET(get())).json();
+
+    expect(body.data.run.rodada_do_banco).toBeNull();
+  });
+
   it("depois de um rollback, quem não é dono também vê a versão que está no ar", async () => {
     versionRow.current_version = "1.1.0";
     runRow = {
@@ -428,21 +501,122 @@ describe("GET /api/v1/system/version", () => {
     expect(body.data.run.superseded).toBe(false);
   });
 
-  it("terminou BEM e o host ainda não bateu: a tela já sabe, e o botão some", async () => {
+  it("reinstalar a MESMA versão que falhou: o app respondendo nela solta a tela", async () => {
+    // O caso que a prova temporal não alcança por construção — o host reporta
+    // `to_version`, que é uma das duas do run. Medido em produção (18/09): a
+    // 1.33.0 falhou porque as imagens ainda não estavam publicadas, meia hora
+    // depois o mesmo `update.sh --force` instalou a 1.33.0 e o app voltou
+    // saudável nela; a tela seguiu anunciando a falha e, sem botão, bloqueou a
+    // 1.35.0 já publicada. Quem desmente é a imagem deste contêiner.
+    // A versão vem de DENTRO da imagem (`APP_VERSION`, gravada no build), não
+    // do `APP_IMAGE` do `.env` — ver o caso do rollback do agente, abaixo.
+    vi.stubEnv("APP_VERSION", "1.33.0");
+    // `v1.33.0` como o `git describe` do host escreve — igual ao `to_version`
+    // do run, que é o que faz a prova temporal empatar.
+    versionRow.current_version = "v1.33.0";
+    versionRow.latest_version = "1.35.0";
+    versionRow.updated_at = "2026-09-18T22:20:02.000Z";
+    runRow = {
+      id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      status: "failed_rolled_back",
+      last_step: "app",
+      dispatched_at: "2026-09-18T03:13:07.000Z",
+      finished_at: "2026-09-18T03:23:24.000Z",
+      from_version: "v1.32.1",
+      to_version: "v1.33.0",
+      log_tail: "",
+    };
+    vi.mocked(loadAuthUser).mockResolvedValue(OWNER as never);
+    const { GET } = await import("../version/route");
+    const body = await (await GET(get())).json();
+    expect(body.data.run.superseded).toBe(true);
+    // E a versão no ar deixa de ser a `from_version` do rollback.
+    expect(body.data.current_version).toBe("v1.33.0");
+    expect(body.data.update_available).toBe(true);
+    vi.unstubAllEnvs();
+  });
+
+  it("rollback do agente: `APP_IMAGE` ainda nomeia a versão que falhou, e o aviso FICA", async () => {
+    // O estado que o `agent.sh` PRODUZ, e que nenhum outro caso cobre: o
+    // `update.sh` grava `APP_IMAGE=…:<alvo>` no `.env` antes de puxar e subir
+    // (`update.sh:291,307,343`), e o rollback passa a imagem anterior só pelo
+    // shell (`agent.sh:313-316`), corrigindo o `.env` depois (`:323`). Como o
+    // compose usa `env_file: .env` (`docker-compose.prod.yml:38`), o contêiner
+    // revertido responde com `APP_IMAGE` apontando para a versão que FALHOU.
+    // Ler dali daria o rollback por desmentido bem quando ele é real: o aviso
+    // sumiria e a tela anunciaria como no ar a versão que quebrou.
+    vi.stubEnv("APP_IMAGE", "ghcr.io/org/app:1.33.0");
+    vi.stubEnv("APP_VERSION", "1.32.1");
+    versionRow.current_version = "v1.33.0";
+    versionRow.updated_at = "2026-09-18T22:20:02.000Z";
+    runRow = {
+      id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      status: "failed_rolled_back",
+      last_step: "app",
+      dispatched_at: "2026-09-18T03:13:07.000Z",
+      finished_at: "2026-09-18T03:23:24.000Z",
+      from_version: "v1.32.1",
+      to_version: "v1.33.0",
+      log_tail: "",
+    };
+    vi.mocked(loadAuthUser).mockResolvedValue(OWNER as never);
+    const { GET } = await import("../version/route");
+    const body = await (await GET(get())).json();
+    expect(body.data.run.superseded).toBe(false);
+    expect(body.data.current_version).toBe("v1.32.1");
+    vi.unstubAllEnvs();
+  });
+
+  it("rollback de verdade: o app roda a versão anterior e o aviso continua de pé", async () => {
+    vi.stubEnv("APP_VERSION", "1.32.1");
+    versionRow.current_version = "v1.33.0";
+    versionRow.updated_at = "2026-09-18T22:20:02.000Z";
+    runRow = {
+      id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      status: "failed_rolled_back",
+      last_step: "app",
+      dispatched_at: "2026-09-18T03:13:07.000Z",
+      finished_at: "2026-09-18T03:23:24.000Z",
+      from_version: "v1.32.1",
+      to_version: "v1.33.0",
+      log_tail: "",
+    };
+    vi.mocked(loadAuthUser).mockResolvedValue(OWNER as never);
+    const { GET } = await import("../version/route");
+    const body = await (await GET(get())).json();
+    expect(body.data.run.superseded).toBe(false);
+    expect(body.data.current_version).toBe("v1.32.1");
+    vi.unstubAllEnvs();
+  });
+
+  it("terminou BEM e o host ainda não bateu: a tela diz que o pedido terminou — sem afirmar a versão nova", async () => {
     // O defeito: `run_result` com sucesso fecha o run e NÃO toca
     // `current_version` — quem escreve essa coluna é o heartbeat do host, de 5
     // em 5 minutos. Nessa janela `latest !== current` continuava verdadeiro e a
     // tela voltava do reinício oferecendo "Atualizar agora" para a versão que
-    // acabou de ser instalada. Quem clicou fazia tudo de novo.
+    // acabou de ser instalada. Para tapar isso a rota PROMOVIA o `to_version` do
+    // run a versão em execução — e é essa promoção que a issue 1101 mediu: com
+    // o host calado (agente morto, cron removido, token vencido), a tela
+    // anunciava `1.32.0` indefinidamente com o container rodando `1.23.0`.
+    //
+    // Agora a rota conta o que sabe: o pedido terminou (`just_updated`), a
+    // versão em execução continua sendo a última que o HOST confirmou, e o alvo
+    // viaja no run para a tela nomeá-lo como pedido. O botão continua escondido
+    // enquanto a janela vale — reoferecer era o outro defeito.
+    //
+    // Datas relativas ao relógio de parede desta suíte: o caso é "o host está
+    // calado desde antes do fim do run", e a janela de `sucessoJaInstalado` tem
+    // prazo — data fixa viraria caso vencido sozinha, com o tempo real.
+    const agora = Date.now();
     versionRow.current_version = "1.0.0";
     versionRow.latest_version = "1.1.0";
-    versionRow.updated_at = "2026-09-11T13:55:00.000Z";
+    versionRow.updated_at = new Date(agora - 6 * 60 * 1000).toISOString();
     runRow = {
       id: "77777777-7777-4777-8777-777777777777",
       status: "success",
       last_step: "banco",
-      dispatched_at: "2026-09-11T13:58:00.000Z",
-      finished_at: "2026-09-11T14:00:00.000Z",
+      dispatched_at: new Date(agora - 7 * 60 * 1000).toISOString(),
+      finished_at: new Date(agora - 5 * 60 * 1000).toISOString(),
       from_version: "1.0.0",
       to_version: "1.1.0",
       log_tail: "",
@@ -450,12 +624,46 @@ describe("GET /api/v1/system/version", () => {
     vi.mocked(loadAuthUser).mockResolvedValue(OWNER as never);
     const { GET } = await import("../version/route");
     const body = await (await GET(get())).json();
-    expect(body.data.current_version).toBe("1.1.0");
+    expect(
+      body.data.current_version,
+      "versão que o host não confirmou não vira versão instalada",
+    ).toBe("1.0.0");
+    expect(
+      body.data.run.to_version,
+      "o alvo continua viajando no run — é assim que a tela nomeia o pedido",
+    ).toBe("1.1.0");
     expect(
       body.data.update_available,
       "a tela voltaria oferecendo a versão que acabou de ser instalada",
     ).toBe(false);
     expect(body.data.just_updated).toBe(true);
+  });
+
+  it("passado o prazo da janela, o host calado volta a falar pela versão em execução", async () => {
+    // O outro lado da mesma regra, e o fim do defeito: a assunção da janela
+    // NÃO é eterna. Depois de `RUN_STALE_AFTER_MS` do fim do run sem nenhuma
+    // batida, quem afirma a versão instalada é a última que o host confirmou —
+    // e a versão-alvo volta a ser um pedido em aberto, com o botão de volta.
+    const agora = Date.now();
+    versionRow.current_version = "1.0.0";
+    versionRow.latest_version = "1.1.0";
+    versionRow.updated_at = new Date(agora - 40 * 60 * 1000).toISOString();
+    runRow = {
+      id: "77777777-7777-4777-8777-777777777777",
+      status: "success",
+      last_step: "banco",
+      dispatched_at: new Date(agora - 20 * 60 * 1000).toISOString(),
+      finished_at: new Date(agora - 16 * 60 * 1000).toISOString(),
+      from_version: "1.0.0",
+      to_version: "1.1.0",
+      log_tail: "",
+    };
+    vi.mocked(loadAuthUser).mockResolvedValue(OWNER as never);
+    const { GET } = await import("../version/route");
+    const body = await (await GET(get())).json();
+    expect(body.data.just_updated).toBe(false);
+    expect(body.data.current_version).toBe("1.0.0");
+    expect(body.data.update_available).toBe(true);
   });
 
   it("o host confirmou: a janela se fecha sozinha, sem ninguém limpar nada", async () => {
@@ -555,9 +763,20 @@ describe("POST /api/v1/system/update", () => {
   });
 
   it("nega para quem não é dono do servidor", async () => {
+    pa.row = null;
     vi.mocked(loadAuthUser).mockResolvedValue(MEMBRO as never);
     const { POST } = await import("../update/route");
     expect((await POST(post())).status).toBe(403);
+    expect(inserted).toBeNull();
+  });
+
+  it("nega o platform admin somente leitura (support_readonly) com forbidden_scope", async () => {
+    pa.row = { ...pa.row, scope: "support_readonly" };
+    vi.mocked(loadAuthUser).mockResolvedValue(OWNER as never);
+    const { POST } = await import("../update/route");
+    const res = await POST(post());
+    expect(res.status).toBe(403);
+    expect((await res.json()).error.code).toBe("forbidden_scope");
     expect(inserted).toBeNull();
   });
 

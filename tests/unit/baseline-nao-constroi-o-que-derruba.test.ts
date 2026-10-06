@@ -53,11 +53,29 @@ import { describe, expect, it } from "vitest";
  *
  * ## Escopo, escrito para não ser lido maior do que é
  *
- * Nome literal, com ou sem `if exists`, mais o laço `foreach t in array[...]`
- * com `format('… %s … public.%I')`. Outras formas dinâmicas ficam fora. CHECK e
- * FOREIGN KEY ficam fora: não constroem índice, e as instâncias medidas validam
- * coluna recriada vazia. Função, grant e trigger ficam fora — a mesma classe
- * existe neles (medido na mesma revisão) e é trabalho próprio.
+ * Nome literal, com ou sem `if exists`, mais DUAS formas de laço com
+ * `execute format(…)`:
+ *
+ * - `foreach t in array[...]`, com a lista de tabelas LITERAL — expandido por
+ *   tabela, porque o conjunto é conhecível ao ler o arquivo;
+ * - `for r in <select …> loop`, a varredura de CATÁLOGO — expandido para UMA
+ *   chave simbólica por comando (a tabela vira `<r>`), porque o conjunto NÃO é
+ *   conhecível estaticamente. Preserva a ordem criar↔derruba dentro do corpo,
+ *   que é o que esta régua cobra, sem inventar uma lista que o SQL não declara.
+ *
+ * A segunda entrou em 2026-09-19: a migration 0325 trocou o laço de 30 tabelas
+ * literais pela varredura, e o controle de vivacidade acusou que o instrumento
+ * tinha ficado cego. Outras formas dinâmicas (um `execute` montado por
+ * concatenação, por exemplo) continuam fora. CHECK e FOREIGN KEY ficam fora:
+ * não constroem índice, e as instâncias medidas validam coluna recriada vazia.
+ * Trigger e concessão entraram na régua: gatilho criado e derrubado adiante SEM
+ * recriação, e `grant` a `anon`/`public` revogado adiante sem reconceder, voltam
+ * a valer entre os dois pontos em todo install/update. Os `execute format(...)`
+ * de laço ficam fora — medidos, são drop+create (e as concessões, grant+revoke)
+ * na MESMA iteração. Função: régua PRÓPRIA em
+ * `baseline-funcao-intermediaria-sem-guarda.test.ts` — a intermediária não pode
+ * enfraquecer guarda forte rumo à final (98 intermediárias medidas; 11
+ * declaradas; o portão legado do #2196 corrigido).
  *
  * Lê texto; que o ciclo install→update sai 0 é o job `invariants` quem mede, e
  * `tests/invariants/indices-redundantes-saem.test.ts` mede o estado final.
@@ -226,10 +244,61 @@ function policiesEmLaco(sql: string, verbo: "create" | "drop"): Ocorrencia[] {
   return achadas;
 }
 
+/**
+ * `for r in select … from pg_class … loop … format('… policy x_%s_y on public.%I …')`
+ * — o laço que varre o CATÁLOGO em vez de uma lista literal.
+ *
+ * A lista de tabelas NÃO é conhecível estaticamente, e isso é de propósito: a
+ * migration 0325 trocou o `foreach … in array[30 nomes]` por esta forma
+ * justamente para a proteção alcançar tabela que ainda não existe quando o
+ * baseline é escrito. Expandir por tabela aqui seria inventar uma lista que o
+ * SQL não declara.
+ *
+ * O que o parser faz então é emitir UMA ocorrência SIMBÓLICA por comando, com a
+ * tabela substituída pela variável do laço (`r`). Isso preserva exatamente o que
+ * este arquivo cobra — a ORDEM entre criar e derrubar o MESMO nome dentro do
+ * MESMO corpo — sem afirmar nada sobre quais tabelas serão alcançadas em tempo
+ * de execução. Duas policies de nomes diferentes no mesmo laço continuam sendo
+ * chaves diferentes; a mesma policy criada antes do próprio drop continua sendo
+ * um par proibido.
+ *
+ * O cabeçalho exige `select` para não casar com `for all using (…)` dentro da
+ * definição de uma policy, e `\bfor\s` não alcança `foreach` — as duas formas
+ * não se sobrepõem.
+ */
+function policiesEmLacoDeCatalogo(sql: string, verbo: "create" | "drop"): Ocorrencia[] {
+  const achadas: Ocorrencia[] = [];
+  const laco = /\bfor\s+(\w+)\s+in\s+(?=[\s\S]{0,2000}?\bselect\b)([\s\S]*?)\bloop\b([\s\S]*?)end\s+loop/gi;
+  // O `%s` no NOME é opcional, ao contrário da forma de array. Medido no arquivo
+  // real: a varredura da 0325 usa `tenant_isolation_%s_all` (nome derivado da
+  // tabela), e a das travas de suporte (0274) usa `support_write_insert` — nome
+  // LITERAL sobre tabela dinâmica. Exigir `%s`, como a forma de array faz,
+  // deixava a segunda invisível: 1 ocorrência vista de 4 existentes.
+  const comando =
+    verbo === "create"
+      ? /create policy\s+((?:[a-z0-9_]|%s)+)\s+on\s+public\.%I/gi
+      : /drop policy\s+(?:if exists\s+)?((?:[a-z0-9_]|%s)+)\s+on\s+public\.%I/gi;
+  for (const m of sql.matchAll(laco)) {
+    const variavel = m[1]!;
+    const corpo = m[3]!;
+    const inicioDoCorpo = m.index! + m[0].lastIndexOf(corpo);
+    for (const f of corpo.matchAll(comando)) {
+      const nomeDaPolicy = f[1]!.replaceAll("%s", `<${variavel}>`);
+      achadas.push({
+        chave: `${nomeDaPolicy} on <catálogo:${variavel}>`,
+        nomeProprio: nomeDaPolicy,
+        pos: inicioDoCorpo + f.index!,
+      });
+    }
+  }
+  return achadas;
+}
+
 function criacoesDePolicy(sql: string): Ocorrencia[] {
   return [
     ...ocorrencias(sql, new RegExp(String.raw`create policy\s+` + ALVO_DE_POLICY, "gi"), nomeNaTabela),
     ...policiesEmLaco(sql, "create"),
+    ...policiesEmLacoDeCatalogo(sql, "create"),
   ];
 }
 
@@ -238,9 +307,162 @@ function paresDePolicy(sql: string): Par[] {
   const drops = [
     ...ocorrencias(sql, new RegExp(String.raw`drop policy\s+(?:if exists\s+)?` + ALVO_DE_POLICY, "gi"), nomeNaTabela),
     ...policiesEmLaco(sql, "drop"),
+    ...policiesEmLacoDeCatalogo(sql, "drop"),
   ];
   return pares(sql, drops, criacoes, criacoes);
 }
+
+/**
+ * Trigger LITERAL — `create trigger <nome> … on <tabela>` e o
+ * `drop trigger [if exists] <nome> on <tabela>`. A chave é nome + tabela, como
+ * nas policies.
+ *
+ * O `[\s\S]{0,240}?` cobre o miolo entre o nome e o `on` (`after update of
+ * status`, `before insert …`), que não é whitespace.
+ *
+ * Os `execute format('create trigger …')` de laço ficam fora, e de propósito:
+ * medidos, os quatro são `drop`+`create` na MESMA iteração (substituição), que
+ * é justamente a forma que esta regra permite.
+ */
+const ALVO_DE_TRIGGER = String.raw`"?([a-z0-9_]+)"?[\s\S]{0,240}?\son\s+(?:"?[a-z0-9_]+"?\s*\.\s*)?"?([a-z0-9_]+)"?(?![\w".])`;
+
+function criacoesDeTrigger(sql: string): Ocorrencia[] {
+  return ocorrencias(
+    sql,
+    new RegExp(String.raw`create\s+(?:or\s+replace\s+)?trigger\s+` + ALVO_DE_TRIGGER, "gi"),
+    nomeNaTabela,
+  );
+}
+
+function paresDeTrigger(sql: string): Par[] {
+  const criacoes = criacoesDeTrigger(sql);
+  const drops = ocorrencias(
+    sql,
+    new RegExp(String.raw`drop\s+trigger\s+(?:if\s+exists\s+)?` + ALVO_DE_TRIGGER, "gi"),
+    nomeNaTabela,
+  );
+  return pares(sql, drops, criacoes, criacoes);
+}
+
+/**
+ * Concessão TRANSITÓRIA — `grant` a `anon`/`public` que o PRÓPRIO arquivo
+ * revoga adiante, sem reconceder. A cada install/update o papel recupera o
+ * privilégio até o revoke; uma atualização que morra no meio deixa o papel com
+ * ele (autocommit, como as regras de isolamento do update.sh).
+ *
+ * A chave é objeto CANÔNICO + papel. O canônico ignora a FORMA do alvo — aspas,
+ * o tipo (`table`/`function`) e o schema `public.` —, porque o dump escreve
+ * `on table "public"."x"` e o apêndice escreve `on public.x` (ou `on x`): sem
+ * isso as duas pontas da MESMA concessão não se encontram (issue #2251).
+ *
+ * Fora do escopo, de propósito: `alter default privileges` (não é concessão a
+ * um objeto) e `execute format('grant …')` de laço (não nomeia objeto).
+ * Papéis cobertos: `anon` (chave pública do browser), `public` (todo mundo) e
+ * `service_role` — o terceiro entrou na #2258: a janela dele em `api_audit_log`
+ * também fica de pé se a passada morrer, e a cerca não a via.
+ */
+interface ConcessaoTransitoria {
+  chave: string;
+  linhaDoGrant: number;
+  /** O último evento da sequência: revogação aqui = estado final não concede. */
+  linhaDoRevoke: number;
+  /**
+   * O MAIOR par concessão → revogação seguinte. É a janela que a declaração
+   * precisa cobrir: um re-grant no meio reabre a janela do segundo em diante, e
+   * medir só o primeiro par não veria (issue #2258).
+   */
+  maiorJanela: { grant: number; revoke: number; distancia: number };
+}
+
+function objetoCanonico(bruto: string): string {
+  return bruto
+    .replace(/"/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase()
+    .replace(/^(?:tables?|functions?|sequences?|schemas?)\s+/, "")
+    .replace(/^public\./, "");
+}
+
+function concessoesTransitorias(sql: string): ConcessaoTransitoria[] {
+  // `--` vira espaço do MESMO comprimento: posição e linha de cada comando não
+  // mudam, e um `GRANT` CITADO num comentário deixa de engolir o `revoke` real
+  // logo abaixo (issue #2255 — era assim que `ai_budgets` e `api_audit_log`
+  // passavam invisíveis).
+  const semComentarios = sql.replace(/--[^\n]*/g, (m) => " ".repeat(m.length));
+  const historico = new Map<string, { tipo: "grant" | "revoke"; linha: number }[]>();
+  for (const m of semComentarios.matchAll(/\b(grant|revoke)\b[^;]*;/gi)) {
+    const texto = m[0].replace(/\s+/g, " ");
+    if (/alter\s+default\s+privileges/i.test(texto)) continue;
+    const alvo = /\bon\s+([\s\S]*?)\s+(?:to|from)\s+([\s\S]*)$/i.exec(texto.replace(/;\s*$/, ""));
+    if (!alvo) continue;
+    const objeto = objetoCanonico(alvo[1]!);
+    for (const papel of alvo[2]!.toLowerCase().split(",").map((x) => x.replace(/"/g, "").trim())) {
+      if (papel !== "anon" && papel !== "public" && papel !== "service_role") continue;
+      const chave = `${objeto} :: ${papel}`;
+      historico.set(chave, [
+        ...(historico.get(chave) ?? []),
+        { tipo: m[1]!.toLowerCase() as "grant" | "revoke", linha: linhaDe(sql, m.index!) },
+      ]);
+    }
+  }
+  const achadas: ConcessaoTransitoria[] = [];
+  for (const [chave, seq] of historico) {
+    const ultimo = seq[seq.length - 1]!;
+    if (ultimo.tipo !== "revoke") continue; // estado final concedido: a concessão é real
+    const primeiro = seq.find((x) => x.tipo === "grant");
+    if (!primeiro) continue;
+    let maiorJanela = { grant: primeiro.linha, revoke: ultimo.linha, distancia: -1 };
+    for (const g of seq.filter((x) => x.tipo === "grant")) {
+      const seguinte = seq.find((x) => x.tipo === "revoke" && x.linha > g.linha);
+      if (!seguinte) continue;
+      const distancia = seguinte.linha - g.linha;
+      if (distancia > maiorJanela.distancia) {
+        maiorJanela = { grant: g.linha, revoke: seguinte.linha, distancia };
+      }
+    }
+    if (maiorJanela.distancia < 0) continue;
+    achadas.push({ chave, linhaDoGrant: primeiro.linha, linhaDoRevoke: ultimo.linha, maiorJanela });
+  }
+  return achadas.sort((a, b) => a.chave.localeCompare(b.chave));
+}
+
+/**
+ * Concessões transitórias ACEITAS, com o motivo escrito — o mesmo desenho do
+ * `DIVERGENCIAS_CONHECIDAS` do manifest. A cerca as VÊ (o caso do arquivo real
+ * exige que continuem aparecendo); esta lista é a decisão, não o esquecimento.
+ * Resolveu? Remova daqui — a asserção de que as declaradas continuam existindo
+ * fica vermelha.
+ */
+const CONCESSOES_ACEITAS = new Map<string, string>([
+  [
+    "ai_budgets :: anon",
+    "O snapshot concede ALL e o bloco da 0160 + a companheira revogam I/U/D/T (só o serviço escreve " +
+      "orçamento; o T saiu na #2258 — não passa pela RLS e nenhum consumidor o usa). Estreitar mais mudaria o " +
+      "ACL FINAL: a chave anon fica com SELECT/REFERENCES/TRIGGER, e o SELECT é lido pelo PostgREST; a " +
+      "revogação acompanha o grant desde a #2255.",
+  ],
+  [
+    "api_audit_log :: anon",
+    "O snapshot concede SELECT/INSERT/REFERENCES/TRIGGER/TRUNCATE e a 0258 revoga U/D/T. O bloco fica no fim " +
+      "por ser a fonte do contrato (extraído por rótulo pelo invariante); a companheira ao lado do grant tira " +
+      "o TRUNCATE desde já — o único desses que a RLS não alcança (issue #2255).",
+  ],
+  [
+    "api_audit_log :: service_role",
+    "O snapshot concede TRUNCATE a service_role e a 0258 revoga U/D/T; a companheira cobre service_role desde " +
+      "a #2258 — era a única janela de 20 mil linhas que a cerca não via. O bloco continua a fonte do " +
+      "contrato.",
+  ],
+  [
+    "idempotency_keys :: anon",
+    "O snapshot concede ALL e o hardening revoga TRUNCATE (que a RLS não alcança). Estreitar a concessão " +
+      "mudaria o ACL FINAL " +
+      "(REFERENCES/TRIGGER nas duas majors, MAINTAIN no pg17), e o invariante " +
+      "organizacoes-recibo-confiavel prova o contrato final com TRUNCATE negado. A revogação passou a " +
+      "acompanhar a concessão (issue #2251): a forma fica, com esta justificativa, e a janela some.",
+  ],
+]);
 
 /**
  * O comando `create policy … ;` a partir da posição, normalizado para comparar
@@ -361,6 +583,35 @@ create policy "sel_larga" on public.t for select using (true);
 drop policy if exists "sel_igual" on public.t;
 create policy "sel_igual" on public.t for select using (dono = auth.uid());
 
+-- trigger criado e derrubado adiante sem recriação: par proibido
+create trigger "trg_velho" after update on public.t for each row execute function public.f();
+-- trigger com o MESMO nome em outra tabela: a chave é nome + tabela
+create trigger trg_mesmo after update on public.t for each row execute function public.f();
+create trigger trg_mesmo after update on public.outra for each row execute function public.f();
+-- par drop+create: substituição, permitido
+drop trigger if exists trg_par on public.t;
+create trigger trg_par before update on public.t for each row execute function public.f();
+-- criação guardada pela existência do próprio trigger
+do $$
+begin
+  if not exists (select 1 from pg_trigger where tgname = 'trg_guardado') then
+    create trigger trg_guardado after insert on public.t for each row execute function public.f();
+  end if;
+end $$;
+
+-- concessão a anon revogada adiante: transitória (proibida)
+grant all on table public.t2 to anon;
+-- revogação antes da concessão: estado final concedido (permitida)
+revoke all on table public.t3 from anon;
+grant all on table public.t3 to anon;
+-- as MESMAS pontas em grafias diferentes: o canônico tem de casar (issue #2251)
+grant all on table public.t5 to anon;
+grant all on t6 to anon;
+-- re-grant no meio: cada concessão tem a SUA janela até a revogação seguinte
+grant all on table public.t7 to anon;
+revoke all on table public.t7 from anon;
+grant all on table public.t7 to anon;
+
 -- ---- apêndice (migration 9999) ----
 drop index if exists public.velho_idx;
 drop index if exists public.cond_idx;
@@ -382,6 +633,13 @@ drop policy if exists "sel_larga" on public.t;
 create policy "sel_larga" on public.t for select using (dono = auth.uid());
 drop policy if exists "sel_igual" on public.t;
 create policy "sel_igual" on public.t for select using (dono = auth.uid());
+drop trigger if exists trg_velho on public.t;
+drop trigger if exists trg_mesmo on public.t;
+drop trigger if exists trg_guardado on public.t;
+revoke all on table public.t2 from anon;
+revoke truncate on public.t5 from anon;
+revoke all on public.t6 from anon;
+revoke truncate on public.t7 from anon;
 `;
 
 describe("o instrumento, contra formas conhecidas", () => {
@@ -434,19 +692,73 @@ describe("o instrumento, contra formas conhecidas", () => {
   it("redefinição intermediária: acusa a que difere da final e poupa a idêntica", () => {
     expect(redefinicoesIntermediarias(SINTETICO)).toEqual([expect.stringMatching(/^sel_larga on t: /)]);
   });
+
+  it("trigger: casa nome E tabela, poupa o par drop+create e classifica a guarda", () => {
+    const achados = nomesProibidos(paresDeTrigger(SINTETICO));
+    expect(achados).toContain("trg_velho on t");
+    expect(achados).not.toContain("trg_par on t");
+    expect(achados).toContain("trg_mesmo on t");
+    expect(achados).not.toContain("trg_mesmo on outra");
+    expect(paresDeTrigger(SINTETICO).find((p) => p.nome === "trg_guardado on t")?.guarda).toBe(
+      "existencia",
+    );
+  });
+
+  it("concessão transitória: casa as grafias, poupa o re-grant e vê a janela do RE-grant", () => {
+    const achados = concessoesTransitorias(SINTETICO);
+    expect(achados.map((c) => c.chave)).toEqual([
+      "t2 :: anon",
+      "t5 :: anon",
+      "t6 :: anon",
+      "t7 :: anon",
+    ]);
+    expect(achados.every((c) => c.maiorJanela.distancia > 0)).toBe(true);
+    // t7: grant → revoke curto → grant → revoke no apêndice. A chave já era
+    // detectada pelo último evento; o que o #2258 exige é a MAIOR janela ser a
+    // do SEGUNDO grant — olhar só o primeiro par dava distância curta.
+    const t7 = achados.find((c) => c.chave === "t7 :: anon")!;
+    const primeira = SINTETICO.indexOf("grant all on table public.t7 to anon;");
+    const segunda = SINTETICO.indexOf("grant all on table public.t7 to anon;", primeira + 1);
+    const linha = (pos: number) => SINTETICO.slice(0, pos).split("\n").length;
+    expect(t7.linhaDoGrant).toBe(linha(primeira));
+    expect(t7.maiorJanela.grant).toBe(linha(segunda));
+  });
 });
 
 describe("baseline.sql não reconstrói o que ele mesmo derruba ou substitui", () => {
   it("o instrumento está vivo no arquivo real: acha pares, laços e redefinições", () => {
     expect(paresDeIndice(SQL).length, "nenhum par cria→derruba encontrado — o parser mudou?").toBeGreaterThan(0);
-    expect(policiesEmLaco(SQL, "create").length, "nenhum laço de policy encontrado — o parser mudou?").toBeGreaterThan(10);
+    // ⚠️ ESTE CONTROLE JÁ DISPAROU DE VERDADE, e a história explica o formato de
+    // agora. Ele exigia `policiesEmLaco(create) > 10`, contando SÓ a forma
+    // `foreach t in array[...]`. A migration 0325 trocou o laço de 30 tabelas
+    // literais pela varredura de catálogo de `fn_proteger_tabelas_de_organizacao`
+    // — e o número caiu de 34 para ZERO num PR que não introduziu defeito
+    // nenhum. O controle fez o que devia: acusou que o instrumento tinha ficado
+    // cego para a única forma que passou a existir.
+    //
+    // A saída NÃO foi baixar o número, que é a cura que satisfaz a catraca pelo
+    // motivo errado: o parser aprendeu a forma nova (`policiesEmLacoDeCatalogo`).
+    // A soma é que se cobra, porque QUAL das duas formas o arquivo usa é decisão
+    // de quem escreve SQL, e trocar uma pela outra não pode reprovar o PR.
+    const emLaco = policiesEmLaco(SQL, "create").length + policiesEmLacoDeCatalogo(SQL, "create").length;
+    expect(emLaco, "nenhum laço de policy encontrado, nas DUAS formas — o parser mudou?").toBeGreaterThan(0);
     // A LIGAÇÃO, e não só a função: sem ela o caso das policies do arquivo real
     // passa por omissão (foi o que a sabotagem que desligou a expansão mostrou —
-    // `policiesEmLaco` sozinha continuava verde).
+    // `policiesEmLaco` sozinha continuava verde). A âncora saiu de uma tabela
+    // nomeada (`lead_state`, que vinha do array literal de 30) para a chave
+    // simbólica da varredura, porque é ela que existe hoje.
     expect(
       criacoesDePolicy(SQL).map((c) => c.chave),
       "a expansão do laço não chega ao localizador de pares",
-    ).toContain("tenant_isolation_lead_state_all on lead_state");
+    ).toContain("tenant_isolation_<r>_all on <catálogo:r>");
+    expect(
+      criacoesDeTrigger(SQL).length,
+      "nenhum trigger literal encontrado — o parser mudou?",
+    ).toBeGreaterThan(0);
+    expect(
+      SQL,
+      "nenhuma concessão a anon/public no arquivo — o parser de concessões ficou cego?",
+    ).toMatch(/grant[^;]*\bto\b[^;]*\banon\b/i);
   });
 
   it("nenhuma criação de índice antes do próprio drop, fora de condição de verdade", () => {
@@ -470,6 +782,44 @@ describe("baseline.sql não reconstrói o que ele mesmo derruba ou substitui", (
       proibidos(paresDePolicy(SQL)),
       "Policy recriada e derrubada a cada install/update: entre as duas, a regra antiga volta a " +
         "valer somada às novas. Tire a criação.\n",
+    ).toEqual([]);
+  });
+
+  it("nenhum trigger é criado antes do próprio drop", () => {
+    expect(
+      proibidos(paresDeTrigger(SQL)),
+      "Trigger criado e derrubado adiante a cada install/update: entre os dois pontos, o gatilho " +
+        "antigo volta a valer. Tire a criação (ou a torne condicional ao mesmo predicado do drop, " +
+        "invertido).\n",
+    ).toEqual([]);
+  });
+
+  it("concessões transitórias: só as declaradas, e nenhuma declarada envelhece", () => {
+    const chaves = concessoesTransitorias(SQL).map((c) => c.chave);
+    expect(
+      [...chaves].sort(),
+      "Concessão reaplicada a cada install/update só para ser revogada adiante — conserte ou declare " +
+        "com o motivo escrito em CONCESSOES_ACEITAS.\n",
+    ).toEqual([...CONCESSOES_ACEITAS.keys()].sort());
+    expect(
+      [...CONCESSOES_ACEITAS.keys()].filter((k) => !chaves.includes(k)),
+      "a concessão declarada sumiu do arquivo: remova de CONCESSOES_ACEITAS",
+    ).toEqual([]);
+    // Declarar não basta: a declaração só vale com a revogação AO LADO do grant.
+    // A régua mede CADA concessão até a revogação seguinte e usa a MAIOR janela —
+    // um re-grant no meio reabre a janela, e olhar só o primeiro par não veria
+    // (issue #2258). O bloco da 0258 pode continuar no fim (é a fonte do
+    // contrato, extraída por rótulo), desde que a companheira esteja colada no
+    // grant.
+    const largas = concessoesTransitorias(SQL)
+      .filter((c) => c.maiorJanela.distancia > 20)
+      .map(
+        (c) =>
+          `${c.chave}: grant ${c.maiorJanela.grant} → revogação ${c.maiorJanela.revoke} (${c.maiorJanela.distancia} linhas)`,
+      );
+    expect(
+      largas,
+      "concessão aceita só vale com a revogação ao lado do grant (issues #2251, #2255, #2258)\n",
     ).toEqual([]);
   });
 

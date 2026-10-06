@@ -90,10 +90,33 @@ export const tenantSchema = z.object({
     .nullable()
     .optional()
     .or(z.literal("").transform(() => null)),
+  /**
+   * O país da organização (issue #1033): ISO-3166 alpha-2, maiúsculas, `null` =
+   * Brasil. É a MESMA régua do CHECK `organizations_country_check` da migration
+   * 0277 — a validação de aplicação e a do banco não podem divergir, ou a tela
+   * aceita o que o banco recusa (e o erro chega como 500 em vez de formulário).
+   * Aqui NÃO se valida se o país tem perfil revisado: quem oferece a lista é
+   * `paisesOferecidos()` (`lib/legal/perfil-do-pais.ts`), e o valor que chega é
+   * conferido contra ela um degrau antes de gravar — país sem lei revisada não
+   * entra nem por API.
+   */
+  country: z
+    .string()
+    .regex(/^[A-Z]{2}$/)
+    .nullable()
+    .optional()
+    .or(z.literal("").transform(() => null)),
   timezone: z.string().min(1).max(64),
   locale: z.enum(LOCALES),
   currency: z.enum(MOEDAS),
   media_retention_days: z.coerce.number().int().min(30).max(3650),
+  /**
+   * Interruptor da limpeza automática de mídia antiga (issue #1534, migration
+   * 0557). `true` é o padrão do banco, para a organização que já existia e para
+   * a nova: a limpeza roda desde a 0432. Quem desliga é a tela; quem aplica é a
+   * função do banco. Sem este campo a tela prometeria o que a coluna não grava.
+   */
+  media_retention_enforced: z.boolean(),
   dpo_email: z
     .string()
     .email()
@@ -108,7 +131,6 @@ export const tenantSchema = z.object({
     .nullable()
     .optional()
     .or(z.literal("").transform(() => null)),
-  lost_reasons_extra: z.array(z.string().min(1).max(80)).max(50).default([]),
 });
 export type TenantInput = z.infer<typeof tenantSchema>;
 
@@ -151,11 +173,44 @@ export const customFieldSchema = z.object({
     "url",
   ]),
   required: z.boolean().optional(),
+  /**
+   * QUANDO este campo passa a OBRIGAR (issue #1536).
+   *
+   * `required` continua com o significado antigo (destaca o campo no formulário);
+   * quem barra um movimento de etapa ou um encerramento é SÓ isto aqui — um funil
+   * sem `obrigatorio_em` se comporta exatamente como se comportava antes.
+   *
+   * - `etapas`: etapas do funil nas quais entrar já exige o valor preenchido;
+   * - `ao_ganhar`: exigido quando a escrita fecha o negócio como ganho;
+   * - `ao_perder`: exigido quando a escrita o deixa perdido.
+   *
+   * A decisão é do servidor (`lib/leads/campos-exigidos.ts`), não do schema: o
+   * schema só diz o que PODE ser exigido, e uma lista vazia significa "nunca".
+   */
+  obrigatorio_em: z
+    .object({
+      etapas: z.array(z.string().uuid()).max(50).optional(),
+      ao_ganhar: z.boolean().optional(),
+      ao_perder: z.boolean().optional(),
+    })
+    .optional(),
   options: z
     .array(z.object({ value: z.string().min(1), label: z.string().min(1) }))
     .optional(),
 });
 export type CustomFieldDef = z.infer<typeof customFieldSchema>;
+
+/** Os campos que a retomada de negócio encerrado pode copiar (issue #1538). */
+export const CAMPOS_COPIAVEIS_NA_RETOMADA = [
+  "custom_fields",
+  "tags",
+  "description",
+  "value_cents",
+  "currency",
+  "expected_close_date",
+  "owner_user_id",
+  "owner_agent_id",
+] as const;
 
 export const pipelineConfigPatchSchema = z.object({
   vocabulary: z
@@ -167,7 +222,47 @@ export const pipelineConfigPatchSchema = z.object({
     })
     .optional(),
   fields: z.array(customFieldSchema).max(50).optional(),
-  lost_reasons: z.array(z.string().min(1).max(80)).max(50).optional(),
+  /**
+   * Os motivos de perda do funil (issue #1537): texto puro continua valendo —
+   * nenhum funil existente precisa migrar dado — e quem quiser agrupar no
+   * relatório "Perdas" grava `{ label, categoria }`. O rótulo é o mesmo de
+   * antes (mesmo teto de 80 caracteres); a categoria é opcional e cabe em 40.
+   *
+   * O trigger `fn_validate_lost_reason_required` lê o `label` dos objetos e o
+   * texto dos strings — a mesma régua, dois formatos. Gravar só o texto e
+   * filtrar depois por prefixo faria o filtro virar busca, que é a alternativa
+   * que a issue descarta.
+   */
+  lost_reasons: z
+    .array(
+      z.union([
+        z.string().min(1).max(80),
+        z.object({
+          label: z.string().min(1).max(80),
+          categoria: z.string().min(1).max(40).optional(),
+        }),
+      ]),
+    )
+    .max(50)
+    .optional(),
+  /**
+   * O MOTIVO DE GANHO por funil (issue #1536) — espelho de `lost_reasons`.
+   * Sem lista cadastrada o motivo é texto livre; com lista, só o que está nela
+   * passa (`recusaDeMotivoDoGanho`, o equivalente do ganho à CHECK que o banco
+   * já tem para a perda — para o ganho não há trigger, então quem aplica é aqui).
+   */
+  won_reasons: z.array(z.string().min(1).max(80)).max(50).optional(),
+  /** Obrigatóriedade do motivo de ganho, opt-in por funil (padrão: não exigir). */
+  won_reason_required: z.boolean().optional(),
+  /**
+   * O que acontece quando um negócio ENCERRADO volta (issue #1538). Ausente é
+   * `mesmo_registro`, o comportamento de antes: reabre o mesmo negócio. Com
+   * `novo_negocio`, mover o encerrado para etapa aberta é recusado e a saída é
+   * a retomada (`lib/leads/reabertura.ts`).
+   */
+  reabertura: z.enum(["mesmo_registro", "novo_negocio"]).optional(),
+  /** O que a retomada copia da origem; ausente é o piso (`custom_fields` e tags). */
+  reabertura_campos: z.array(z.enum(CAMPOS_COPIAVEIS_NA_RETOMADA)).max(8).optional(),
 });
 export type PipelineConfigPatch = z.infer<typeof pipelineConfigPatchSchema>;
 
@@ -269,4 +364,36 @@ export function clientePelaAgendaLigado(settings: unknown): boolean {
       ? (settings as Record<string, unknown>).crm
       : undefined;
   return crmSettingsSchema.parse(crm ?? {}).cliente_pela_agenda === true;
+}
+
+/**
+ * A OPÇÃO "ATENDENTES PODEM MEXER NA AGENDA DOS COLEGAS" (migration 0343,
+ * issue #978) — a agenda como opção POR ORGANIZAÇÃO, LIGADA POR PADRÃO.
+ *
+ * Com ela DESLIGADA, o Atendente só mexe no compromisso de que é dono; Gerente
+ * e Administrador seguem mexendo em tudo. Ligada, tudo é como sempre foi.
+ *
+ * ⚠️ A RÉGUA É "SÓ O `false` EXPLÍCITO DESLIGA", e é a MESMA do banco, que lê
+ * `(settings->'colegas_podem_mexer_na_agenda') is distinct from 'false'::jsonb`
+ * em `fn_colegas_podem_mexer_na_agenda`. Ausente — toda organização que já
+ * existia antes desta migration —, `true`, a string `"true"` ou qualquer lixo
+ * contam como LIGADO aqui e lá. É o que faz "padrão ligado" ser literalmente
+ * "quem já instalou não vê mudança nenhuma". Se as duas réguas divergissem, a
+ * tela mostraria desligada uma regra que o banco aplica — ou o contrário.
+ *
+ * ⚠️ NÃO mora em `settings.agenda`, e isso é decisão, não acaso:
+ * `fn_agenda_settings` SUBSTITUI o objeto `settings.agenda` inteiro e recusa
+ * chave que não sejam as duas que ele conhece, então a chave seria recusada por
+ * ele e apagada na primeira vez que um Gerente salvasse os prazos. Chave
+ * própria de topo, no mesmo espírito do `settings.crm` da migration 0262.
+ *
+ * Nunca lança: a tela mostra a regra que o banco aplica, e um jsonb torto não
+ * pode derrubar Configurações.
+ */
+export function colegasPodemMexerNaAgendaLigado(settings: unknown): boolean {
+  const raiz =
+    settings && typeof settings === "object" && !Array.isArray(settings)
+      ? (settings as Record<string, unknown>)
+      : undefined;
+  return raiz?.colegas_podem_mexer_na_agenda !== false;
 }

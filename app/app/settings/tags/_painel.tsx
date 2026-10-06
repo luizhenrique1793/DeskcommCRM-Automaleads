@@ -2,7 +2,8 @@
 
 /**
  * O painel da tela de Tags: a lista do vocabulário com o PESO de cada etiqueta e
- * as três operações (issue #852, fatia S4).
+ * as operações — renomear, juntar, excluir (issue #852, fatia S4) e a cor
+ * (issue #1271, fatia S6).
  *
  * ── Por que cada linha abre com os números, e não com o botão ───────────────
  *
@@ -19,8 +20,27 @@
  * então a confirmação diz exatamente o que sai, com o número na frente. As
  * regras `add_tag` NÃO são apagadas pela exclusão (decisão de outra tela, com o
  * runbook do agente na mão); o aviso informa quantas continuam escrevendo.
+ *
+ * ── Por que a cor mora NESTA tela, e não numa tela de aparência ─────────────
+ *
+ * Cor de etiqueta parece cosmético e não é: é a informação que faz o operador
+ * achar "reclamação" numa fila de duzentas conversas antes de ler o texto, e é a
+ * que denuncia a duplicata que a contagem de uso não mostra ("orçamento" e
+ * "orçamento novo" em dois tons do mesmo verde). O lugar de decidir isso é a
+ * tela que já responde "onde esta etiqueta está usada" — não um painel de tema,
+ * porque quem escolhe a cor aqui é quem arruma o vocabulário.
+ *
+ * ── Por que os tons têm NOME, e a fileira não é um seletor de cor ───────────
+ *
+ * A fileira oferece oito tons medidos (`PALETA_DE_ETIQUETAS`), não um seletor
+ * livre: seletor livre recria em cada instalação o problema que esta tela veio
+ * consertar. Cada tom tem nome porque cor não é o único jeito de escolher —
+ * quem não distingue matiz (ou está com o brilho no mínimo) escolhe por
+ * "Âmbar"/"Roxo", e o leitor de tela anuncia o mesmo. É a régua de redundância
+ * não-cromática que o design system já usa nos estados.
  */
 import { useRouter } from "next/navigation";
+import { useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 
@@ -28,6 +48,10 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ChipDeEtiqueta } from "@/components/tags/ChipDeEtiqueta";
+import { invalidarCoresDasEtiquetas } from "@/components/tags/CoresDasEtiquetas";
+import { cn } from "@/lib/utils";
+import { PALETA_DE_ETIQUETAS, normalizarCorDeEtiqueta } from "@/lib/tags/cor-da-etiqueta";
 import { traduzir } from "@/lib/i18n/dicionario";
 import type { Idioma } from "@/lib/i18n/idiomas";
 import type { AcaoDeVocabulario, LinhaDeVocabulario } from "@/lib/schemas/tags";
@@ -49,9 +73,29 @@ import type { AcaoDeVocabulario, LinhaDeVocabulario } from "@/lib/schemas/tags";
  */
 const TETO_DA_LISTA = 500;
 
+/**
+ * O NOME DE CADA TOM DA PALETA, e o teste que impede os dois divergirem.
+ *
+ * `tests/unit/tags-cor-de-etiqueta.test.ts` cobra que este mapa tenha
+ * EXATAMENTE as chaves de `PALETA_DE_ETIQUETAS`. Sem ele, acrescentar um tom à
+ * paleta deixaria um quarto círculo mudo na fileira (o `?? tom` abaixo cobre a
+ * tela, mas o nome iria embora em silêncio) — o mesmo defeito que o `TETO_DA_LISTA`
+ * previne para o `limit` do SQL.
+ */
+const NOME_DO_TOM: Record<string, string> = {
+  "#ffe629": "Amarelo",
+  "#ffb224": "Âmbar",
+  "#cf3716": "Vermelho",
+  "#00655a": "Verde-água",
+  "#0091ff": "Azul",
+  "#3e63dd": "Índigo",
+  "#ab4aba": "Roxo",
+  "#6f6f6f": "Cinza",
+};
+
 /** Cada recusa do servidor vira uma frase que diz O QUE FAZER. */
 const ERRO_EM_PORTUGUES: Record<string, string> = {
-  validation_failed: "Confira a etiqueta e o novo nome.",
+  validation_failed: "Confira a etiqueta, o novo nome e a cor.",
   forbidden: "Só um gerente ou administrador da organização pode mudar as etiquetas.",
   unauthenticated: "Sua sessão expirou. Entre de novo.",
   mfa_required: "Confirme o segundo fator para mudar as etiquetas.",
@@ -61,9 +105,11 @@ const ERRO_EM_PORTUGUES: Record<string, string> = {
 export function PainelDeTags({ tags, idioma }: { tags: LinhaDeVocabulario[]; idioma: Idioma }) {
   const t = (texto: string) => traduzir(texto, idioma);
   const router = useRouter();
+  const queryClient = useQueryClient();
   const [alvo, setAlvo] = useState<LinhaDeVocabulario | null>(null);
   const [acao, setAcao] = useState<AcaoDeVocabulario>("renomear");
   const [destino, setDestino] = useState("");
+  const [cor, setCor] = useState<string | null>(null);
   const [ocupado, setOcupado] = useState(false);
 
   const destinos = useMemo(
@@ -75,6 +121,12 @@ export function PainelDeTags({ tags, idioma }: { tags: LinhaDeVocabulario[]; idi
     setAlvo(linha);
     setAcao(qual);
     setDestino("");
+    // A cor já vem do servidor (`linha.cor`): a fileira abre com a escolha atual
+    // marcada. Sem isso, abrir a cor de uma etiqueta que JÁ tem uma faria parecer
+    // que ela não tem nenhuma, e "Confirmar" apagaria o que estava lá. Lida pela
+    // normalização porque `linha.cor` vem crua do SQL: uma etiqueta com o tom
+    // antigo da #2373 abre com o tom novo marcado.
+    setCor(qual === "definir_cor" ? normalizarCorDeEtiqueta(linha.cor) : null);
   }
 
   async function enviar() {
@@ -84,7 +136,15 @@ export function PainelDeTags({ tags, idioma }: { tags: LinhaDeVocabulario[]; idi
       const resposta = await fetch("/api/v1/tags/vocabulario", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ acao, tag: alvo.tag, destino: destino || null }),
+        // `cor` só viaja na ação que fala dela: o servidor recusa o campo nas
+        // outras (`cor_invalida_para_acao`), e mandar sempre faria a tela
+        // depender de o servidor ignorar o que não pediu.
+        body: JSON.stringify({
+          acao,
+          tag: alvo.tag,
+          destino: destino || null,
+          ...(acao === "definir_cor" ? { cor } : {}),
+        }),
       });
       const corpo = (await resposta.json().catch(() => null)) as
         | { data?: Record<string, number | string | boolean | null>; error?: { code?: string } }
@@ -95,6 +155,17 @@ export function PainelDeTags({ tags, idioma }: { tags: LinhaDeVocabulario[]; idi
         return;
       }
       const dados = corpo?.data ?? {};
+      if (acao === "definir_cor") {
+        // Escrever a cor é o ÚNICO caso em que esta tela muda o que outra tela
+        // mostra: o chip da lista de conversas, o funil e os filtros leem o mapa
+        // do provider. Sem esta invalidação o operador trocaria a cor, voltaria
+        // para o Inbox e veria a antiga até o `staleTime` de 5 min vencer.
+        invalidarCoresDasEtiquetas(queryClient);
+        toast.success(t("Cor da etiqueta atualizada."));
+        setAlvo(null);
+        router.refresh();
+        return;
+      }
       const alterados =
         Number(dados.contatos ?? 0) + Number(dados.leads ?? 0) + Number(dados.conversas ?? 0);
       // ⚠️ O DADO ENTRA FORA DO `t()`. `traduzir()` casa a string EXATA, então
@@ -150,10 +221,16 @@ export function PainelDeTags({ tags, idioma }: { tags: LinhaDeVocabulario[]; idi
             {tags.map((linha) => (
               <tr key={linha.tag} className="border-t border-border/60">
                 <td className="p-3">
-                  <span className="font-medium">{linha.tag}</span>
+                  {/* A cor do SERVIDOR, não a do cache do chip: esta lista acabou
+                      de ler o vocabulário, e mostrar o que a outra leitura
+                      devolveu seria a tela discordando de si mesma por alguns
+                      segundos. */}
+                  <ChipDeEtiqueta tag={linha.tag} cor={linha.cor} />
                   {!linha.no_vocabulario && (
                     // Em uso e fora do vocabulário curado: existe em algum
-                    // registro sem passar por nenhuma tela de cadastro.
+                    // registro sem passar por nenhuma tela de cadastro. Dar cor
+                    // (o botão ao lado) traz a etiqueta para o vocabulário —
+                    // escolher como ela aparece É curá-la.
                     <span className="ml-2 rounded-md bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
                       {t("em uso, fora do vocabulário")}
                     </span>
@@ -170,6 +247,9 @@ export function PainelDeTags({ tags, idioma }: { tags: LinhaDeVocabulario[]; idi
                   )}
                 </td>
                 <td className="flex flex-wrap gap-2 p-3">
+                  <Button size="sm" variant="outline" onClick={() => abrir(linha, "definir_cor")}>
+                    {t("Cor")}
+                  </Button>
                   <Button size="sm" variant="outline" onClick={() => abrir(linha, "renomear")}>
                     {t("Renomear")}
                   </Button>
@@ -215,6 +295,12 @@ export function PainelDeTags({ tags, idioma }: { tags: LinhaDeVocabulario[]; idi
                 {t("conversa(s).")}
               </>
             )}
+            {acao === "definir_cor" && (
+              <>
+                {t("Cor")} <strong>{alvo.tag}</strong>{" "}
+                {t("nas listas e nos filtros:")}
+              </>
+            )}
           </p>
 
           {acao === "excluir" ? (
@@ -243,6 +329,47 @@ export function PainelDeTags({ tags, idioma }: { tags: LinhaDeVocabulario[]; idi
                 ))}
               </select>
             </div>
+          ) : acao === "definir_cor" ? (
+            <div className="flex flex-col gap-3">
+              <Label>{t("Cor da etiqueta")}</Label>
+              <div className="flex flex-wrap items-center gap-2">
+                {PALETA_DE_ETIQUETAS.map((tom) => (
+                  <button
+                    key={tom}
+                    type="button"
+                    onClick={() => setCor(tom)}
+                    aria-pressed={cor === tom}
+                    // O nome do tom é o rótulo acessível; a cor é reforço. Quem
+                    // escolhe por "Âmbar" e quem escolhe pelo círculo chegam ao
+                    // mesmo lugar.
+                    aria-label={t(NOME_DO_TOM[tom] ?? tom)}
+                    title={tom}
+                    className={cn(
+                      "size-7 rounded-full border-2 transition-transform",
+                      cor === tom
+                        ? "border-foreground ring-2 ring-ring ring-offset-1 ring-offset-background"
+                        : "border-transparent hover:scale-110",
+                    )}
+                    style={{ backgroundColor: tom }}
+                  />
+                ))}
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={cor === null ? "default" : "outline"}
+                  aria-pressed={cor === null}
+                  onClick={() => setCor(null)}
+                >
+                  {t("Sem cor")}
+                </Button>
+              </div>
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <span>{t("Prévia:")}</span>
+                {/* A prévia usa o TOM SELECIONADO antes de salvar: escolher cor
+                    por paleta sem ver o resultado no próprio chip é adivinhação. */}
+                <ChipDeEtiqueta tag={alvo.tag} cor={cor} />
+              </div>
+            </div>
           ) : (
             <div className="flex flex-col gap-2">
               <Label htmlFor="novo-nome-da-tag">{t("Novo nome")}</Label>
@@ -259,7 +386,7 @@ export function PainelDeTags({ tags, idioma }: { tags: LinhaDeVocabulario[]; idi
           <div className="flex gap-2">
             <Button
               onClick={enviar}
-              disabled={ocupado || (acao !== "excluir" && destino.trim().length === 0)}
+              disabled={ocupado || (acao !== "excluir" && acao !== "definir_cor" && destino.trim().length === 0)}
               variant={acao === "excluir" ? "destructive" : "default"}
             >
               {ocupado ? t("Aplicando...") : t("Confirmar")}

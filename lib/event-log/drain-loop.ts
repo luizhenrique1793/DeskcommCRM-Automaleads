@@ -3,8 +3,9 @@
  *
  * ─── Por que ele existe ──────────────────────────────────────────────────────
  *
- * Os 12 handlers de `register-handlers.ts` (mídia, branding, follow-up…) só
- * tinham UM acionador: o cron `app/api/v1/cron/event-log-drain`, agendado
+ * Os handlers de `register-handlers.ts` (mídia, branding, follow-up, aviso ao
+ * suporte…) só tinham UM acionador: o cron `app/api/v1/cron/event-log-drain`,
+ * agendado
  * `* * * * *` em `docker/scheduler/entrypoint.sh`. Um tick por minuto.
  *
  * Isso é caro quando a cadeia tem mais de um salto. Medido nesta VPS em
@@ -43,6 +44,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 import type { Logger } from '@/lib/agent-engine/obs/logger';
+import { sincronizarAvisoDoLacoDeEventLog } from '@/lib/event-log/aviso-do-laco';
 // `import type` e nunca import de valor: em runtime esta linha desaparece, e é
 // isso que mantém a cadeia que termina em `@/lib/env` fora do boot do worker.
 import type { DrainSummary } from '@/lib/event-log/drain';
@@ -123,14 +125,26 @@ export function _reiniciarProntidaoDoLaco(): void {
  * produção quebrava.
  */
 export async function carregarDepsDoLaco(log: Logger): Promise<Deps | null> {
+  let adminParaAviso: SupabaseClient | null = null;
+
   try {
+    // O admin sobe PRIMEIRO de propósito: se um import posterior do drain ou dos
+    // handlers quebrar, ainda existe um canal independente para contar o
+    // incidente na Central. Se o próprio admin não subir, o /healthz + log.error
+    // continuam sendo as redes de segurança e a notificação vira best-effort.
+    const { createAdminClient } = await import('@/lib/supabase/admin');
+    adminParaAviso = createAdminClient();
     const { drainEventLog } = await import('@/lib/event-log/drain');
     const { ensureHandlersRegistered } = await import('@/lib/event-log/register-handlers');
-    const { createAdminClient } = await import('@/lib/supabase/admin');
     ensureHandlersRegistered();
-    const deps: Deps = { drainEventLog, admin: createAdminClient() };
+
+    const deps: Deps = { drainEventLog, admin: adminParaAviso };
+    // A prontidão sai ANTES de resolver o aviso antigo: ela depende só das deps,
+    // e o round-trip até a Central não pode deixar o /healthz dizendo
+    // `carregado:false` com o laço já montado.
     prontidao = { carregado: true, motivo: null };
     log.info(MARCA_LACO_CARREGADO, { carregado: true });
+    await sincronizarAvisoDoLacoDeEventLog(adminParaAviso, 'saudavel', log);
     return deps;
   } catch (err) {
     const motivo = (err instanceof Error ? err.message : String(err)).slice(0, 300);
@@ -139,10 +153,21 @@ export async function carregarDepsDoLaco(log: Logger): Promise<Deps | null> {
     // aviso. Com `warn` o defeito da #648 era indistinguível de ruído por dez
     // dias; agora ele é o que o gate procura no log e o que o `/healthz`
     // publica em `event_log_drain`.
+    //
+    // Não nomeia mais "admin client": `drain`, `register-handlers` OU o admin
+    // podem ter sido a dependência que falhou. Acusar uma só manda o operador
+    // investigar o componente errado.
     log.error(
-      'event-log drain OFF — não consegui montar o admin client; os handlers seguem só pelo cron event-log-drain',
+      'event-log drain OFF — falha ao carregar dependências do laço; os handlers seguem só pelo cron event-log-drain',
       { error: motivo },
     );
+
+    // Sem o admin client não há por onde avisar a Central: tentar de novo
+    // falharia pelo mesmo motivo. O /healthz e o log.error acima seguem sendo
+    // o sinal.
+    if (adminParaAviso) {
+      await sincronizarAvisoDoLacoDeEventLog(adminParaAviso, 'degradado', log);
+    }
     return null;
   }
 }

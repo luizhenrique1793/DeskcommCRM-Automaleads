@@ -36,10 +36,14 @@ function operationTitle(operation: ExtensionOperationView, t: (texto: string) =>
       return t("Remoção");
     case "configure":
       return t("Configuração");
+    case "module_install":
+      return t("Instalação de módulo");
   }
 }
 
 function operationSubject(operation: ExtensionOperationView, t: (texto: string) => string): string {
+  // O recibo de módulo não tem editor: `name` é o nome do módulo, e `publisher` fica nulo.
+  if (operation.kind === "module_install" && operation.name) return t("Módulo {nome}").replace("{nome}", operation.name);
   if (!operation.publisher || !operation.name) return t("Operação da plataforma");
   const identity = `${operation.publisher}/${operation.name}`;
   const count = operation.organizations_affected;

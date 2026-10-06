@@ -84,13 +84,45 @@ function publicarNoProcesso(env: Record<string, string>): Record<string, string>
   return env;
 }
 
-// Porta do dev server sob teste. Default 3001; sobrescreva com E2E_PORT quando
-// a 3001 já estiver ocupada por outro checkout/worktree.
+/**
+ * O `.env.e2e` é publicado ANTES de a porta ser decidida — e a ordem é o
+ * conserto, não estilo.
+ *
+ * ## O defeito, medido em 2026-09-18 na bancada do épico "casos vivos"
+ *
+ * `publicarNoProcesso` era chamado lá embaixo, dentro de `webServer.env`, e
+ * `PORT` era lido aqui em cima. O Playwright carrega este arquivo DUAS vezes —
+ * uma no processo que orquestra (e sobe o `webServer`) e outra em cada worker,
+ * que herda o `process.env` já publicado pela primeira. Resultado, com
+ * `E2E_PORT=3107` escrito no `.env.e2e` e ausente no shell:
+ *
+ *   processo principal → PORT 3001 → sobe `next start --port 3001`, checa 3001
+ *   worker             → PORT 3107 → `page.goto` em localhost:3107
+ *
+ * Os dois lados do mesmo arquivo resolvendo a mesma chave para valores
+ * diferentes — exatamente o modo de falha que o comentário do `webServer` já
+ * documenta para `INTERNAL_SECRET`, aqui aplicado à PORTA. O sintoma é
+ * `ERR_CONNECTION_REFUSED` no primeiro `goto` com um servidor saudável no ar,
+ * e ele não aponta para lugar nenhum perto daqui.
+ *
+ * `scripts/gerar-env-e2e.sh` não escreve `E2E_PORT` hoje, então o CI nunca
+ * pisou nisto — mas o arquivo já grava `NEXT_PUBLIC_APP_URL` COM a porta
+ * dentro, e quem põe as duas juntas (qualquer bancada em porta própria) cai na
+ * armadilha. Publicar primeiro faz o `.env.e2e` ser a fonte única também para
+ * a porta; o shell continua vencendo, porque `publicarNoProcesso` só preenche
+ * chave ausente.
+ */
+const ENV_DO_E2E = publicarNoProcesso(envDoE2E());
+
+// Porta do dev server sob teste. Default 3001; sobrescreva com E2E_PORT (no
+// shell ou no próprio `.env.e2e`) quando a 3001 já estiver ocupada por outro
+// checkout/worktree.
 const PORT = process.env.E2E_PORT ?? "3001";
 const BASE_URL = `http://localhost:${PORT}`;
 
 export default defineConfig({
   testDir: "./tests/e2e",
+  globalTeardown: "./tests/e2e/global-teardown.ts",
   timeout: 30_000,
   fullyParallel: false,
   /**
@@ -132,7 +164,15 @@ export default defineConfig({
   webServer: {
     // Produção (`next build` antes!): dev-server compila por rota (40-80s) e
     // Turbopack dev quebra cookies() fora do request scope — inviável p/ e2e.
-    command: `pnpm exec next start --port ${PORT}`,
+    // `--keepAliveTimeout`: o MESMO valor do `KEEP_ALIVE_TIMEOUT` do Dockerfile
+    // (lá está o porquê; `tests/unit/keep-alive-do-servidor.test.ts` prende os
+    // dois). Com o padrão do Node, o servidor fecha a conexão ociosa aos 6 s
+    // (5 s + 1 s de `keepAliveTimeoutBuffer`), e o `page.request` do Playwright
+    // — agente keep-alive SEM prazo de ociosidade — reaproveita o socket no
+    // instante em que ele morre: `ECONNRESET`/`socket hang up` num GET depois
+    // de ~6 s sem chamada de API (medido: 5988 e 5998 ms nas runs 36069450590 e
+    // 36188123417).
+    command: `pnpm exec next start --port ${PORT} --keepAliveTimeout 125000`,
     // O ambiente do servidor sob teste vem do `.env.e2e`, INJETADO aqui — e não
     // do `.env.local`, que num checkout de trabalho aponta para PRODUÇÃO.
     // Variável de ambiente real tem precedência sobre os arquivos `.env*` que o
@@ -145,7 +185,7 @@ export default defineConfig({
     // `publicarNoProcesso` acima que garante que o `process.env` do runner tenha
     // o que aquele conserto precisa: sem ele, num worktree sem `.env.local`, o
     // seed não tinha NENHUMA das duas fontes.
-    env: publicarNoProcesso(envDoE2E()),
+    env: ENV_DO_E2E,
     url: BASE_URL,
     // false: reusar um server que já ocupa a porta pode ser OUTRO processo
     // (ex.: bundle do Remotion na 3000) — o teste precisa do NOSSO next start.

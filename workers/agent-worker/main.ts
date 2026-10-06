@@ -32,12 +32,13 @@ import { StaleServiceBoundaryError } from "@/lib/atendimento/fronteira";
 // Mesma lógica de `sentry.server.config.ts`/`sentry.edge.config.ts`
 // (reaproveitada, não duplicada): DSN resolvido por `resolveSentryDsn`,
 // amostragem de trace condicionada ao Sentry da comunidade via
-// `isCommunityDsn` (issue #100), e os hooks de scrub de `lib/sentry/scrub.ts`.
+// `isCommunityDsn` (issue #100), e a coleta restrita + scrub de
+// `lib/sentry/privacidade.ts`.
 // O `@sentry/nextjs` funciona fora do Next — aqui é só `Sentry.init` puro,
 // sem `instrumentation.ts` porque o worker não é um processo Next.
 import * as Sentry from "@sentry/nextjs";
 import { resolveSentryDsn, isCommunityDsn, DEFAULT_SENTRY_DSN } from "@/lib/sentry/dsn";
-import { sentryScrubHooks } from "@/lib/sentry/scrub";
+import { opcoesDePrivacidade } from "@/lib/sentry/privacidade";
 
 const sentryDsn = resolveSentryDsn(process.env.SENTRY_DSN);
 const sentryCommunity = isCommunityDsn(sentryDsn);
@@ -47,10 +48,9 @@ Sentry.init({
 
   // No Sentry da comunidade, só erro (issue #100). Ver isCommunityDsn().
   tracesSampleRate: sentryCommunity ? 0 : 1,
-  enableLogs: true,
-  sendDefaultPii: false,
 
-  ...sentryScrubHooks,
+  // Coleta restrita + scrub, num ponto só (Sentry 11 coleta amplo por default).
+  ...opcoesDePrivacidade,
 });
 
 // Transparência de telemetria (mesma mensagem de sentry.server.config.ts,
@@ -85,6 +85,10 @@ import { completeTurnForEnrollment, createPgAdminClient } from "@/lib/followup/t
 import { seedPlatformPlaybook } from "@/lib/agent-engine/agent/playbook-seed";
 import { runCronLoop } from "@/lib/agent-engine/cron/scheduler";
 import { createPool } from "@/lib/agent-engine/db/pool";
+import {
+  carregarComportamentoPorPool,
+  pisoDoComportamentoDoMotor,
+} from "@/lib/instalacao/comportamento-sql";
 import { runDrainLoop } from "@/lib/agent-engine/edge/crm/drain";
 import { runEventLogDrainLoop, prontidaoDoLacoDeEventLog } from "@/lib/event-log/drain-loop";
 import { crmEdgeConfigFromEnv } from "@/lib/agent-engine/edge/crm/mcp-client";
@@ -95,6 +99,7 @@ import { runHealthLoop } from "@/lib/agent-engine/health/circuit";
 import { runFlywheelLoop } from "@/lib/agent-engine/flywheel/live";
 import { llmEdgeConfigFromEnv } from "@/lib/agent-engine/edge/llm/run-model-call";
 import { loadEnv, type Env } from "@/lib/agent-engine/env";
+import { urlDoSupabaseNoServidor } from "@/lib/supabase/url-do-servidor";
 import { createLogger, type Logger } from "@/lib/agent-engine/obs/logger";
 import {
   evaluateCacheHitAlert,
@@ -103,6 +108,14 @@ import {
   type CacheAlertKnobs,
 } from "@/lib/agent-engine/obs/metrics";
 import { rodarLoopDaFila } from "@/lib/agent-engine/queue/loop";
+import {
+  adiarAteORecarregar,
+  avisarFaltaDeSaldo,
+  deveEsperarSaldo,
+  encerrarAvisoDeFaltaDeSaldo,
+  esperouPorSaldo,
+  jaNaoHaOQueResponder,
+} from "@/lib/agent-engine/queue/espera-de-saldo";
 import {
   cancelJob,
   claimJobs,
@@ -277,6 +290,13 @@ export async function startWorker(
     log.warn("órfãos soltos no boot", bootReap);
   }
 
+  // O comportamento da INSTALAÇÃO entra no processo ANTES dos laços que
+  // consomem turnos: a releitura abaixo só acontece no primeiro tique do reaper
+  // (QUEUE_REAPER_INTERVAL_MS, 60 s por padrão), e até lá o orçamento e os knobs
+  // do turno responderiam com o piso do `.env`, não com a escolha da tela.
+  // Nunca lança: sem leitura boa, vale o piso — o comportamento de antes.
+  await carregarComportamentoPorPool(pool, pisoDoComportamentoDoMotor(env));
+
   const server = createHealthzServer(pool, log, env.METRICS_WINDOW_MS);
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -289,6 +309,14 @@ export async function startWorker(
   const inFlight = new Set<Promise<void>>();
 
   const reaperTimer = setInterval(() => {
+    // Recarrega o comportamento da INSTALAÇÃO no ritmo do reaper: é o que faz
+    // uma escolha feita na tela de admin alcançar ESTE processo sem restart
+    // (issue #1034). O memo de 30 s evita ir ao banco a cada tique, e o
+    // carregador nunca lança — o `.catch` cobre o caso impossível sem deixar
+    // rejeição solta (o worker morre com promise rejeitada não tratada).
+    carregarComportamentoPorPool(pool, pisoDoComportamentoDoMotor(env)).catch((err: unknown) =>
+      log.error("comportamento da instalação: releitura falhou", { error: errMsg(err) }),
+    );
     reapExpiredJobs(pool, { visibilityTimeoutMs: env.QUEUE_VISIBILITY_TIMEOUT_MS })
       .then((reaped) => {
         if (reaped.revived + reaped.dead > 0) log.warn("reaper devolveu jobs órfãos", reaped);
@@ -434,9 +462,27 @@ export async function startWorker(
         await handler(job, pool, { workerId });
         return;
       }
+      // Voltou de uma espera de saldo (`espera-de-saldo.ts`): se, enquanto a IA
+      // esperava, alguém do nosso lado já respondeu o cliente, não há o que
+      // responder — sair agora seria repetir quem já atendeu.
+      if (esperouPorSaldo(job) && (await jaNaoHaOQueResponder(pool, job))) {
+        await completeJob(pool, job.id, workerId, undefined, claimOfJob(job)?.acquired_at);
+        log.info("job encerrado: a conversa foi respondida enquanto a IA esperava saldo", {
+          job_id: job.id,
+          kind: job.kind,
+        });
+        return;
+      }
       await withServiceJob(pool, job, () => handler(job, pool, { workerId }));
       await completeJob(pool, job.id, workerId, undefined, claimOfJob(job)?.acquired_at);
       log.info("job concluído", { job_id: job.id, kind: job.kind });
+      if (esperouPorSaldo(job)) {
+        try {
+          await encerrarAvisoDeFaltaDeSaldo(pool, job.organization_id);
+        } catch (avisoErr) {
+          log.error("aviso de falta de saldo não foi encerrado", { job_id: job.id, error: errMsg(avisoErr) });
+        }
+      }
       try {
         const wrote = await recordRunMetrics(pool, job);
         if (wrote > 0) {
@@ -470,6 +516,31 @@ export async function startWorker(
             claimOfJob(job)?.acquired_at ?? null,
           ],
         );
+        return;
+      }
+      // Conta do provedor sem crédito: a resposta espera a recarga, sem gastar
+      // tentativa, até o teto de `espera-de-saldo.ts` — e a Central diz a causa.
+      // Passado o teto, segue o caminho comum abaixo (`failJob` → `job_dead`).
+      if (deveEsperarSaldo(job, err)) {
+        log.warn("provedor de IA sem saldo — resposta esperando a recarga", {
+          job_id: job.id,
+          kind: job.kind,
+          error: errMsg(err),
+        });
+        try {
+          await avisarFaltaDeSaldo(pool, job.organization_id, err);
+        } catch (avisoErr) {
+          log.error("aviso de falta de saldo não entrou na Central", { job_id: job.id, error: errMsg(avisoErr) });
+        }
+        try {
+          await adiarAteORecarregar(pool, job, workerId, err, claimOfJob(job)?.acquired_at);
+        } catch (adiarErr) {
+          log.error("espera de saldo indisponível — lease expira via reaper", {
+            job_id: job.id,
+            error: errMsg(adiarErr),
+          });
+          Sentry.captureException(adiarErr);
+        }
         return;
       }
       const terminal = err instanceof StaleServiceBoundaryError || ehVetoPermanenteDeNegocio(err);
@@ -624,7 +695,7 @@ export async function main(): Promise<void> {
   const handlers = new Map<JobKind, JobHandler>();
   const turnDeps: FollowupTurnDeps = {
     crmCfg: crmEdgeConfigFromEnv({
-      SUPABASE_URL: env.NEXT_PUBLIC_SUPABASE_URL,
+      SUPABASE_URL: urlDoSupabaseNoServidor(env.SUPABASE_SERVER_URL, env.NEXT_PUBLIC_SUPABASE_URL),
       SUPABASE_SERVICE_ROLE_KEY: env.SUPABASE_SERVICE_ROLE_KEY,
     }),
     llmCfg: llmEdgeConfigFromEnv(env),

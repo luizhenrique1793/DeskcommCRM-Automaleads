@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type * as ModuloDeTranscricao from "@/lib/messaging/media/transcription";
+
 /**
  * Issue #855 — o worker de mídia ignorava a `base_url` do binding de visão.
  *
@@ -110,11 +112,17 @@ vi.mock("@/lib/messaging/media/derive", () => ({
 }));
 
 // A credencial do binding resolve — o que está sob teste é o que o worker faz
-// com ela, não a resolução em si.
+// com ela, não a resolução em si. A ORIGEM da chave é o degrau da escada que o
+// resolvedor escolheu (provado em `lib/agent-engine/edge/llm/credentials.test.ts`)
+// e cada caso a escolhe aqui; o padrão é a credencial da própria organização.
+const credencial = vi.hoisted(() => ({
+  origemDaChave: "credencial_da_organizacao" as "credencial_da_organizacao" | "chave_da_instalacao",
+}));
 vi.mock("@/lib/agent-engine/edge/llm/credentials", () => ({
   resolveOrgLlmConfig: vi.fn(async () => ({
     provider: "openrouter",
     apiKey: "chave-do-binding",
+    origemDaChave: credencial.origemDaChave,
     defaultModel: "gpt-5",
     params: {},
     enabledModels: [],
@@ -145,7 +153,10 @@ vi.mock("ai", () => ({
   generateText: vi.fn(async () => ({ text: "descrição de mentira" })),
 }));
 
-vi.mock("@/lib/messaging/media/transcription", () => ({
+vi.mock("@/lib/messaging/media/transcription", async (importOriginal) => ({
+  // As funções puras (modelo e idiomas em vigor) seguem REAIS: o worker as usa
+  // para montar o que vai ao provedor, e é isso que os casos conferem.
+  ...(await importOriginal<typeof ModuloDeTranscricao>()),
   // A referência é resolvida na CHAMADA, não na fábrica: `vi.mock` é içado para
   // o topo do arquivo e um `const` de módulo ainda não existe nesse momento.
   apiTranscriptionProvider: (cfg: unknown) => provedorDeTranscricaoMock(cfg),
@@ -155,7 +166,7 @@ vi.mock("@/lib/messaging/media/transcription", () => ({
 // —, e não pelo `process.env` cru: `vi.stubEnv` já não alcança esse caminho. O
 // módulo real continua inteiro; só as três chaves da transcrição passam a vir
 // de um objeto que cada caso controla.
-const transcricaoDoEnv = vi.hoisted(() => ({ apiKey: "", baseUrl: "", model: "" }));
+const transcricaoDoEnv = vi.hoisted(() => ({ apiKey: "", baseUrl: "", model: "", languages: "" }));
 vi.mock("@/lib/env", async (importOriginal) => {
   const real = await importOriginal<{ env: Env }>();
   return {
@@ -170,6 +181,12 @@ vi.mock("@/lib/env", async (importOriginal) => {
       get TRANSCRIPTION_MODEL() {
         return transcricaoDoEnv.model;
       },
+      get TRANSCRIPTION_LANGUAGES() {
+        return transcricaoDoEnv.languages;
+      },
+      get IA_DESTINOS_INTERNOS_PERMITIDOS() {
+        return destinosInternosDoEnv.valor;
+      },
     },
   };
 });
@@ -181,10 +198,11 @@ vi.mock("@/lib/env", async (importOriginal) => {
  * serviço nenhum", que segue transcrevendo pela chave da OpenAI.
  */
 function comTranscricaoNoEnv(t: Partial<typeof transcricaoDoEnv> = {}): void {
-  Object.assign(transcricaoDoEnv, { apiKey: "", baseUrl: "", model: "" }, t);
+  Object.assign(transcricaoDoEnv, { apiKey: "", baseUrl: "", model: "", languages: "" }, t);
 }
 
 import { deriveMessageMedia } from "@/workers/media-derive-worker";
+import { esquecerDestinosInternos } from "@/lib/automation/destinos-internos-autorizados";
 import { deriveMediaText, type DeriveDeps } from "@/lib/messaging/media/derive";
 import type { Env } from "@/lib/env";
 
@@ -211,12 +229,37 @@ function depsDaChamada(): DeriveDeps {
   return deps;
 }
 
+/** A lista de destinos internos autorizados pelo dono da instalação (#1004). */
+const destinosInternosDoEnv = vi.hoisted(() => ({ valor: "" }));
+
+/**
+ * Declara a lista do dono como o operador a escreve no `.env`. Quem a lê é o
+ * `env` do app — o mesmo caminho da transcrição acima —, então o caso controla
+ * por aqui, e não por `vi.stubEnv`.
+ */
+function comDestinosAutorizados(valor = ""): void {
+  destinosInternosDoEnv.valor = valor;
+}
+
+/** Os corpos já escritos na Central: é por onde a recusa deixa rastro. */
+function corposDaCentral(): string[] {
+  return inboxInsertMock.mock.calls.map((c) =>
+    String((c[0] as { body?: string } | undefined)?.body ?? ""),
+  );
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   vi.unstubAllEnvs();
   comTranscricaoNoEnv();
+  comDestinosAutorizados();
+  // A lista é memoizada em `globalThis` com TTL de 30s — sem isto, o primeiro
+  // caso que a lê decide a lista de todos os outros e a suíte fica verde por
+  // motivo nenhum.
+  esquecerDestinosInternos();
   dns.erro = null;
   dns.resposta = [{ address: "93.184.216.34", family: 4 }];
+  credencial.origemDaChave = "credencial_da_organizacao";
   bindingDaVez = BINDING_COM_ENDPOINT;
   linhaDaMensagem = {
     id: "msg1",
@@ -281,7 +324,66 @@ describe("worker de mídia: base_url do binding de visão (#855)", () => {
       apiKey: "chave-do-servico",
       baseUrl: "https://api.groq.com/openai/v1",
       model: "whisper-large-v3",
+      languages: [],
     });
+  });
+
+  // Trocar `whisper-1` por um modelo melhor da própria OpenAI não pode exigir
+  // copiar a chave da organização para o `.env`: modelo e idioma do ambiente
+  // valem também no caminho de sempre (sem TRANSCRIPTION_API_KEY).
+  it("sem serviço próprio, modelo e idioma do .env vão para a transcrição com a chave da organização", async () => {
+    comTranscricaoNoEnv({ model: "gpt-transcribe", languages: "es" });
+    linhaDaMensagem = {
+      ...linhaDaMensagem,
+      type: "audio",
+      media_mime: "audio/ogg",
+      media_storage_path: "org1/conv1/msg1.ogg",
+    };
+
+    await deriveMessageMedia(eventRow());
+
+    expect(provedorDeTranscricaoMock).toHaveBeenCalledWith(
+      expect.objectContaining({ model: "gpt-transcribe", languages: ["es"] }),
+    );
+    expect(provedorDeTranscricaoMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ baseUrl: expect.anything() }),
+    );
+  });
+
+  // Um `.env` antigo com o modelo do Groq e sem a chave própria transcrevia com
+  // whisper-1 pela OpenAI. O update não pode passar a pedir `whisper-large-v3`
+  // à OpenAI: o modelo do `.env` só vale nesse caminho sem BASE_URL.
+  it("modelo e BASE_URL de outro serviço sem a chave própria: segue whisper-1 na OpenAI", async () => {
+    comTranscricaoNoEnv({ model: "whisper-large-v3", baseUrl: "https://api.groq.com/openai/v1" });
+    linhaDaMensagem = {
+      ...linhaDaMensagem,
+      type: "audio",
+      media_mime: "audio/ogg",
+      media_storage_path: "org1/conv1/msg1.ogg",
+    };
+
+    await deriveMessageMedia(eventRow());
+
+    expect(provedorDeTranscricaoMock).toHaveBeenCalledWith(expect.objectContaining({ model: "whisper-1" }));
+    expect(provedorDeTranscricaoMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ baseUrl: expect.anything() }),
+    );
+  });
+
+  it("sem nada no .env, a transcrição segue com whisper-1 e sem idioma — o comportamento de sempre", async () => {
+    comTranscricaoNoEnv();
+    linhaDaMensagem = {
+      ...linhaDaMensagem,
+      type: "audio",
+      media_mime: "audio/ogg",
+      media_storage_path: "org1/conv1/msg1.ogg",
+    };
+
+    await deriveMessageMedia(eventRow());
+
+    expect(provedorDeTranscricaoMock).toHaveBeenCalledWith(
+      expect.objectContaining({ model: "whisper-1", languages: [] }),
+    );
   });
 
   it("recusa endereço de metadados no binding da visão e não manda a chave", async () => {
@@ -299,13 +401,16 @@ describe("worker de mídia: base_url do binding de visão (#855)", () => {
   });
 
   it("com endereço da organização e chave da INSTALAÇÃO, recusa antes de a chave sair", async () => {
-    // `resolveOrgLlmConfig` devolve "chave-do-binding" neste arquivo. Igualando
-    // a chave do .env a ela, reproduzimos o degrau real da escada de
-    // credenciais: a organização não tem credencial própria e o worker cai na
-    // chave da INSTALAÇÃO — enquanto o endereço continua sendo o que a
-    // organização escolheu no painel. É a combinação que manda a chave que paga
-    // a conta de todas as empresas para um endereço escolhido por uma delas.
-    vi.stubEnv("OPENROUTER_API_KEY", "chave-do-binding");
+    // O degrau real da escada de credenciais: a organização não tem credencial
+    // própria e o resolvedor cai na chave da INSTALAÇÃO — enquanto o endereço
+    // continua sendo o que a organização escolheu no painel. É a combinação que
+    // manda a chave que paga a conta de todas as empresas para um endereço
+    // escolhido por uma delas.
+    //
+    // Até a decisão 22-a entrar no chat, este caso igualava a chave do `.env`
+    // ao plaintext e o worker deduzia a origem por comparação. Agora quem
+    // responde é o resolvedor (`origemDaChave`), a mesma fonte do seam.
+    credencial.origemDaChave = "chave_da_instalacao";
     bindingDaVez = { ...BINDING_COM_ENDPOINT, base_url: "https://gateway.publico.exemplo/v1" };
     dns.resposta = [{ address: "93.184.216.34", family: 4 }];
 
@@ -324,10 +429,10 @@ describe("worker de mídia: base_url do binding de visão (#855)", () => {
 
   it("com endereço da organização e credencial DELA, segue enviando", async () => {
     // O controle que separa "recusa a combinação errada" de "recusou tudo":
-    // sem a chave da instalação no ambiente, a chave resolvida é a da
-    // organização e o endereço próprio continua valendo — que é o recurso que
-    // o #855 veio consertar.
-    vi.stubEnv("OPENROUTER_API_KEY", "");
+    // a chave resolvida é a da organização e o endereço próprio continua
+    // valendo — que é o recurso que o #855 veio consertar. Uma variável só
+    // muda em relação ao caso acima: a origem da chave.
+    credencial.origemDaChave = "credencial_da_organizacao";
     bindingDaVez = { ...BINDING_COM_ENDPOINT, base_url: "https://gateway.publico.exemplo/v1" };
     dns.resposta = [{ address: "93.184.216.34", family: 4 }];
 
@@ -410,5 +515,146 @@ describe("worker de mídia: base_url do binding de visão (#855)", () => {
     expect(provedorDeTranscricaoMock).not.toHaveBeenCalledWith(
       expect.objectContaining({ baseUrl: "https://api.groq.com/openai/v1" }),
     );
+  });
+  /**
+   * A decisão 22-d entrega a alavanca a quem PAGA a máquina — e o escopo
+   * corrigido de 17/09 diz exatamente até onde ela vai. Os seis casos abaixo
+   * são o item 7 da issue #1004, exercitados pelo caminho de produção (o worker
+   * de mídia), e não pela régua isolada:
+   *
+   *   1. interno não listado → recusa
+   *   2. listado, e configurado pela INSTALAÇÃO → passa
+   *   3. listado, mas configurado por uma ORGANIZAÇÃO → recusa
+   *   4. listado, mas com esquema/protocolo que as guardas recusam → recusa
+   *   5. nome cujo endereço resolvido está fora da lista → recusa
+   *   6. interno listado + chave da INSTALAÇÃO numa organização → continua recusando
+   *
+   * O que muda em relação ao PR original: ele autorizava por NOME, dispensava
+   * TODAS as guardas de uma vez e valia também para o endereço que a empresa
+   * escolhe no painel dela. Os casos 3, 4 e 5 são os que prendem as três
+   * correções — sem eles, a válvula devolveria a rede interna a quem a decisão
+   * 22-d diz que não pode alcançá-la.
+   *
+   * ⚠️ NÃO COBERTO, e de propósito: REDIRECIONAMENTO. O caminho de mídia não o
+   * trata hoje — medido na `main` em 18/09 (`git grep -n redirect` vazio em
+   * `workers/media-derive-worker.ts`, `lib/automation/outbound-url.ts` e
+   * `outbound-ip.ts`; controle positivo em `lib/agent-engine/edge/egress.ts` e
+   * `lib/automation/actions/call-webhook.ts`, que usam `redirect: "manual"`).
+   * O item 3 da issue manda "continuar valendo" uma guarda que não existe aqui;
+   * a limitação está escrita no comentário do dono na #1004 e segue ABERTA.
+   */
+  describe("#1004: destinos internos autorizados pela INSTALAÇÃO", () => {
+    it("1. interno que ninguém listou é recusado, e o aviso diz ONDE se libera", async () => {
+      comDestinosAutorizados();
+      comTranscricaoNoEnv({ apiKey: "chave-do-servico", baseUrl: "http://10.1.2.7:8080/v1" });
+
+      await deriveMessageMedia(eventRow());
+      const texto = await depsDaChamada().transcriber.transcribe(Buffer.from("ogg"), "audio/ogg");
+
+      expect(transcribeDoSvcMock, "a chave saiu para um endereço interno").not.toHaveBeenCalled();
+      expect(texto).not.toContain("transcrição de mentira");
+      const corpos = corposDaCentral();
+      expect(corpos.some((b) => b.includes("unsafe_url:private_host"))).toBe(true);
+      // Sem a porta escrita no aviso, quem pôs a IA na própria rede descobre a
+      // tela por tentativa e erro — que é o defeito de primeira impressão que a
+      // decisão manda fechar ("visível e fácil de acessar").
+      expect(corpos.some((b) => b.includes("Destinos internos"))).toBe(true);
+    });
+
+    it("2. interno listado, e configurado pela INSTALAÇÃO, passa", async () => {
+      comDestinosAutorizados("10.1.0.0/16");
+      comTranscricaoNoEnv({ apiKey: "chave-do-servico", baseUrl: "http://10.1.2.7:8080/v1" });
+
+      await deriveMessageMedia(eventRow());
+      const texto = await depsDaChamada().transcriber.transcribe(Buffer.from("ogg"), "audio/ogg");
+
+      expect(transcribeDoSvcMock).toHaveBeenCalledTimes(1);
+      expect(texto).toBe("transcrição de mentira");
+    });
+
+    it("3. o MESMO endereço listado, escolhido por uma ORGANIZAÇÃO, é recusado", async () => {
+      // O endereço do caso 2, palavra por palavra, no lugar onde quem escolhe é
+      // o admin da empresa. A decisão 22-d: "a empresa continua sem poder
+      // apontar para dentro sozinha".
+      comDestinosAutorizados("10.1.0.0/16");
+      vi.stubEnv("OPENROUTER_API_KEY", "");
+      bindingDaVez = { ...BINDING_COM_ENDPOINT, base_url: "http://10.1.2.7:8080/v1" };
+
+      await deriveMessageMedia(eventRow());
+      const texto = await depsDaChamada().describeImage(Buffer.from("jpeg"), "image/jpeg");
+
+      expect(factoryMock, "a lista da instalação autorizou o endereço da empresa").not.toHaveBeenCalled();
+      expect(texto).toBeTruthy();
+      const corpos = corposDaCentral();
+      expect(corpos.some((b) => b.includes("unsafe_url:private_host"))).toBe(true);
+      // E o aviso NÃO oferece a lista como saída aqui: oferecê-la mandaria o
+      // admin da empresa pedir ao dono algo que a decisão diz que ele não pode.
+      expect(corpos.some((b) => b.includes("escolhido pela empresa"))).toBe(true);
+    });
+
+    it("4. listado, mas com protocolo que as guardas recusam, continua recusado", async () => {
+      // Lista larga o bastante para cobrir tudo o que é IPv4 — e ainda assim o
+      // literal IPv6 não passa: a lista dispensa a recusa por endereço interno,
+      // e SÓ ela.
+      comDestinosAutorizados("0.0.0.0/0");
+      comTranscricaoNoEnv({ apiKey: "chave-do-servico", baseUrl: "http://[::1]:8080/v1" });
+
+      await deriveMessageMedia(eventRow());
+      const texto = await depsDaChamada().transcriber.transcribe(Buffer.from("ogg"), "audio/ogg");
+
+      expect(transcribeDoSvcMock).not.toHaveBeenCalled();
+      expect(texto).not.toContain("transcrição de mentira");
+      expect(corposDaCentral().some((b) => b.includes("unsafe_url:ipv6_literal"))).toBe(true);
+    });
+
+    it("5. nome que resolve para endereço FORA da lista é recusado", async () => {
+      comDestinosAutorizados("10.1.0.0/16");
+      comTranscricaoNoEnv({
+        apiKey: "chave-do-servico",
+        baseUrl: "https://coletor.interno.exemplo/v1",
+      });
+      dns.resposta = [{ address: "10.9.9.9", family: 4 }];
+
+      await deriveMessageMedia(eventRow());
+      const texto = await depsDaChamada().transcriber.transcribe(Buffer.from("ogg"), "audio/ogg");
+
+      expect(transcribeDoSvcMock, "decidiu pelo nome, sem olhar o endereço").not.toHaveBeenCalled();
+      expect(texto).not.toContain("transcrição de mentira");
+      expect(corposDaCentral().some((b) => b.includes("unsafe_url:private_ip"))).toBe(true);
+    });
+
+    it("6. interno listado, com a chave da INSTALAÇÃO numa organização, continua recusando", async () => {
+      // A lista autoriza ENDEREÇO, nunca credencial. O degrau que impede a
+      // chave que paga a conta de todas as empresas de sair para um endereço
+      // escolhido por uma delas (decisão 22-a) é independente desta lista.
+      //
+      // A origem da chave vem do resolvedor (`origemDaChave`), não mais da
+      // comparação com o `.env`. Com a origem padrão ("da organização") este
+      // caso vira uma cópia do 3 — quem recusa é a guarda de endereço — e a
+      // regra de credencial fica sem vigia.
+      comDestinosAutorizados("10.1.0.0/16");
+      credencial.origemDaChave = "chave_da_instalacao";
+      bindingDaVez = { ...BINDING_COM_ENDPOINT, base_url: "http://10.1.2.7:8080/v1" };
+
+      await deriveMessageMedia(eventRow());
+      const texto = await depsDaChamada().describeImage(Buffer.from("jpeg"), "image/jpeg");
+
+      expect(factoryMock).not.toHaveBeenCalled();
+      expect(texto).toBeTruthy();
+      expect(corposDaCentral().some((b) => b.includes("cadastre a chave da empresa"))).toBe(true);
+    });
+
+    it("CONTROLE: a lista não engole o caminho que já funcionava", async () => {
+      // Sem ele, uma implementação que recusasse TUDO deixaria os seis casos
+      // acima verdes — cinco deles esperam recusa.
+      comDestinosAutorizados("10.1.0.0/16");
+      comTranscricaoNoEnv({ apiKey: "chave-do-servico", baseUrl: "https://api.groq.com/openai/v1" });
+
+      await deriveMessageMedia(eventRow());
+      const texto = await depsDaChamada().transcriber.transcribe(Buffer.from("ogg"), "audio/ogg");
+
+      expect(transcribeDoSvcMock).toHaveBeenCalledTimes(1);
+      expect(texto).toBe("transcrição de mentira");
+    });
   });
 });

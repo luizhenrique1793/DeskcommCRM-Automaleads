@@ -50,6 +50,7 @@ import { duracaoLegivel } from "@/lib/followup/retorno";
 import { ApiError } from "@/lib/api/types";
 import { encerraDemanda } from "@/lib/leads/encerramento";
 import { carregaRadarDeRisco } from "@/lib/leads/radar-de-risco";
+import { contatoDoNegocio } from "@/lib/operacao/modelos-de-mensagem";
 import { propoeReativacao } from "@/lib/leads/reactivation";
 import { resolveStageWindow } from "@/lib/leads/risk-radar";
 import type { McpContext, McpToolDefinition } from "../types";
@@ -335,15 +336,44 @@ export const crmListFollowups: McpToolDefinition<typeof listarShape> = {
     "ou 'cancelado' (alguém desmarcou, com motivo_do_cancelamento). É por aqui que você descobre " +
     "que um humano desmarcou o retorno — se descobrir, NÃO reagende o mesmo retorno. " +
     "Lista RETORNOS INTERNOS, não compromissos com hora marcada. O mesmo cliente pode ter os dois, " +
-    "e não encontrar nada aqui não significa que ele não tenha um horário combinado.",
+    "e não encontrar nada aqui não significa que ele não tenha um horário combinado." +
+    " Em conversa de atendimento, lista apenas os retornos do contato desta conversa (sem lead_id " +
+    "nem contact_id, usa ele).",
   inputSchema: listarShape,
   category: "read",
   requiresRole: "agent",
   requiresScope: "mcp:read",
   handler: async (input, ctx) => {
+    // ── OS RETORNOS, DURANTE UM TURNO, SÃO OS DO CONTATO DESTA CONVERSA ─────
+    //
+    // Mesma regra de `crm_list_appointments`: sem alvo, o contato do turno;
+    // `contact_id` de outro e `lead_id` cujo dono não é o do turno caem na
+    // MESMA recusa — inclusive o alvo que não existe, que fora do turno tem
+    // ensino próprio e aqui viraria oráculo de existência. Sem contato do
+    // turno, nada muda.
+    const doTurno = ctx.contatoDoTurno;
+    const leadId = doTurno && input.lead_id === doTurno ? undefined : input.lead_id;
+    if (doTurno) {
+      const foraDoTurno =
+        (input.contact_id !== undefined && input.contact_id !== doTurno) ||
+        (leadId !== undefined &&
+          (await contatoDoNegocio(
+            { supabase: ctx.supabase, organizationId: ctx.organizationId, actor: ctx.actor, requestId: ctx.requestId },
+            leadId,
+          )) !== doTurno);
+      if (foraDoTurno) {
+        return {
+          permitido: false,
+          motivo: "fora_da_conversa",
+          mensagem:
+            "esta conversa é com outra pessoa — os retornos de quem não é este cliente não são seus " +
+            "para ver; siga a conversa com quem está falando.",
+        };
+      }
+    }
     const resultado = await listaRetornosNoCrm(
       { admin: ctx.supabase, orgId: ctx.organizationId, actor: ctx.actor, requestId: ctx.requestId },
-      { leadId: input.lead_id ?? null, contactId: input.contact_id ?? null },
+      { leadId: leadId ?? null, contactId: doTurno ?? input.contact_id ?? null },
       { limite: input.limit },
     );
 
@@ -396,7 +426,8 @@ export const crmListAtRiskLeads: McpToolDefinition<typeof radarShape> = {
     "acontecer — cada uma é alguém esperando sem previsão. Campos: contact_id, contact_name, " +
     "horas_aberta e origem. Essas NÃO saem sozinhas: resolva cada uma agendando um retorno " +
     "(crm_schedule_followup com contact_id) ou registrando o desfecho (crm_close_demand), " +
-    "conforme o caso. `total_sem_proximo_passo` cabe zerar; é o único número aqui cujo alvo é 0.",
+    "conforme o caso. `total_sem_proximo_passo` cabe zerar; é o único número aqui cujo alvo é 0." +
+    " Em conversa de atendimento, o radar cobre apenas o contato desta conversa.",
   inputSchema: radarShape,
   category: "read",
   requiresRole: "agent",
@@ -404,6 +435,9 @@ export const crmListAtRiskLeads: McpToolDefinition<typeof radarShape> = {
   handler: async (input, ctx) => {
     const radar = await carregaRadarDeRisco(ctx.supabase, {
       organizationId: ctx.organizationId,
+      // Escopo do turno nas CONSULTAS do radar, antes do corte: filtrar a
+      // página depois esconderia negócios do próprio cliente.
+      ...(ctx.contatoDoTurno ? { contactId: ctx.contatoDoTurno } : {}),
       limit: input.limit,
       ...(input.min_hours !== undefined ? { minHours: input.min_hours } : {}),
     });
@@ -561,6 +595,90 @@ export const crmProposeReactivation: McpToolDefinition<typeof reativacaoShape> =
       vence_em: proposta.expiresAt.toISOString(),
       mensagem:
         "sugestão registrada. Uma pessoa precisa aprovar antes de qualquer mensagem sair para o cliente.",
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// crm_enroll_followup_flow
+// ---------------------------------------------------------------------------
+
+const inscreverShape = {
+  contact_id: z.string().uuid(),
+  /** O fluxo em que inscrever. `crm_list_followups` não lista fluxos; o operador escolhe na tela e o prompt traz o id. */
+  flow_id: z.string().uuid(),
+};
+
+/**
+ * Inscreve o contato num fluxo de acompanhamento já publicado.
+ *
+ * ⚠️ POR QUE ELA EXISTE, e por que não é `crm_schedule_followup` com outro nome:
+ * aquela agenda UM toque e guarda a promessa em texto — quem decide o que dizer,
+ * quantas vezes insistir e quando desistir continua sendo o PROMPT. Esta entrega
+ * a cadência inteira ao fluxo, que é editável na tela, visível na fila e medido
+ * por desfecho. O agente contribui com o que só ele sabe (que o atendimento
+ * terminou sem o próximo horário marcado); o resto é configuração.
+ *
+ * ⚠️ RECUSA DE NEGÓCIO NÃO É EXCEÇÃO — mesma doutrina do cabeçalho deste arquivo.
+ * "Já existe um acompanhamento vivo para este contato" é a resposta mais comum
+ * (o índice único permite um por contato na organização inteira) e o modelo
+ * precisa aprender e seguir, não receber um erro que o faça tentar de novo igual.
+ */
+export const crmEnrollFollowupFlow: McpToolDefinition<typeof inscreverShape> = {
+  name: "crm_enroll_followup_flow",
+  description:
+    "Inscreve o cliente num acompanhamento já configurado (um fluxo), que cuida do resto: " +
+    "quando falar, o que dizer e quando parar. Use quando o atendimento terminou e ainda há " +
+    "um motivo para voltar a falar mais adiante — por exemplo, um retorno de manutenção. " +
+    "ISTO NÃO FALA COM O CLIENTE AGORA e não reserva nada na agenda dele: é o acompanhamento " +
+    "começando a correr. Um acompanhamento vivo por cliente: se já houver, a resposta vem com " +
+    "inscrito=false e o motivo, e NÃO é erro — siga sem tentar de novo.",
+  inputSchema: inscreverShape,
+  category: "write",
+  requiresRole: "ai_operator",
+  requiresScope: "mcp:write",
+  handler: async (input, ctx) => {
+    const { createAdminClient } = await import("@/lib/supabase/admin");
+    const { enrollFollowupFlow } = await import("@/lib/followup/enroll");
+
+    const a = actorAudit(ctx);
+    const r = await enrollFollowupFlow(createAdminClient(), {
+      organizationId: ctx.organizationId,
+      pointerId: input.flow_id,
+      contactId: input.contact_id,
+      actorUserId: a.actorUserId,
+      requestId: ctx.requestId,
+    });
+
+    if (!r.ok) {
+      // Recusa de negócio vira RESPOSTA. Só falha de infraestrutura sobe como
+      // exceção — o wrapper do runtime a devolve como `{ error }` e o audit
+      // marca a chamada como malsucedida.
+      if (r.status >= 500) throw new ApiError(r.status, r.code, undefined, ctx.requestId, r.message);
+      return {
+        inscrito: false,
+        motivo: r.code,
+        mensagem: r.message,
+      };
+    }
+
+    const enrollmentId = String((r.enrollment as { id?: unknown }).id ?? "");
+    await audit({
+      action: "followup_enrollment.created",
+      actorUserId: a.actorUserId,
+      actorApiTokenId: ctx.apiTokenId,
+      organizationId: ctx.organizationId,
+      resourceType: "followup_enrollment",
+      resourceId: enrollmentId,
+      requestId: ctx.requestId,
+      metadata: { ...a.metadataActor, via: "mcp", flow_id: input.flow_id, contact_id: input.contact_id },
+    });
+
+    return {
+      inscrito: true,
+      enrollment_id: enrollmentId,
+      mensagem:
+        "acompanhamento iniciado. Não anuncie isso ao cliente: quem fala com ele é o próprio acompanhamento, no tempo dele.",
     };
   },
 };

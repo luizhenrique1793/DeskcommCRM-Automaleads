@@ -1,8 +1,9 @@
 import type { ComponentType } from "react";
 
-import { Play, Clock, GitBranch, Brain, ChatCircle, ArrowsClockwise, PaperPlaneTilt, Flag } from "@/lib/ui/icons";
+import { Bell, Play, Clock, GitBranch, Brain, ChatCircle, ArrowsClockwise, PaperPlaneTilt, Flag, Question, PuzzlePiece, Funnel, Tag } from "@/lib/ui/icons";
 import type { FlowNode, NodeType } from "@/lib/followup/graph-schema";
 import { RESULTADOS_DO_FIM } from "@/lib/followup/vocabulario";
+import { NOS_DA_SUPERFICIE } from "@/lib/followup/validate-publish";
 
 /**
  * Visual identity per node type — shared by the palette (Task 6.2 increment 2)
@@ -22,6 +23,37 @@ export interface NodeVisual {
   borderClassName: string;
   defaultLabel: string;
   defaultConfig: () => FlowNode["config"];
+}
+
+type RegraDeCondicao = Extract<FlowNode, { type: "condition" }>["config"]["checks"][number];
+
+/**
+ * A regra com que o nó de condição nasce, e a que o "+ Condição" acrescenta.
+ *
+ * Era `passos ≥ 0` — válida no schema e VERDADEIRA PARA TODO LEAD (o contador
+ * nasce em zero e só soma). No modo uma-saída-por-regra ela desviava todo mundo
+ * e tornava "Nenhuma delas" inalcançável; num OU, fixava o nó em "Sim". E o card
+ * a mostrava com cara de regra pronta.
+ *
+ * Agora nasce INCOMPLETA de propósito: o schema aceita (o rascunho salva), o
+ * motor nunca a satisfaz e o publish a recusa até alguém escolher a etapa. Etapa
+ * porque é a pergunta mais comum de um funil — e a que o seletor responde sem
+ * digitar nada.
+ */
+export function regraEmBranco(): RegraDeCondicao {
+  return { field: "lead_stage", op: "eq", value: "" };
+}
+
+/**
+ * Nó de mensagem novo: IA, salvo o gatilho de retorno — ali o padrão é texto
+ * fixo, porque a saudação de quem voltou não pede o LLM (e duas vozes
+ * nasceriam se o default fosse `ai_message` + o turno inbound).
+ */
+export function configPadraoDaAcao(triggerKind?: string): FlowNode["config"] {
+  if (triggerKind === "inbound_after_silence") {
+    return { mode: "text", body: "Configure esta mensagem." };
+  }
+  return { mode: "ai_message", prompt_hint: "Configure esta etapa." };
 }
 
 export const NODE_VISUALS: Record<NodeType, NodeVisual> = {
@@ -50,10 +82,7 @@ export const NODE_VISUALS: Record<NodeType, NodeVisual> = {
     chipClassName: "bg-warning-bg text-warning-fg",
     borderClassName: "border-l-warning",
     defaultLabel: "Verificar condição",
-    defaultConfig: () => ({
-      combinator: "and",
-      checks: [{ field: "steps_taken", op: "gte", value: 0 }],
-    }),
+    defaultConfig: () => ({ combinator: "and", checks: [regraEmBranco()] }),
   },
   ai_classify: {
     type: "ai_classify",
@@ -63,7 +92,13 @@ export const NODE_VISUALS: Record<NodeType, NodeVisual> = {
     borderClassName: "border-l-accent-700",
     defaultLabel: "Classificar resposta",
     defaultConfig: () => ({
-      classes: ["hot", "cold"],
+      // Em português, e dizendo o CRITÉRIO: estes nomes são a definição inteira
+      // que o modelo recebe para classificar a resposta (`followup-flow-classify`),
+      // e aparecem crus na saída do card, na aresta e no dossiê. "hot"/"cold"
+      // pedia ao dono da loja que adivinhasse o critério — e ao modelo também.
+      // Fora do dicionário de propósito: são DADO do usuário, e uma chave faria
+      // o card traduzir o que o motor compara ao pé da letra.
+      classes: ["Interessado", "Sem interesse"],
       grace_timeout_ms: 900_000,
       target: "last_reply",
     }),
@@ -89,6 +124,24 @@ export const NODE_VISUALS: Record<NodeType, NodeVisual> = {
     defaultLabel: "Repetir pela resposta",
     defaultConfig: () => ({ max_count: 12 }),
   },
+  collect: {
+    type: "collect",
+    paletteLabel: "Pergunta",
+    icon: Question,
+    chipClassName: "bg-info-bg text-info-fg",
+    borderClassName: "border-l-info",
+    defaultLabel: "Nova pergunta",
+    defaultConfig: () => ({ key: "novo_campo", label: "Nova pergunta", type: "text", required: true, permite_correcao: true }),
+  },
+  skill: {
+    type: "skill",
+    paletteLabel: "Skill",
+    icon: PuzzlePiece,
+    chipClassName: "bg-accent-soft text-accent",
+    borderClassName: "border-l-accent-500",
+    defaultLabel: "Puxar skill",
+    defaultConfig: () => ({ skill_name: "nome-da-skill" }),
+  },
   action: {
     type: "action",
     paletteLabel: "Ação",
@@ -96,7 +149,43 @@ export const NODE_VISUALS: Record<NodeType, NodeVisual> = {
     chipClassName: "bg-success-bg text-success-fg",
     borderClassName: "border-l-success",
     defaultLabel: "Enviar mensagem",
-    defaultConfig: () => ({ mode: "ai_message", prompt_hint: "Configure esta etapa." }),
+    defaultConfig: () => configPadraoDaAcao(),
+  },
+  internal_task: {
+    type: "internal_task",
+    paletteLabel: "Lembrete interno",
+    icon: Bell,
+    chipClassName: "bg-warning-bg text-warning-fg",
+    borderClassName: "border-l-warning",
+    defaultLabel: "Criar tarefa (só interno)",
+    defaultConfig: () => ({
+      titulo: "Ligar para {{contact.name}}",
+      vence_em_dias: 1,
+      atribuir_a: "dono_do_lead",
+      prioridade: "medium",
+    }),
+  },
+  // #2065 — os dois tipos de ação que a issue pede e que NÃO falam com o
+  // cliente: mover o card no funil e gravar tag. O `defaultConfig` nasce vazio
+  // de propósito (rascunho salva trabalho pela metade); o publish é quem exige
+  // a escolha (`etapa_destino_ausente`, `tag_ausente`).
+  move_lead: {
+    type: "move_lead",
+    paletteLabel: "Mover lead no funil",
+    icon: Funnel,
+    chipClassName: "bg-info-bg text-info-fg",
+    borderClassName: "border-l-info",
+    defaultLabel: "Mover card de etapa",
+    defaultConfig: () => ({ stage_id: "" }),
+  },
+  edit_lead_tag: {
+    type: "edit_lead_tag",
+    paletteLabel: "Editar tag do lead",
+    icon: Tag,
+    chipClassName: "bg-accent-soft text-accent",
+    borderClassName: "border-l-accent-500",
+    defaultLabel: "Gravar tag no lead",
+    defaultConfig: () => ({ tags: [] }),
   },
   end: {
     type: "end",
@@ -109,9 +198,20 @@ export const NODE_VISUALS: Record<NodeType, NodeVisual> = {
   },
 };
 
-export const NODE_VISUAL_LIST = Object.values(NODE_VISUALS);
+/**
+ * A paleta do editor de follow-up: só o que o motor do RELÓGIO executa. Pergunta
+ * e Skill são do roteiro de atendimento (#1130) e ficam fora — a mesma lista
+ * que o publish cobra (`NOS_DA_SUPERFICIE`), para a tela não oferecer caixa que
+ * o publish recusa.
+ */
+export const NODE_VISUAL_LIST = NOS_DA_SUPERFICIE.followup.map((tipo) => NODE_VISUALS[tipo]);
 
 type ConfigOf<T extends NodeType> = Extract<FlowNode, { type: T }>["config"];
+
+/** "15 min", com espaço — o mesmo formato do card de espera, que dizia "5 min" enquanto este dizia "15min". */
+function minutos(ms: number): string {
+  return `${Math.round(ms / 60_000)} min`;
+}
 
 /**
  * One-line summary of a node's config — shown as the card subtitle. Takes the
@@ -121,9 +221,11 @@ type ConfigOf<T extends NodeType> = Extract<FlowNode, { type: T }>["config"];
 export function describeNodeConfig(
   type: NodeType,
   config: FlowNode["config"],
-  // `t` com padrão identidade: quem chamar sem ele continua em português, e
-  // nenhum chamador quebra. Os cards do canvas passam o `t` do provider.
-  t: (texto: string) => string = (texto) => texto,
+  // `t` OBRIGATÓRIO. Era opcional com padrão identidade, e foi assim que dois
+  // cards que chegaram por outra branch (repetir e casar resposta) ficaram sem
+  // tradução nenhuma sem o typecheck notar: em português o padrão devolve o
+  // mesmo texto, então o esquecimento só aparecia para quem usa espanhol.
+  t: (texto: string) => string,
 ): string {
   switch (type) {
     case "trigger":
@@ -131,8 +233,8 @@ export function describeNodeConfig(
     case "wait": {
       const c = config as ConfigOf<"wait">;
       return c.mode === "fixed"
-        ? `${Math.round(c.duration_ms / 60_000)} min`
-        : `${Math.round(c.min_ms / 60_000)}–${Math.round(c.max_ms / 60_000)} min ${t("(adaptativo)")}`;
+        ? minutos(c.duration_ms)
+        : `${Math.round(c.min_ms / 60_000)}–${minutos(c.max_ms)} ${t("(adaptativo)")}`;
     }
     case "condition": {
       const c = config as ConfigOf<"condition">;
@@ -140,16 +242,19 @@ export function describeNodeConfig(
       // vota, ela roteia). Continuar anunciando "E"/"OU" ali seria o card
       // afirmando uma coisa que o motor ignora — e o usuário acredita no card.
       if (c.branching === "per_check")
-        return `${c.checks.length} ${t("regras · uma saída por regra")}`;
-      return `${c.checks.length} ${t("condição(ões)")} · ${c.combinator === "and" ? t("E") : t("OU")}`;
+        return `${c.checks.length} ${c.checks.length === 1 ? t("regra · uma saída por regra") : t("regras · uma saída por regra")}`;
+      return `${c.checks.length} ${c.checks.length === 1 ? t("condição") : t("condições")} · ${c.combinator === "and" ? t("E") : t("OU")}`;
     }
+    // "grace" é o nome do CAMPO, não palavra nenhuma para quem tem uma loja — e o
+    // formulário do mesmo nó já perguntava "Esperar a resposta por (minutos)".
+    // O card dizia o número com dois nomes na mesma tela.
     case "ai_classify": {
       const c = config as ConfigOf<"ai_classify">;
-      return `${c.classes.length} ${t("classes · grace")} ${Math.round(c.grace_timeout_ms / 60_000)}min`;
+      return `${c.classes.length} ${c.classes.length === 1 ? t("classe · espera") : t("classes · espera")} ${minutos(c.grace_timeout_ms)}`;
     }
     case "match_reply": {
       const c = config as ConfigOf<"match_reply">;
-      return `${c.branches.length} ${t("regras · grace")} ${Math.round(c.grace_timeout_ms / 60_000)}min${
+      return `${c.branches.length} ${c.branches.length === 1 ? t("regra · espera") : t("regras · espera")} ${minutos(c.grace_timeout_ms)}${
         c.save_to
           ? ` · ${t("grava resposta")}${c.if_exists === "skip" ? ` · ${t("pula se já existir")}` : c.if_exists === "confirm" ? ` · ${t("confirma se já existir")}` : ""}`
           : ""
@@ -157,13 +262,36 @@ export function describeNodeConfig(
     }
     case "repeat": {
       const c = config as ConfigOf<"repeat">;
-      return `${t("até")} ${c.max_count} ${t("voltas")}`;
+      return `${t("até")} ${c.max_count} ${c.max_count === 1 ? t("volta") : t("voltas")}`;
+    }
+    case "collect": {
+      const c = config as ConfigOf<"collect">;
+      return `${c.label} · ${c.required ? t("obrigatória") : t("opcional")}`;
+    }
+    case "skill": {
+      const c = config as ConfigOf<"skill">;
+      return c.skill_name;
     }
     case "action": {
       const c = config as ConfigOf<"action">;
       if (c.mode === "ai_message") return c.prompt_hint;
       if (c.mode === "text") return c.body;
       return t("Template fixo");
+    }
+    case "internal_task": {
+      const c = config as ConfigOf<"internal_task">;
+      const prazo = c.vence_em_dias === 0 ? t("hoje") : `+${c.vence_em_dias}d`;
+      return `${c.titulo} · ${prazo} · ${t("sem mensagem ao cliente")}`;
+    }
+    // #2065 — o rótulo da etapa (nome de banco) não chega aqui: o card diz o
+    // QUE faz, e o formulário diz PARA ONDE, com o nome da etapa escolhida.
+    case "move_lead": {
+      const c = config as ConfigOf<"move_lead">;
+      return c.stage_id ? t("move o card para outra etapa do funil") : t("sem etapa de destino");
+    }
+    case "edit_lead_tag": {
+      const c = config as ConfigOf<"edit_lead_tag">;
+      return c.tags.length ? c.tags.join(", ") : t("sem tag escolhida");
     }
     case "end": {
       const c = config as ConfigOf<"end">;

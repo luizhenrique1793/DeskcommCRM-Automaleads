@@ -11,10 +11,11 @@ import { type NextRequest } from "next/server";
 
 import { ApiError } from "@/lib/api/types";
 import { ok, fail, noContent } from "@/lib/api/wrappers";
-import { requireRole } from "@/lib/auth/require-role";
-import { loadAuthUser, resolveActiveOrg } from "@/lib/auth/server";
+import { orgAtivaDaApi, requireRole } from "@/lib/auth/require-role";
+import { loadAuthUser } from "@/lib/auth/server";
 import { traduzir } from "@/lib/i18n/dicionario";
-import { contactPatchSchema, validateRequest } from "@/lib/schemas";
+import { contactPatchSchemaDoPais, validateRequest } from "@/lib/schemas";
+import { perfilDaOrganizacao } from "@/lib/legal/perfil-do-pais";
 import { createClient } from "@/lib/supabase/server";
 
 import { deleteContactHandler, getContactHandler, patchContactHandler } from "../_handler";
@@ -39,7 +40,9 @@ export async function GET(
 
   const authUser = await loadAuthUser();
   const t = (texto: string) => traduzir(texto, authUser?.idioma ?? "pt-BR");
-  const activeOrg = authUser ? await resolveActiveOrg(authUser) : null;
+  const ativa = await orgAtivaDaApi(authUser, requestId);
+  if (!ativa.ok) return ativa.response;
+  const activeOrg = ativa.org;
   if (!activeOrg) {
     return fail("no_active_org", t("No active organization."), 403, { requestId });
   }
@@ -83,9 +86,13 @@ export async function PATCH(
   const user = authz.user;
   const activeOrg = authz.org;
 
+  // O documento do titular é validado pela régua do PAÍS da organização (issue
+  // #1033) — a mesma razão do POST: quem decide é a organização, não o corpo.
+  const perfil = await perfilDaOrganizacao(supabase, activeOrg.orgId);
+
   let input;
   try {
-    input = await validateRequest(contactPatchSchema, req);
+    input = await validateRequest(contactPatchSchemaDoPais(perfil), req);
   } catch (err) {
     if (err instanceof ApiError) {
       return fail(err.code, err.message, err.status, {
@@ -148,7 +155,9 @@ export async function DELETE(
     return noContent(requestId);
   } catch (err) {
     if (err instanceof ApiError) {
-      return fail(err.code, err.message, err.status, { requestId });
+      // `details` carrega os vínculos que barraram a exclusão (#1925); sem ele a
+      // tela só tem o texto genérico.
+      return fail(err.code, err.message, err.status, { details: err.details, requestId });
     }
     throw err;
   }

@@ -541,6 +541,14 @@ await boss.start();
 - **Retry:** backoff (§8). Após 8 falhas → DLQ. Após **10 falhas consecutivas** numa subscription → `webhook.subscription_disabled` + desabilita `webhook_subscriptions.enabled = false`.
 - **Idempotência:** header `X-Deskcomm-Idempotency-Key = event.id`.
 
+> **Estado real (#1529).** Não existe `webhook-dispatch-worker` nem o header
+> `X-Deskcomm-Idempotency-Key`. O envio é a ação `call_webhook` das automações
+> (`lib/automation/actions/call-webhook.ts`), e a chave de deduplicação é o
+> `X-Webhook-Delivery` — estável entre retentativas e no Reenviar —, ao lado de
+> `X-Webhook-Attempt`, `X-Webhook-Timestamp` e `X-Webhook-Signature`. O
+> contrato para quem recebe está em
+> [`docs/integracao/webhooks-de-saida.md`](../integracao/webhooks-de-saida.md).
+
 ### 6.8 `rag-indexer-worker`
 
 - **Consome:** `nuvemshop.product_synced`, `contact.created/merged`, `lead.created/updated`, eventos KB-edit.
@@ -557,7 +565,7 @@ await boss.start();
 
 ## 7. Crons
 
-A lista vigente não mora neste documento: ela vive em duas fontes espelhadas — `docker/scheduler/entrypoint.sh` (o serviço `scheduler` do compose, que é o caminho self-host) e `vercel.ts` na raiz (para quem hospeda a própria instalação na Vercel). `tests/unit/cron-routes-scheduled.test.ts` confere as duas uma contra a outra e contra o diretório `app/api/v1/cron/`, e reprova divergência. Para ver a de hoje:
+A lista vigente não mora neste documento: ela vive em `docker/scheduler/entrypoint.sh` — o crontab do serviço `scheduler` do compose, que é quem bate as rotas no self-host e é a única lista de agendamento sob gate. `tests/unit/cron-routes-scheduled.test.ts` confere essa lista contra o diretório `app/api/v1/cron/` nas duas direções: reprova rota de cron sem agendamento e agendamento apontando para rota que não existe. Para ver a de hoje:
 
 ```bash
 grep -oE 'api/v1/cron/[a-z0-9-]+' docker/scheduler/entrypoint.sh | sort -u
@@ -690,6 +698,10 @@ if (msg.status === 'sent' || msg.waha_message_id) {
 
 - **DB:** `unique constraint` em `(messages.organization_id, waha_message_id)`, `(orders.organization_id, ns_order_id)`.
 - **HTTP outbound (webhooks):** header `X-Deskcomm-Idempotency-Key = event_id`.
+  > **Estado real (#1529):** a chave é o `X-Webhook-Delivery` (uuid v5 de
+  > evento + regra + posição da ação + lista de ações da regra), não o
+  > `event_id` — ver §6.7 e
+  > [`docs/integracao/webhooks-de-saida.md`](../integracao/webhooks-de-saida.md).
 - **WAHA send:** WAHA aceita `idempotency_key` em `sendText` (se não, usar `clientMessageId`).
 - **Embeddings:** chunk_id = `sha256(content + version)`; upsert idempotente.
 

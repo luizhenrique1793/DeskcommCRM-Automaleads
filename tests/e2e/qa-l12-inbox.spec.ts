@@ -8,10 +8,11 @@
  *  · L12.G2.1 — GET /api/v1/contact-tags responde 200 numa org com contato
  *               SEM tag e contato COM tag
  *  · L12.G2.2/G2.3 — encaixe em 400 px e no tema escuro, medido por ferramenta
+ *  · #1206 — o filtro por marcador casa a caixa da conversa e a do contato
  */
 import { randomUUID } from "node:crypto";
 
-import { test } from "@playwright/test";
+import { test } from "./helpers/test";
 import { randomInt } from "node:crypto";
 
 import {
@@ -238,12 +239,16 @@ test.describe("Lote 12 — painel do contato no Inbox", () => {
     page,
   }) => {
     await login(page, c.users.manager!.email, c.password);
+    // ── L12.G2.1: a rota das tags responde 200, não 400 do PostgREST ───────
+    // A espera é registrada ANTES de abrir a conversa: a barra de filtros do
+    // Inbox (`InboxFilters`) pede esta rota na CARGA da página, e o editor de
+    // tags, que monta no clique, reaproveita o cache (mesma chave, 5 min de
+    // validade) sem pedir de novo. Registrada depois do clique, ela esperaria
+    // uma requisição que já aconteceu — até o timeout do describe.
+    const respostaTags = page.waitForResponse((r) => r.url().includes("/api/v1/contact-tags"));
     await abreConversa(page, conversaId);
     await expect(page.getByText(`Cliente L12 ${SUFIXO}`).first()).toBeVisible({ timeout: 60_000 });
 
-    // ── L12.G2.1: a rota das tags responde 200, não 400 do PostgREST ───────
-    // Ela só é pedida quando o editor de tags MONTA, e o editor monta no clique.
-    const respostaTags = page.waitForResponse((r) => r.url().includes("/api/v1/contact-tags"));
     await page.getByRole("button", { name: "Tags do contato", exact: true }).click();
     const rt = await respostaTags;
     const corpoTags = await rt.text();
@@ -279,6 +284,90 @@ test.describe("Lote 12 — painel do contato no Inbox", () => {
     registra(`#946 · PATCH = ${r.status()} · antes=${JSON.stringify(antes)} depois=${JSON.stringify(depois)}`);
     expect((depois as { tags: string[] }).tags).toContain("obra");
     await captura(page, "946-05-tag-gravada-normalizada");
+  });
+
+  /**
+   * #1206 — o filtro `?tag=` da lista casa a caixa da CONVERSA ou a do CONTATO.
+   *
+   * O teste unitário prova a FORMA do `or=`; só o PostgREST de verdade prova que
+   * o campo calculado `tags_do_contato` (migration 0323) é aceito dentro dele e
+   * que o marcador com vírgula, parêntese e chave chega inteiro. Pela rota da
+   * lista, com a sessão do navegador — a mesma chamada que o Inbox faz.
+   */
+  test("#1206 — o filtro por marcador acha a conversa pelas duas caixas", async ({ page }) => {
+    const soNoContato = `l12-contato-${SUFIXO}`;
+    const soNaConversa = `l12-conversa-${SUFIXO}`;
+    const reservado = `l12, (reservado) {${SUFIXO}}`;
+
+    const canal = await insere("channel_sessions", {
+      organization_id: c.org_id,
+      waha_session_name: `qa-l12-tag-${randomUUID()}`,
+      display_name: "Canal QA L12 tags",
+      status: "WORKING",
+      webhook_secret_encrypted: "\\x00",
+    });
+    const conversaCom = async (nome: string, tagsDoContato: string[], tagsDaConversa: string[]) => {
+      const contato = await insere("contacts", {
+        organization_id: c.org_id,
+        name: `${nome} ${SUFIXO}`,
+        phone_number: `+5511${randomInt(100000000, 1000000000)}`,
+        tags: tagsDoContato,
+      });
+      return insere("conversations", {
+        organization_id: c.org_id,
+        contact_id: contato,
+        channel_session_id: canal,
+        status: "open",
+        tags: tagsDaConversa,
+      });
+    };
+    const peloContato = await conversaCom("Marcada no contato", [soNoContato, reservado], []);
+    const pelaConversa = await conversaCom("Marcada na conversa", [], [soNaConversa]);
+    const semMarca = await conversaCom("Sem marcador", [], []);
+
+    try {
+      await login(page, c.users.manager!.email, c.password);
+      const idsDoFiltro = async (tag: string) => {
+        const r = await page.request.get(
+          `/api/v1/conversations?limit=100&tag=${encodeURIComponent(tag)}`,
+        );
+        const corpo = await r.text();
+        registra(`#1206 · GET ?tag=${tag} = ${r.status()} · ${corpo.slice(0, 200)}`);
+        expect(r.status(), `a lista filtrada por "${tag}" responde`).toBe(200);
+        return (JSON.parse(corpo) as { data: { id: string }[] }).data.map((x) => x.id);
+      };
+
+      const doContato = await idsDoFiltro(soNoContato);
+      expect(doContato).toContain(peloContato);
+      expect(doContato).not.toContain(pelaConversa);
+      expect(doContato).not.toContain(semMarca);
+
+      const daConversa = await idsDoFiltro(soNaConversa);
+      expect(daConversa).toContain(pelaConversa);
+      expect(daConversa).not.toContain(peloContato);
+      expect(daConversa).not.toContain(semMarca);
+
+      expect(await idsDoFiltro(reservado)).toEqual([peloContato]);
+
+      // #1259 — A CONTAGEM DAS ABAS TEM DE SOBREVIVER AO MESMO FILTRO.
+      // O contador aplicava `eq("tag", …)` numa tabela que só tem `tags`:
+      // com um marcador filtrado, o Postgres devolvia 42703 e a rota virava
+      // 500 — os números das abas sumiam da tela justamente quando alguém
+      // filtrava. Contra a main de hoje este caso é 500 (controle positivo).
+      const contagem = await page.request.get(
+        `/api/v1/conversations/counts?tag=${encodeURIComponent(soNoContato)}`,
+      );
+      const corpoDaContagem = await contagem.text();
+      registra(
+        `#1259 · GET counts?tag=${soNoContato} = ${contagem.status()} · ${corpoDaContagem.slice(0, 200)}`,
+      );
+      expect(contagem.status(), "a contagem das abas responde com marcador filtrado").toBe(200);
+      const { data: numeros } = JSON.parse(corpoDaContagem) as { data: { all: number } };
+      expect(numeros.all, "a aba Todas conta a conversa que o filtro acha").toBeGreaterThanOrEqual(1);
+    } finally {
+      await admin.from("conversations").delete().in("id", [peloContato, pelaConversa, semMarca]);
+      await admin.from("channel_sessions").delete().eq("id", canal);
+    }
   });
 });
 

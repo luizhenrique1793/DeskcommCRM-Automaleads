@@ -23,6 +23,7 @@
  *     npx vitest run tests/unit/tags-vocabulario-painel-em-espanhol.test.tsx
  */
 import { fireEvent, render, screen, waitFor, cleanup } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { LinhaDeVocabulario } from "@/lib/schemas/tags";
@@ -50,7 +51,14 @@ const frase = (texto: string) =>
   screen.getByText((_, el) => el?.tagName === "P" && el.textContent === texto);
 
 function montar() {
-  render(<PainelDeTags tags={[VIP, OBRA]} idioma="es" />);
+  // O painel passou a invalidar o cache das cores ao salvar uma cor (#1271):
+  // `useQueryClient` exige o provider, e é ele que existe na tela de verdade.
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={client}>
+      <PainelDeTags tags={[VIP, OBRA]} idioma="es" />
+    </QueryClientProvider>,
+  );
 }
 
 function responder(status: number, corpo: unknown) {
@@ -84,7 +92,7 @@ describe("painel de etiquetas com idioma espanhol", () => {
     expect(frase("Eliminar vip de 3 contacto(s), 2 lead(s) y 1 conversación(es).")).toBeTruthy();
     expect(
       frase(
-        "Atención: 2 regla(s) de agente siguen escribiendo esta etiqueta. Eliminar aquí no borra la regla — el agente volverá a crear la etiqueta en la próxima atención.",
+        "Atención: 2 regla(s) de agente siguen escribiendo esta etiqueta. Eliminarla aquí no borra la regla: el agente volverá a crear la etiqueta en la próxima atención.",
       ),
     ).toBeTruthy();
   });
@@ -112,7 +120,7 @@ describe("painel de etiquetas com idioma espanhol", () => {
 
   it("cada recusa do servidor sai em espanhol — inclusive o código que o mapa não conhece", async () => {
     const esperado: Record<string, string> = {
-      validation_failed: "Revisa la etiqueta y el nombre nuevo.",
+      validation_failed: "Revisa la etiqueta, el nombre nuevo y el color.",
       forbidden: "Solo un gerente o administrador de la organización puede cambiar las etiquetas.",
       unauthenticated: "Tu sesión expiró. Entra de nuevo.",
       mfa_required: "Confirma el segundo factor para cambiar las etiquetas.",
@@ -146,5 +154,21 @@ describe("painel de etiquetas com idioma espanhol", () => {
         "No se pudo contactar al servidor. Recarga la página y comprueba antes de intentarlo de nuevo.",
       ),
     );
+  });
+
+  it("a cor sai em espanhol: o botão, o nome do tom e o aviso de gravado", async () => {
+    // Os oito tons têm NOME justamente para quem não distingue matiz escolher —
+    // e um nome que não é traduzido devolve a escolha ao português.
+    montar();
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Color" })[0]!);
+    expect(frase("Color vip en las listas y en los filtros:")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Ámbar" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Sin color" })).toBeTruthy();
+
+    responder(200, { data: { alterou: true } });
+    fireEvent.click(screen.getByRole("button", { name: "Ámbar" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirmar" }));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Color de la etiqueta actualizado."));
   });
 });

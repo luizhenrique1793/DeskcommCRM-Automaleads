@@ -90,6 +90,11 @@ Se faltar Docker, o instalador pergunta e instala sozinho.
 | **IA** | Uma chave de **OpenRouter**, **Anthropic** ou **OpenAI** — o instalador pergunta qual você quer |
 | **WhatsApp** | Seu número, conectado por QR code no onboarding (ou o canal oficial da Meta) |
 
+O instalador também atende VPS ARM64/aarch64, como a Oracle Ampere A1, e escolhe a imagem
+NOWEB oficial do WAHA compatível com essa arquitetura. Vale para os dois caminhos: com Supabase
+externo e com o Supabase na mesma VPS (as imagens do Supabase self-hosted fixadas pelo kit também
+são publicadas para `linux/arm64`). Nada é compilado na VPS.
+
 > 💡 **O Supabase pode ser criado pelo próprio instalador.** Exporte um
 > `SUPABASE_ACCESS_TOKEN` antes de rodar e ele cria o projeto, espera o banco ficar saudável,
 > busca as 4 credenciais e descobre o host do pooler testando conexão real — sem copiar e colar.
@@ -226,6 +231,28 @@ Passo a passo em linguagem simples: [`docs/ATUALIZANDO.md`](docs/ATUALIZANDO.md)
 > **Backup importa:** o plano grátis do Supabase **não faz backup sozinho**. Vale agendar
 > `backup.sh` no cron diariamente. O `update.sh` já roda um backup antes de cada atualização.
 
+### 🧹 Desinstalar (tirar esta aplicação do Docker)
+
+Para parar e apagar **somente os recursos Docker desta instalação**, na raiz do repositório:
+
+```bash
+bash desinstalar_docker.sh
+```
+
+Ele descobre o projeto pelo label que o Docker Compose grava e remove apenas os containers,
+volumes e redes internas **deste** projeto. Outras aplicações do mesmo servidor, imagens,
+cache de build, a rede externa do proxy reverso, o código, o `.env`, os backups e um Supabase
+externo não são tocados.
+
+O modo interativo mostra quantos recursos encontrou e exige a confirmação
+`REMOVER-<nome-do-projeto>` antes de remover qualquer coisa. Para uma rotina de descarte de
+ambiente, `bash desinstalar_docker.sh --force` pula a pergunta. Use `--project-name NOME`
+só quando a instalação tiver um `COMPOSE_PROJECT_NAME` personalizado que não esteja mais no
+`.env`.
+
+> **Os volumes vão junto** — inclusive as sessões locais do WhatsApp. Rode `backup.sh` antes se
+> precisar preservá-las.
+
 ---
 
 ## ✨ O que é
@@ -284,7 +311,7 @@ Toda tela tem porta na navegação — o CI reprova tela que existe mas em que s
 | **WhatsApp** | WAHA Plus (engine NOWEB) + Meta Cloud API | QR pra começar rápido; canal oficial pra escala |
 | **Filas** | `event_log` table + workers (cron) | Trigger de banco nunca faz HTTP |
 | **Rate limit** | Upstash Redis (sliding window) | Serverless, free tier suficiente |
-| **AI** | Vercel AI SDK v7 — OpenRouter, Anthropic, OpenAI e Google | Instalador pergunta qual; troca depois pela tela |
+| **AI** | Vercel AI SDK v7 — OpenRouter, Requesty, Anthropic, OpenAI e Google | Instalador pergunta qual; troca depois pela tela |
 | **Validação** | Zod | Input externo, env, payloads |
 | **Observability** | Sentry (scrub em erro, transação, span e breadcrumb) | Telemetria opt-in no install |
 | **Hospedagem** | VPS com Docker (HostGator/SP na parceria) | App + WhatsApp + workers na sua máquina |
@@ -343,7 +370,7 @@ DeskcommCRM/
 │   ├── app/                # Rotas autenticadas: inbox, radar, kanban, contacts,
 │   │                       #   connections, ai/*, integrations, metrics, lgpd,
 │   │                       #   audit, team, settings
-│   └── api/v1/             # API REST canônica (196 route handlers)
+│   └── api/v1/             # API REST canônica
 ├── components/             # React (ui/, inbox/, kanban/, shell/, ...)
 ├── lib/                    # supabase/, waha/, channels/, ai/, agent-engine/,
 │                           #   api/, routing/, navigation/, env.ts
@@ -381,10 +408,16 @@ gh api repos/melgarafael/DeskcommCRM/branches/main/protection \
 | `verify` | typecheck + lint + `lint:channels` + `test:unit` + `test:shell` |
 | `invariants` | sobe um Postgres limpo, aplica o `baseline.sql` em modo **install** e depois em modo **update** — as duas passadas com `ON_ERROR_STOP=1`, que é o que torna a segunda uma prova de idempotência e não só um "terminou" —, e roda os invariantes de RBAC, atribuição, escopo, roteamento, follow-up, webhooks e automações |
 | `build-and-size` | `pnpm build` em Node 22 |
-| `e2e` | sobe Supabase local, aplica o `baseline.sql` e roda **48 das 49 specs** Playwright pelo frontend |
+| `e2e` | sobe Supabase local, aplica o `baseline.sql` e roda pelo frontend todas as specs Playwright menos as que `FORA_DO_CI` declara |
 | `imagens-ok` | reprova quando qualquer uma das três imagens Docker (`app`, `worker`, `scheduler`) não constrói — é o artefato que o self-hoster instala |
 
-A única spec fora do `e2e` é `vps-fresh-onboarding` — ela precisa de WAHA + Redis + Resend + Nuvemshop de verdade. Ela é a **P0** da nossa doutrina de QA visual, então `e2e` verde **não** prova a jornada de instalação fresca; essa se prova numa VPS.
+Quais specs ficam de fora é pergunta de comando, não de leitura — esta linha já afirmou que a única era `vps-fresh-onboarding`, e desde o PR #983 ela roda no CI:
+
+```bash
+git show origin/main:.github/workflows/e2e.yml | python3 -c "import sys,re; y=sys.stdin.read(); print(sorted({s for _,c in re.findall(r'(FORA_DO_CI):\s*>-\n((?:[ ]{8,}.*\n)+)',y) for s in re.findall(r'[a-z0-9-]+\.spec\.ts',c)}))"
+```
+
+`vps-fresh-onboarding` segue sendo a **P0** da nossa doutrina de QA visual, porque a instalação fresca é o produto que se vende. Ter gate não dispensa a prova pela tela: gate prova que não regrediu, não que a experiência ficou boa.
 
 Entre os invariantes está o **teste de isolamento RLS**: cria 2 organizações, simula os claims JWT pelo mesmo caminho `auth.uid()` / `fn_user_org_ids()` que as policies de produção usam, e prova que um usuário da org A enxerga **zero linhas** da org B em `conversations`, `messages`, `contacts` e `crm_leads`. Antes disso, um caso de controle prova que as linhas da org B realmente existem — sem ele, o teste passaria com a tabela vazia.
 
@@ -404,7 +437,8 @@ Entre os invariantes está o **teste de isolamento RLS**: cria 2 organizações,
 | [`docs/runbooks/deploy.md`](docs/runbooks/deploy.md) | Deploy em produção |
 | [`CLAUDE.md`](CLAUDE.md) | Convenções não-negociáveis (leitura obrigatória pra contribuir) |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Visão de 1 página da arquitetura |
-| [`docs/index.md`](docs/index.md) | Índice dos 157 documentos, com regra de precedência |
+| [`docs/index.md`](docs/index.md) | Índice geral da documentação, com a regra de precedência |
+| [`docs/handoffs/`](docs/handoffs/) | Diário dos épicos (`HANDOFF*.md`), com o índice em [`docs/handoffs/README.md`](docs/handoffs/README.md) |
 | [`docs/prd/`](docs/prd/) · [`docs/specs/`](docs/specs/) | PRDs e specs técnicas (schema SQL, payloads, MCP, governança) |
 
 ---
@@ -512,7 +546,10 @@ Este é um projeto **self-host**: cada pessoa roda o CRM na **própria infraestr
   **desligada**. Se você aceitar o Sentry da comunidade, o que é enviado são **relatórios
   de erro** (stack trace) com CPF, telefone e e-mail substituídos, cabeçalhos sensíveis
   removidos, e token de webhook/convite redigido da URL — **sem** rastreamento de
-  performance e **sem** replay de sessão, que ficam em 0 nesse caminho. Para desligar a
+  performance e **sem** replay de sessão contínuo, que ficam em 0 nesse caminho. Vai
+  junto do erro a gravação dos instantes que o antecederam, com texto e mídia mascarados,
+  as mesmas URLs redigidas e nenhuma gravação nas páginas com credencial na URL
+  ([`lib/sentry/replay.ts`](lib/sentry/replay.ts)). Para desligar a
   qualquer momento: `SENTRY_DSN=off` no `.env`. Para mandar ao **seu** Sentry (aí sim com
   performance e replay): `SENTRY_DSN=<seu-dsn>`. O que é redigido, e por quê, está em
   [`lib/sentry/scrub.ts`](lib/sentry/scrub.ts); a resolução do DSN em

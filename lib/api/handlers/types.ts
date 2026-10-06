@@ -1,3 +1,4 @@
+import type { ProspectingDelivery } from "@/lib/prospecting/guard";
 import type { AgentOperationContext } from "@/lib/ai/agents/operation";
 import type { ApprovedReplyContext } from "@/lib/ai/replies/delivery";
 import type { MeetingDeliveryContext, MeetingBookingContext } from "@/lib/agenda/meet-delivery";
@@ -55,9 +56,23 @@ export type Actor =
    * a valer.
    */
   | { type: "api_token"; id: string; role?: string }
-  | { type: "webhook_source"; id: string };
+  /**
+   * REGRA DE AUTOMAÇÃO disparando um envio — o ator é a regra, não uma pessoa.
+   *
+   * `textoEscritoPelaIA` existe porque a AUTORIA e o DISPARO são coisas
+   * diferentes, e a decisão da #652 classifica `messages.sent_via` por autoria.
+   * Quase toda ação de regra manda texto fixo (template, follow-up, lembrete):
+   * ninguém escreveu, e a linha é `'automation'`. A ação "Mensagem escrita pela
+   * IA" é a exceção: quem escreve é um agente publicado, e a linha é `'ai'` —
+   * mesmo tendo sido disparada por regra.
+   *
+   * Sem este campo, o carimbo se decide só pelo tipo do ator, e a mensagem que a
+   * IA escreveu aparece no balão como "Automação" e some de `envios_por_ia`.
+   */
+  | { type: "webhook_source"; id: string; textoEscritoPelaIA?: true };
 
 export interface HandlerCtx {
+  prospectingDelivery?: ProspectingDelivery;
   agentOperation?: AgentOperationContext;
   meetingDelivery?: MeetingDeliveryContext;
   approvedReply?: ApprovedReplyContext;
@@ -68,8 +83,23 @@ export interface HandlerCtx {
   serviceBoundary?: ServiceBoundary | null;
   /** Origem de evento derivado; não é campo de input público. */
   serviceOrigin?: ServiceOrigin;
+  /** Chave HTTP validada na borda para replay de uma criação. */
+  idempotencyKey?: string;
+  /** Identidade estável do job interno; não usar claim, que muda em cada reclaim. */
+  sourceJobId?: string;
   organization_id: string;
   actor: Actor;
+  /**
+   * Autoria "em nome de" (#1613): a PESSOA por cuja decisão o token envia.
+   *
+   * Vive no CTX, e não no input, de propósito: o mesmo input atravessa as tools
+   * MCP, que não têm escopo nenhum, e um campo gravável ali seria um envio
+   * forjado sem passar pelo gate `messages:on_behalf`. Quem preenche é
+   * `app/api/v1/messages/route.ts`, depois de validar o escopo do token e o
+   * membership do usuário; o handler recusa alto quando o input traz o campo e
+   * o ctx não — falha fechada, nunca grava por omissão.
+   */
+  onBehalfOf?: { userId: string; userName?: string | null; tokenName?: string | null };
   requestId: string;
   /**
    * Idioma de quem chamou, só quando é um usuário humano de verdade — as

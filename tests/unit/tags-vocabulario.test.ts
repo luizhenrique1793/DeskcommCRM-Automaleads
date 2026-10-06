@@ -20,11 +20,31 @@ const raiz = process.cwd();
 const ler = (caminho: string) => readFileSync(join(raiz, caminho), "utf8");
 
 const MIGRATION = "supabase/migrations/20260915213849_0264_vocabulario_de_tags.sql";
-const FUNCOES = [
+/**
+ * As assinaturas como a 0264 as publicou — é o TEXTO daquele arquivo que os
+ * casos abaixo leem, e o arquivo não muda (migration aplicada não se edita:
+ * forward-fix numa nova, que é a 0336).
+ */
+const FUNCOES_DA_0264 = [
   "public.fn_vocabulario_de_tags(uuid)",
   "public.fn_tags_normalizar(text[], text, text, boolean)",
   "public.fn_vocabulario_de_tags_operar(uuid, text, text, text)",
 ] as const;
+
+/**
+ * A operação ganhou o quinto argumento na 0336 (`p_cor text default null`,
+ * issue #1271) — é a ÚNICA função cuja assinatura mudou, e é por isso que é a
+ * única cujos privilégios a migration nova reafirma. As DUAS listas de
+ * assinatura do repo — esta e `AUTHENTICATED_PERMITIDO`, em
+ * `tests/invariants/hardening-definer-varredura` — precisam andar juntas: um
+ * `revoke` com a assinatura antiga não alcança a função que existe, e a nova
+ * ficaria com o privilégio que o Postgres dá a PUBLIC na criação.
+ */
+const OPERAR_NA_0336 = "public.fn_vocabulario_de_tags_operar(uuid, text, text, text, text)";
+const COR = "supabase/migrations/20260919190000_0336_cor_das_etiquetas.sql";
+
+/** Escapa o que é metacaractere de regex na assinatura. */
+const escapar = (fn: string) => fn.replace(/[[\]()]/g, (c) => `\\${c}`);
 
 describe("fatia S4 — vocabulário de tags (contrato do que foi escrito)", () => {
   it("a migration existe e cria as três funções", () => {
@@ -37,8 +57,8 @@ describe("fatia S4 — vocabulário de tags (contrato do que foi escrito)", () =
 
   it("as DUAS origens de EXECUTE são revogadas para cada função nova", () => {
     const sql = ler(MIGRATION);
-    for (const fn of FUNCOES) {
-      const escapada = fn.replace(/[[\]()]/g, (c) => `\\${c}`);
+    for (const fn of FUNCOES_DA_0264) {
+      const escapada = escapar(fn);
       // `from public, anon` cobre de uma vez o grant a PUBLIC que o Postgres dá
       // ao criar a função e o ALTER DEFAULT PRIVILEGES do baseline, que é o que
       // um `revoke from public` sozinho NÃO tira.
@@ -49,12 +69,31 @@ describe("fatia S4 — vocabulário de tags (contrato do que foi escrito)", () =
   it("nenhuma função nova é concedida a anon", () => {
     const sql = ler(MIGRATION);
     expect(sql).not.toMatch(/grant\s+execute\s+on\s+function[\s\S]{0,120}?\bto\b[^;]*\banon\b/);
-    for (const fn of FUNCOES) {
-      const escapada = fn.replace(/[[\]()]/g, (c) => `\\${c}`);
+    for (const fn of FUNCOES_DA_0264) {
+      const escapada = escapar(fn);
       expect(sql).toMatch(
         new RegExp(`grant\\s+execute on function ${escapada} to authenticated, service_role;`),
       );
     }
+  });
+
+  it("a 0336 reafirma os privilégios na assinatura de CINCO argumentos", () => {
+    // Sem estas duas linhas, a assinatura NOVA fica com o EXECUTE que o Postgres
+    // dá a PUBLIC na criação — isto é, alcançável pela anon key, que vai para o
+    // browser. É o mesmo gate de antes, apontado para a assinatura que existe.
+    const sql = ler(COR);
+    const escapada = escapar(OPERAR_NA_0336);
+    expect(sql).toMatch(new RegExp(`revoke execute on function ${escapada} from public, anon;`));
+    expect(sql).toMatch(
+      new RegExp(`grant\\s+execute on function ${escapada} to authenticated, service_role;`),
+    );
+    expect(sql).not.toMatch(/grant\s+execute\s+on\s+function[\s\S]{0,120}?\bto\b[^;]*\banon\b/);
+    // E a assinatura antiga não sobra: com as duas no catálogo, a chamada de
+    // quatro chaves resolvia na antiga e a cor nunca chegava ao banco.
+    expect(sql).toMatch(/drop function if exists public\.fn_vocabulario_de_tags_operar\(uuid, text, text, text\);/);
+    expect(ler("supabase/baseline.sql")).not.toMatch(
+      /revoke execute on function public\.fn_vocabulario_de_tags_operar\(uuid, text, text, text\) from/,
+    );
   });
 
   it("a leitura devolve o uso por tabela (contatos/leads/conversas)", () => {
@@ -111,8 +150,28 @@ describe("fatia S4 — vocabulário de tags (contrato do que foi escrito)", () =
   it("o baseline.sql recebe o apêndice idempotente das mesmas funções", () => {
     const baseline = ler("supabase/baseline.sql");
     expect(baseline).toMatch(/create or replace function public\.fn_vocabulario_de_tags_operar\(/);
-    const linha = baseline.match(/revoke execute on function public\.fn_vocabulario_de_tags_operar\(uuid, text, text, text\) from public, anon;/);
+    // A assinatura vigente é a de CINCO argumentos (p_cor da 0336); a de quatro
+    // não pode sobrar em lugar nenhum, nem aqui nem na migration nova.
+    const linha = baseline.match(/revoke execute on function public\.fn_vocabulario_de_tags_operar\(uuid, text, text, text, text\) from public, anon;/);
     expect(linha).not.toBeNull();
+    expect(baseline).not.toMatch(/fn_vocabulario_de_tags_operar\(uuid, text, text, text\)/);
+  });
+
+  it("a 0336 acrescenta a cor: drop da assinatura antiga, ação e validação", () => {
+    // O par de assinaturas é o defeito silencioso desta fatia: `create or replace`
+    // com um parâmetro a mais NÃO substitui, cria sobrecarga, e a chamada de
+    // quatro chaves continua resolvendo na antiga. O gate lê os dois arquivos
+    // porque é o apêndice que roda na instalação por baseline.
+    const cor = "supabase/migrations/20260919190000_0336_cor_das_etiquetas.sql";
+    expect(existsSync(join(raiz, cor))).toBe(true);
+    const sql = ler(cor);
+    expect(sql).toMatch(/drop function if exists public\.fn_vocabulario_de_tags_operar\(uuid, text, text, text\);/);
+    expect(sql).toMatch(/p_cor text default null/);
+    expect(sql).toMatch(/'definir_cor'/);
+    expect(sql).toMatch(/cor_invalida/);
+    const baseline = ler("supabase/baseline.sql");
+    expect(baseline).toMatch(/p_cor text default null/);
+    expect(baseline).toMatch(/'definir_cor'/);
   });
 
   it("o MANIFEST aponta a migration, como as irmãs", () => {

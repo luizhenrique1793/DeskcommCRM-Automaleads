@@ -11,8 +11,9 @@ import { BulkActionBar } from "@/components/kanban/BulkActionBar";
  * cards selecionados, o menu "Tag…" não mostrava nenhuma tag que já existe nos
  * leads — cada pessoa digitava a sua variação.
  *
- * A lista vem da página (as tags dos leads do quadro, a mesma conta do
- * FilterBar): a ação em lote grava em `lead.tags`, então é essa a lista certa.
+ * A lista vem da página: as tags dos leads do quadro, só `lead.tags`. Não é a
+ * conta do seletor do FilterBar, que também lista os marcadores do contato — a
+ * ação em lote grava em `lead.tags`, então é essa a lista certa.
  */
 
 const mutate = vi.fn();
@@ -146,7 +147,7 @@ describe("BulkActionBar — tag em lote", () => {
 describe("a página do funil ENTREGA as tags do quadro à barra", () => {
   it("as tags dos leads do quadro chegam ao menu de tag em lote", async () => {
     const { PipelinePageClient } = await import("@/app/app/pipelines/[id]/_client");
-    render(<PipelinePageClient pipelineId="p-1" initialName="Funil" />);
+    render(<PipelinePageClient pipelineId="p-1" initialName="Funil" role="admin" />);
 
     await userEvent.click(await screen.findByRole("button", { name: /tag/i }));
     expect(await screen.findByRole("menuitem", { name: "google" })).toBeTruthy();

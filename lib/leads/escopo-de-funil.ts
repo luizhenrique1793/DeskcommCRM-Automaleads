@@ -69,6 +69,12 @@ export const ALVO_DE_FUNIL: Record<string, AlvoDeFunil> = {
   // Não muda o card, mas pendura uma decisão humana nele — encher o funil da
   // Andrea de sugestões da IA é ocupar a atenção de quem cuida dele.
   crm_propose_reactivation: "funil_vem_do_lead",
+  // Recebe lead_id direto — mesmo alvo de crm_update_lead: o funil sai do
+  // negócio informado, uma consulta.
+  crm_draft_proposal: "funil_vem_do_lead",
+  // Cria o negócio NOVO no MESMO funil da origem (issue #1538): o `stage_id`
+  // opcional é recusado se for de outro funil, então o alvo é o funil do lead.
+  crm_retomar_lead: "funil_vem_do_lead",
 
   // ---- tocam o lead de lado: RETORNO INTERNO, não estado do card ----
   // ⚠️ Este comentário dizia "agenda", e a palavra passou a apontar para a coisa
@@ -79,6 +85,13 @@ export const ALVO_DE_FUNIL: Record<string, AlvoDeFunil> = {
   // list), então o vocabulário aqui tem de separar o que o nome não separa.
   crm_schedule_followup: "funil_vem_do_lead",
   crm_cancel_followup: "funil_vem_do_lead",
+  // Inscrever num fluxo é da mesma família (retorno interno, não estado do
+  // card), mas recebe `contact_id` OBRIGATÓRIO e nenhum `lead_id` — como a
+  // agenda. Por isso `funil_vem_do_contato` e não `funil_vem_do_lead`: o
+  // segundo procuraria um argumento que nunca vem, cairia no ramo "sem lead" e
+  // liberaria sempre, com aparência de escopado. É o teatro que o comentário
+  // das ferramentas de agenda, logo abaixo, descreve.
+  crm_enroll_followup_flow: "funil_vem_do_contato",
 
   // ---- agenda: DECLARADAS `sem_funil`, e a declaração é o ponto ----
   //
@@ -128,6 +141,12 @@ export const ALVO_DE_FUNIL: Record<string, AlvoDeFunil> = {
   crm_resume_ai_attendance: "sem_funil",
   crm_save_org_memory: "sem_funil",
   crm_propose_contact_field: "sem_funil",
+  // Rascunho sugerido por integração (#1611): opera por `conversation_id`,
+  // nunca `lead_id`, e não mexe em estado de funil nenhum. A barreira é OUTRA,
+  // e é dela que a segurança depende: o RBAC da rota (agent+), o escopo
+  // `mcp:write` do token e o fato de a porta NÃO enviar nada — o texto fica
+  // guardado e quem atende é que clica em enviar.
+  crm_create_conversation_draft: "sem_funil",
   // Configuração da casa. Já não é alcançável pelo agente (papel acima do dele);
   // entram aqui para o teste de vacuidade não as acusar, e com a nota de que a
   // barreira delas é OUTRA.

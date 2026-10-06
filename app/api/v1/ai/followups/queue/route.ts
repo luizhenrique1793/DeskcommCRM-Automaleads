@@ -36,8 +36,10 @@ export const dynamic = "force-dynamic";
 const ENROLLMENT_STATUSES = [
   "active",
   "waiting_reply",
+  "dormente",
   "paused_handoff",
   "paused_manual",
+  "coletando",
   "completed",
   "cancelled",
   "dead",

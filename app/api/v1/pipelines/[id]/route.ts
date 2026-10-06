@@ -63,6 +63,16 @@ const bodySchema = z
      * experimentar. Quem "consertar" esta assimetria quebra o desfazer.
      */
     is_client_pipeline: z.boolean().optional(),
+    /**
+     * TIRAR DO ARQUIVO (#979). `true` é aceito pelo schema e recusado pelo
+     * handler, de propósito: quem manda `is_archived: true` quer arquivar, e
+     * arquivar tem porta própria (`DELETE`) porque conta as dependências antes
+     * — formulário apontando para o funil, automação ativa, ser o padrão ou o
+     * último vivo. Deixar o PATCH arquivar daria a volta em todas elas. Recusar
+     * no handler, e não com `z.literal(false)`, é o que permite responder
+     * "use o DELETE" em vez de "não entendi o que mudar neste funil".
+     */
+    is_archived: z.boolean().optional(),
     depois_de: z.string().min(1).nullable().optional(),
   })
   .strict()
@@ -74,6 +84,7 @@ type PatchDoFunil = {
   position?: number;
   is_default?: boolean;
   is_client_pipeline?: boolean;
+  is_archived?: boolean;
 };
 
 export async function PATCH(req: NextRequest, ctx: RouteCtx): Promise<Response> {
@@ -120,6 +131,18 @@ export async function PATCH(req: NextRequest, ctx: RouteCtx): Promise<Response> 
   const alvo = funis.find((f) => f.id === pipelineId);
   if (!alvo) return fail("not_found", t("Funil não encontrado."), 404, { requestId });
 
+  // ⚠️ ARQUIVAR É DO `DELETE`, NÃO DAQUI — ele conta as dependências antes
+  // (`validarArquivamento`), e este handler não conta nenhuma.
+  if (pedido.is_archived === true) {
+    return fail(
+      "unprocessable_entity",
+      `Para arquivar «${alvo.name}», use a opção Arquivar da lista de funis — ela confere antes se algum ` +
+        `formulário ou automação ainda manda negócio para ele. Por aqui só dá para tirar do arquivo.`,
+      422,
+      { requestId },
+    );
+  }
+
   // ⚠️ ARQUIVADO NÃO SE EDITA — e a guarda fica, mas o MOTIVO escrito aqui era
   // falso. Dizia que `uniq_crm_pipelines_org_default` é parcial em
   // `is_archived`, e que por isso marcar um arquivado como padrão "passa pelo
@@ -130,10 +153,18 @@ export async function PATCH(req: NextRequest, ctx: RouteCtx): Promise<Response> 
   // posição ou marca de um funil que sumiu da lista dele. Alcançável sem má-fé —
   // uma aba aberta antes de o funil ser arquivado — e o erro do banco, quando
   // vem, fala de índice, não do que a pessoa fez.
-  if (alvo.is_archived) {
+  //
+  // ⚠️ A ÚNICA EXCEÇÃO É TIRÁ-LO DO ARQUIVO, E SÓ SE FOR ISSO SOZINHO (#979).
+  // Pedido MISTO (desarquivar + renomear, por exemplo) continua 409: quem o
+  // montou está com uma tela antiga na frente, e as validações de nome e de
+  // posição são medidas contra a lista de ATIVOS — lista de onde o alvo ainda
+  // não saiu no instante em que elas rodariam. Aceitar metade do pedido seria
+  // pior: o funil voltaria com o nome velho e ninguém saberia por quê.
+  const soTiraDoArquivo = pedido.is_archived === false && Object.keys(pedido).length === 1;
+  if (alvo.is_archived && !soTiraDoArquivo) {
     return fail(
       "state_conflict",
-      `O funil «${alvo.name}» foi arquivado e não está mais na sua lista. Recarregue a página.`,
+      `O funil «${alvo.name}» está arquivado e não está mais na sua lista. Tire-o do arquivo antes de editar.`,
       409,
       { requestId },
     );
@@ -162,6 +193,14 @@ export async function PATCH(req: NextRequest, ctx: RouteCtx): Promise<Response> 
   if (pedido.description !== undefined) {
     patchDoAlvo.description = pedido.description?.trim() || null;
   }
+
+  // Tirar do arquivo é update SIMPLES: nenhum índice a disputar (nem o de slug
+  // nem o de padrão são parciais em `is_archived`, então o funil já ocupava o
+  // lugar dele enquanto estava arquivado). Só entra no patch se ele ESTIVER
+  // arquivado — pedir de novo em quem já está fora é pedido já atendido, e uma
+  // escrita vazia viraria linha de auditoria sem fato nenhum por trás.
+  const tiraDoArquivo = pedido.is_archived === false && alvo.is_archived;
+  if (tiraDoArquivo) patchDoAlvo.is_archived = false;
 
   if (pedido.depois_de !== undefined) {
     // Só os ativos compõem a régua: arquivado não ocupa lugar na lista.
@@ -232,7 +271,10 @@ export async function PATCH(req: NextRequest, ctx: RouteCtx): Promise<Response> 
 
   if (updates.length > 0) {
     void audit({
-      action: "pipeline.updated",
+      // Tirar do arquivo tem código PRÓPRIO, espelhando o `pipeline.archived`
+      // que o DELETE emite: quem audita quer saber quem trouxe o funil de volta,
+      // e `pipeline.updated` esconderia isso entre os renames.
+      action: tiraDoArquivo ? "pipeline.unarchived" : "pipeline.updated",
       actorUserId: authz.user.id,
       organizationId: orgId,
       resourceType: "crm_pipeline",

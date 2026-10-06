@@ -23,7 +23,7 @@ function entry(byteLength: number): CatalogEntry {
     name: "tarefas-praticas",
     version: "1.0.0",
     license: "MIT",
-    host_api: { min: 1, max: 1 },
+    host_api: { min: 1, max: 2 },
     permissions: ["navigation.tasks"],
     display: {
       title: { "pt-BR": "Tarefas" },

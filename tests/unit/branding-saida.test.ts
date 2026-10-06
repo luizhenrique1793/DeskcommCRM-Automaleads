@@ -136,6 +136,19 @@ describe("marcaDaSaida — as duas classes", () => {
     expect(marca.accent).not.toBe(ACCENT_DO_PRODUTO);
   });
 
+  it("divergência: nome do BANCO vence o do `.env` quando os dois existem", async () => {
+    // O caso do PR #1944: o onboard configura a marca no banco (Administração ›
+    // Marca) e o `.env` seguiu com o valor da instalação. O resolvedor decide só
+    // por `marcaDaSaida(null)` — banco acima, `.env` como piso.
+    const { marcaDaSaida } = await carregar();
+    linhaDaInstalacao = { app_name: "Marca Configurada na Tela", accent_hex: "#2563eb" };
+    vi.stubEnv("APP_NAME", "Nome Velho do Arquivo");
+
+    const marca = await marcaDaSaida(null);
+    expect(marca.nome).toBe("Marca Configurada na Tela");
+    expect(marca.origens.nome).toBe("banco");
+  });
+
   it("classe A (com organização) põe a marca da ORGANIZAÇÃO acima da instalação", async () => {
     const { marcaDaSaida } = await carregar();
     linhaDaInstalacao = { app_name: "Vendas Turbo", accent_hex: "#2563eb" };
@@ -239,7 +252,7 @@ describe("emailDeSuporte", () => {
     const original = process.env.SUPPORT_EMAIL;
     delete process.env.SUPPORT_EMAIL;
     const { emailDeSuporte } = await carregar();
-    expect(emailDeSuporte()).toBe("");
+    expect(await emailDeSuporte()).toBe("");
     if (original !== undefined) process.env.SUPPORT_EMAIL = original;
   });
 
@@ -247,7 +260,7 @@ describe("emailDeSuporte", () => {
     const original = process.env.SUPPORT_EMAIL;
     process.env.SUPPORT_EMAIL = "  ajuda@revenda.com.br  ";
     const { emailDeSuporte } = await carregar();
-    expect(emailDeSuporte()).toBe("ajuda@revenda.com.br");
+    expect(await emailDeSuporte()).toBe("ajuda@revenda.com.br");
     if (original === undefined) delete process.env.SUPPORT_EMAIL;
     else process.env.SUPPORT_EMAIL = original;
   });

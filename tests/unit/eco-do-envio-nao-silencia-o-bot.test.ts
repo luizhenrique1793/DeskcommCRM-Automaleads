@@ -277,6 +277,22 @@ describe("eco do próprio envio — a IA não se cala por ter falado", () => {
     expect(conversa.bot_silenced_until).toBeNull();
   });
 
+  it("o envio da INTEGRAÇÃO (token) também é protegido — o valor novo entrou no filtro", async () => {
+    // `system` passou a ser gravado quando o token deixou de se disfarçar de IA
+    // (#866). Se o filtro desta checagem continuar em `['ai', 'user']`, a linha
+    // da integração não é reconhecida como envio NOSSO: o eco do próprio envio
+    // vira "resposta pelo celular" e cala a IA por três horas — o defeito do
+    // #519 de volta, por um caminho novo e com o sintoma idêntico.
+    const { admin, conversa } = banco([emVoo({ sent_via: "system" })]);
+
+    await dispatchWahaEvent(admin as never, SESSION as never, envelope(eco(TEXTO)), "req-5b");
+
+    expect(
+      conversa.bot_silenced_until,
+      "a linha gravada pela integração não foi reconhecida como envio nosso: o eco do próprio envio calou a IA",
+    ).toBeNull();
+  });
+
   it("⭐ a linha continua sendo GRAVADA — o gate barra o silêncio, nunca o insert", async () => {
     // A direção oposta, e ela é o coração do desenho: gravar é tolerante
     // (perder mensagem é pior que duplicar, é o #108), silenciar é estrito
@@ -298,5 +314,124 @@ describe("eco do próprio envio — a IA não se cala por ter falado", () => {
     await dispatchWahaEvent(admin as never, SESSION as never, envelope(eco("digitei no celular")), "req-7");
 
     expect(conversa.bot_silenced_until, "encurtou um handoff formal").toBe("infinity");
+  });
+});
+
+/**
+ * O ECO DO ENVIO DA AUTOMAÇÃO (#652).
+ *
+ * Depois de o carimbo da automação virar `'automation'`, a linha do envio deixa
+ * de casar com o filtro de `sent_via` desta checagem — e o eco do próprio envio
+ * da regra passa a ser lido como "o atendente respondeu pelo celular". O
+ * desfecho é a IA pausada na conversa (a tela mostra "Automático pausado", um
+ * estado legítimo que ninguém investiga), causado por uma mensagem que o CRM
+ * mandou sozinho.
+ *
+ * A checagem e o carimbo são duas pontas do MESMO vocabulário: quem mexer numa
+ * sem a outra reabre `lib/waha/ingest-celular.test.ts:315` (a janela conhecida
+ * em que o eco duplica) do lado de dentro da regra.
+ */
+describe("eco do envio da automação — reconhecido como nosso (#652)", () => {
+  it("⭐ envio da AUTOMAÇÃO em voo + eco com o MESMO texto: o bot NÃO é pausado", async () => {
+    const { admin, conversa } = banco([emVoo({ sent_via: "automation" })]);
+
+    await dispatchWahaEvent(admin as never, SESSION as never, envelope(eco(TEXTO)), "req-652-1");
+
+    expect(
+      conversa.bot_silenced_until,
+      "a regra mandou uma mensagem e a IA ficou pausada por causa do eco dela mesma",
+    ).toBeNull();
+  });
+
+  it("o envio da automação já CONFIRMADO não vira uma segunda linha na conversa", async () => {
+    // O eco depois do ack: a linha do envio já tem `external_id`, o dedup por id
+    // casa e nada é inserido. É o caso normal (o eco chega segundos depois do
+    // envio voltar), e ele não pode depender do valor de `sent_via`.
+    const { admin, messages } = banco([
+      emVoo({ sent_via: "automation", external_id: eco(TEXTO).id, status: "sent" }),
+    ]);
+
+    await dispatchWahaEvent(admin as never, SESSION as never, envelope(eco(TEXTO)), "req-652-2");
+
+    expect(
+      messages.length,
+      "a frase da automação apareceu duas vezes na conversa",
+    ).toBe(1);
+  });
+
+  it("o eco da automação continua GRAVANDO a linha — o gate barra o silêncio, nunca o insert", async () => {
+    // A direção oposta, e ela é o desenho do #108: gravar é tolerante (perder
+    // mensagem é pior que duplicar), silenciar é estrito. O caso roda para a
+    // automação pela mesma razão que roda para a IA e para o composer.
+    const { admin, messages } = banco([emVoo({ sent_via: "automation" })]);
+
+    await dispatchWahaEvent(admin as never, SESSION as never, envelope(eco(TEXTO)), "req-652-3");
+
+    expect(messages.length).toBe(2);
+  });
+});
+
+
+/**
+ * O ECO DO ENVIO ASSINADO (#2066, PR #2079).
+ *
+ * Com a assinatura do emissor ligada, o que vai ao canal é `*Nome*\ntexto`,
+ * mas `messages.body` guarda só `texto` (a assinatura é do canal, não do
+ * histórico). O eco do WhatsApp devolve o que SAIU — com a linha do nome. Pela
+ * igualdade exata, o eco do próprio envio assinado deixava de casar com a linha
+ * em voo e era lido como "o atendente respondeu pelo celular": a IA, assinando
+ * as próprias respostas, se calava depois de cada uma delas.
+ */
+describe("eco do envio assinado — a linha do nome não esconde o eco (#2066)", () => {
+  it("⭐ envio da IA em voo + eco com a assinatura da IA: o bot NÃO é pausado", async () => {
+    const { admin, conversa } = banco([emVoo()]);
+
+    await dispatchWahaEvent(
+      admin as never,
+      SESSION as never,
+      envelope(eco(`*Assistente Virtual*\n${TEXTO}`)),
+      "req-2066-1",
+    );
+
+    expect(
+      conversa.bot_silenced_until,
+      "a IA assinou a própria resposta e o eco dela calou a IA — a linha do nome escondeu o eco",
+    ).toBeNull();
+  });
+
+  it("⭐ envio do atendente em voo + eco com o nome dele: o bot NÃO é pausado", async () => {
+    const { admin, conversa } = banco([emVoo({ sent_via: "user" })]);
+
+    await dispatchWahaEvent(
+      admin as never,
+      SESSION as never,
+      envelope(eco(`*Carlos Gaban*\n${TEXTO}`)),
+      "req-2066-2",
+    );
+
+    expect(conversa.bot_silenced_until).toBeNull();
+  });
+
+  it("CONTROLE: eco SEM assinatura continua casando pela igualdade de sempre", async () => {
+    const { admin, conversa } = banco([emVoo()]);
+
+    await dispatchWahaEvent(admin as never, SESSION as never, envelope(eco(TEXTO)), "req-2066-3");
+
+    expect(conversa.bot_silenced_until).toBeNull();
+  });
+
+  it("CONTROLE: linha de nome + texto DIFERENTE do envio em voo ainda silencia", async () => {
+    // Tirar a assinatura não pode virar "qualquer mensagem com negrito é eco":
+    // o resto do texto continua tendo de ser o MESMO da linha em voo.
+    const { admin, conversa } = banco([emVoo()]);
+
+    await dispatchWahaEvent(
+      admin as never,
+      SESSION as never,
+      envelope(eco("*Carlos Gaban*\noi, respondi pelo celular")),
+      "req-2066-4",
+    );
+
+    expect(conversa.bot_silenced_until).not.toBeNull();
   });
 });

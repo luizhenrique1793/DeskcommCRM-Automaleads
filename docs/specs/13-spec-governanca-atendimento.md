@@ -83,7 +83,11 @@ create table if not exists conversation_assignment_events (
 create index if not exists idx_cae_conversation
   on conversation_assignment_events (conversation_id, created_at desc);
 
--- RLS: tenant org via fn_user_org_ids() (SELECT + INSERT).
+-- RLS de SELECT: escopo da conversa (cae_select, migration 0173).
+-- INSERT: NÃO existe policy nem GRANT para authenticated desde a 0279 — a linha
+--   é escrita por dentro de fn_conversation_assign, que é security definer. Um
+--   INSERT forjado pelo PostgREST fazia o histórico dizer que alguém assumiu o
+--   atendimento que ninguém assumiu.
 -- Append-only: sem policy de UPDATE/DELETE (mesma família de api_audit_log).
 ```
 

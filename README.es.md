@@ -264,7 +264,7 @@ Toda pantalla tiene puerta en la navegación — el CI reprueba una pantalla que
 | **WhatsApp** | WAHA Plus (motor NOWEB) + Meta Cloud API | QR para empezar rápido; canal oficial para escalar |
 | **Colas** | Tabla `event_log` + workers (cron) | Un trigger de base nunca hace HTTP |
 | **Rate limit** | Upstash Redis (sliding window) | Serverless, el free tier alcanza |
-| **IA** | Vercel AI SDK v7 — OpenRouter, Anthropic, OpenAI y Google | El instalador pregunta cuál; se cambia después desde la pantalla |
+| **IA** | Vercel AI SDK v7 — OpenRouter, Requesty, Anthropic, OpenAI y Google | El instalador pregunta cuál; se cambia después desde la pantalla |
 | **Validación** | Zod | Input externo, env, payloads |
 | **Observabilidad** | Sentry (scrub en error, transacción, span y breadcrumb) | Telemetría opt-in en la instalación |
 | **Hosting** | Cualquier VPS con Docker (HostGator/SP en la alianza) | App + WhatsApp + workers en tu propia máquina |
@@ -329,9 +329,15 @@ gh api repos/melgarafael/DeskcommCRM/branches/main/protection \
 | `verify` | typecheck + lint + `lint:channels` + `test:unit` + `test:shell` |
 | `invariants` | levanta un Postgres limpio, aplica `baseline.sql` en modo **install** (`ON_ERROR_STOP=1`) y después en modo **update** (probando idempotencia), y corre **618 invariantes en 98 archivos** — RBAC, asignación, alcance, enrutamiento, follow-up, webhooks y automatizaciones |
 | `build-and-size` | `pnpm build` en Node 22 |
-| `e2e` | levanta un Supabase local, aplica `baseline.sql` y corre **44 de las 45** specs de Playwright por el frontend |
+| `e2e` | levanta un Supabase local, aplica `baseline.sql` y corre por el frontend todas las specs de Playwright menos las que declara `FORA_DO_CI` |
 
-La única spec fuera del `e2e` es `vps-fresh-onboarding` — necesita WAHA + Redis + Resend + Nuvemshop de verdad. Es la **P0** de nuestra doctrina de QA visual, así que un `e2e` verde **no** prueba el recorrido de instalación fresca; ese se prueba en un VPS.
+Cuáles specs quedan fuera es pregunta de comando, no de lectura — esta línea llegó a afirmar que la única era `vps-fresh-onboarding`, y desde el PR #983 ella corre en el CI:
+
+```bash
+git show origin/main:.github/workflows/e2e.yml | python3 -c "import sys,re; y=sys.stdin.read(); print(sorted({s for _,c in re.findall(r'(FORA_DO_CI):\s*>-\n((?:[ ]{8,}.*\n)+)',y) for s in re.findall(r'[a-z0-9-]+\.spec\.ts',c)}))"
+```
+
+`vps-fresh-onboarding` sigue siendo la **P0** de nuestra doctrina de QA visual, porque la instalación fresca es el producto que se vende. Tener gate no reemplaza la prueba por pantalla: el gate prueba que no hubo regresión, no que la experiencia quedó buena.
 
 Entre los invariantes está el **test de aislamiento RLS**: crea 2 organizaciones, simula los claims JWT por el mismo camino `auth.uid()` / `fn_user_org_ids()` que usan las policies de producción, y prueba que un usuario de la org A ve **cero filas** de la org B en `conversations`, `messages`, `contacts` y `crm_leads`. Antes, un caso de control prueba que las filas de la org B realmente existen — sin él, el test pasaría con la tabla vacía.
 

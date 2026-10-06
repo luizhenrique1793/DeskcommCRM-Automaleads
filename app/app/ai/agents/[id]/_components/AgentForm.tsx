@@ -42,16 +42,23 @@ import { ModelPicker, useModelMeta } from "./ModelPicker";
 import { CHAVE_DA_INSTALACAO, CredentialPicker, STATUS_LABEL, findCredential } from "./CredentialPicker";
 import { rotuloDoEstadoDoCanal } from "@/lib/channels/estado";
 import { bloqueioDePublicacao } from "@/lib/ai/agents/bloqueio-de-publicacao";
+import { mesmoRascunho } from "@/lib/ai/agents/mesmo-rascunho";
 import { ToolPicker } from "./ToolPicker";
 import { ReferenciaDeCapacidades } from "./ReferenciaDeCapacidades";
 import { TriggerEditor, type TriggerValue } from "./TriggerEditor";
 import { HandoffKeywordsInput } from "./HandoffKeywordsInput";
+import { LimiarDeSentimento } from "./LimiarDeSentimento";
 import { FollowupFlowPicker } from "./FollowupFlowPicker";
+import {
+  FollowupWindowEditor,
+  type FollowupWindowValue,
+} from "./FollowupWindowEditor";
 import { PainelDoOperador } from "./PainelDoOperador";
 import { PainelDeSeguranca } from "./PainelDeSeguranca";
 import { BasesDoAgente, type MaterialDoAcervo } from "./BasesDoAgente";
 import { FunisDoAgente, type CoberturaPorFunil } from "./FunisDoAgente";
 import { PublishConfirmDialog } from "./PublishConfirmDialog";
+import { ComandosDoCelular } from "./ComandosDoCelular";
 import {
   saveAgentDraftAction,
   publishAgentAction,
@@ -69,6 +76,7 @@ import type { AgentVersionRow } from "@/hooks/ai/useAgentVersions";
 import type { CredentialRow, Provider } from "@/hooks/ai/useCredentials";
 import { credentialStatus } from "@/hooks/ai/useCredentials";
 import type { FunilDaResposta } from "@/hooks/pipelines/usePipelines";
+import { callbacksHabilitados } from "@/lib/followup/callback-policy";
 
 /**
  * O canal oferecido no seletor é exatamente o que `listSelectableChannels`
@@ -76,6 +84,18 @@ import type { FunilDaResposta } from "@/hooks/pipelines/usePipelines";
  * de quem monta a lista (é lá que mora o filtro de canal arquivado).
  */
 export type { ChannelSessionLite };
+
+/**
+ * O id que liga o botão "Publicar" ao TEXTO que diz por que ele está desabilitado.
+ *
+ * O motivo vivia só no `title` de um span: aparecia com o ponteiro parado em
+ * cima. Em tela de toque não existe hover — nunca aparecia —, e o botão
+ * desabilitado nem entra na ordem do Tab, então quem navega de teclado também
+ * não sabia o que faltava para o agente entrar no ar. Além do texto na tela, o
+ * `aria-describedby` do botão aponta para cá: quem chega pelo leitor de tela
+ * ouve o motivo junto do rótulo, sem depender de hover.
+ */
+const ID_DO_MOTIVO_DO_PUBLICAR = "motivo-do-publicar";
 
 interface BaseProps {
   credentials: CredentialRow[];
@@ -86,9 +106,20 @@ interface BaseProps {
    * conseguia salvar nada.
    */
   provedoresDaInstalacao?: string[];
+  /**
+   * O provedor que a organização já usa — `organizations.settings.llm.provider`,
+   * lido pela página de CRIAÇÃO junto com as credenciais.
+   *
+   * É o defeito do "agente novo já nasce Anthropic": o formulário oferecia
+   * `anthropic` (e "Cadastrar credencial anthropic") para uma organização cuja
+   * única chave é da OpenAI. Aqui só o valor chega; quem lê `settings` é a
+   * página server component, do mesmo jeito que as credenciais.
+   */
+  provedorPadrao?: string;
   channelSessions: ChannelSessionLite[];
   routerMembership?: { routerId: string; routerName: string } | null;
   readOnly?: boolean;
+  organizationTimezone?: string;
 }
 
 interface EditProps extends BaseProps {
@@ -151,10 +182,13 @@ interface FormState {
   history_token_window: number;
   handoff_keywords: string[];
   handoff_tool_enabled: boolean;
+  proposal_ai_draft_enabled: boolean;
   cases_enabled: boolean;
   split_messages: boolean;
   split_max_chars: number;
   typing_indicator_enabled: boolean;
+  /** Janela de rajada (ms) do agente. `null` = usa a env da instalação. */
+  inbound_debounce_ms: number | null;
   followup: FollowupValue;
   // Papel OPERADOR (spec 16 §3.2) — o que mexe no sistema depois da conversa.
   operator_enabled: boolean;
@@ -168,9 +202,17 @@ interface FormState {
 interface FollowupValue {
   enabled: boolean;
   flow_pointer_ids: string[];
+  callback_enabled: boolean;
+  /** Ausente em versões antigas; null = sem janela própria. */
+  send_window?: FollowupWindowValue | null;
 }
 
-const DEFAULT_FOLLOWUP: FollowupValue = { enabled: false, flow_pointer_ids: [] };
+const DEFAULT_FOLLOWUP: FollowupValue = {
+  enabled: false,
+  flow_pointer_ids: [],
+  send_window: null,
+  callback_enabled: true,
+};
 
 const DEFAULT_TRIGGER: TriggerValue = {
   events: ["message"],
@@ -183,17 +225,42 @@ const DEFAULT_TRIGGER: TriggerValue = {
   concurrency: "one_per_conversation",
 };
 
-function buildState(args: {
+/**
+ * O provedor inicial de um agente que ainda não tem versão.
+ *
+ * Só a lista que o seletor OFERECE vale como resposta: `settings.llm` é jsonb
+ * gravado por várias telas, e um id que `PROVEDORES` não conhece cairia num
+ * `<Select>` sem opção correspondente — o campo abrindo em branco e o
+ * formulário pedindo para escolher de novo. Fora da lista, `anthropic` (o que
+ * o seed da instalação sempre teve).
+ */
+export function provedorInicial(provedorPadrao?: string): Provider {
+  if (provedorPadrao && PROVEDORES.some((p) => p.id === provedorPadrao)) {
+    return provedorPadrao as Provider;
+  }
+  return "anthropic";
+}
+
+export function buildState(args: {
   agent?: AgentRow;
   version: AgentVersionRow | null;
   t: (texto: string) => string;
+  /**
+   * O provedor que a ORGANIZAÇÃO já usa (`organizations.settings.llm.provider`).
+   *
+   * Sem isto, um agente NOVO nascia `anthropic` — e o formulário mostrava
+   * "Cadastrar credencial anthropic" para uma organização que só tem chave da
+   * OpenAI. A escolha passa a herdar o que a instalação já decidiu; o `anthropic`
+   * continua sendo o último degrau, para instalação que ainda não escolheu nada.
+   */
+  provedorPadrao?: string;
 }): FormState {
-  const { agent, version, t } = args;
+  const { agent, version, t, provedorPadrao } = args;
   return {
     name: agent?.name ?? "",
     description: agent?.description ?? "",
     priority: agent?.priority ?? 0,
-    provider: (version?.provider as Provider) ?? "anthropic",
+    provider: (version?.provider as Provider) ?? provedorInicial(provedorPadrao),
     model: version?.model ?? "",
     // `null` gravado = a versão usa a chave da instalação. Sem esta tradução,
     // reabrir o agente mostraria o campo em branco e pediria para escolher de novo.
@@ -218,11 +285,19 @@ function buildState(args: {
       "pessoa real",
     ],
     handoff_tool_enabled: version?.handoff_tool_enabled ?? true,
+    proposal_ai_draft_enabled: version?.proposal_ai_draft_enabled ?? true,
     cases_enabled: version?.cases_enabled ?? false,
     split_messages: version?.split_messages ?? false,
     split_max_chars: version?.split_max_chars ?? 600,
     typing_indicator_enabled: version?.typing_indicator_enabled ?? false,
-    followup: version?.followup ?? DEFAULT_FOLLOWUP,
+    inbound_debounce_ms: version?.inbound_debounce_ms ?? null,
+    followup: version?.followup
+      ? {
+          ...DEFAULT_FOLLOWUP,
+          ...version.followup,
+          callback_enabled: callbacksHabilitados(version.followup),
+        }
+      : DEFAULT_FOLLOWUP,
     operator_enabled: version?.operator_enabled ?? false,
     // O form usa "" onde o banco usa null — Select controlado não aceita null.
     // A conversão de volta acontece em `toVersionPayload`, num ponto só.
@@ -275,10 +350,12 @@ function toVersionPayload(s: FormState) {
     history_token_window: s.history_token_window,
     handoff_keywords: s.handoff_keywords,
     handoff_tool_enabled: s.handoff_tool_enabled,
+    proposal_ai_draft_enabled: s.proposal_ai_draft_enabled,
     cases_enabled: s.cases_enabled,
     split_messages: s.split_messages,
     split_max_chars: s.split_max_chars,
     typing_indicator_enabled: s.typing_indicator_enabled,
+    inbound_debounce_ms: s.inbound_debounce_ms,
     followup: s.followup,
     operator_enabled: s.operator_enabled,
     // "" (não escolheu) → null (herda o do Conversador). São o mesmo conceito em
@@ -306,7 +383,7 @@ export function AgentForm(props: Props) {
       const ref = props.base ?? props.draft ?? props.published;
       return buildState({ agent: props.agent, version: ref, t });
     }
-    return buildState({ version: null, t });
+    return buildState({ version: null, t, provedorPadrao: props.provedorPadrao });
   }, [isEdit, props, t]);
 
   const [form, setForm] = React.useState<FormState>(baseline);
@@ -320,7 +397,19 @@ export function AgentForm(props: Props) {
    */
   const [papel, setPapel] = React.useState<"conversa" | "operacao" | "seguranca">("conversa");
 
-  const dirty = JSON.stringify(form) !== JSON.stringify(baseline);
+  /**
+   * A pergunta é "salvar mudaria alguma coisa?", e não "os dois objetos são
+   * idênticos". Por isso a comparação é feita sobre o que SERIA GRAVADO, de
+   * forma canônica (ver `lib/ai/agents/mesmo-rascunho.ts`): campo que o servidor
+   * completa sozinho e ordem de chaves do `jsonb` deixavam `dirty` verdadeiro
+   * para sempre, e o botão "Publicar" cinza com "Salve o rascunho antes de
+   * publicar" — medido numa instalação em produção, com o agente preso na versão
+   * anterior até alguém publicar por fora da tela.
+   */
+  const dirty = !mesmoRascunho(
+    { cadastro: toCadastroPayload(form), versao: toVersionPayload(form) },
+    { cadastro: toCadastroPayload(baseline), versao: toVersionPayload(baseline) },
+  );
 
   function patch(p: Partial<FormState>) {
     setForm((prev) => ({ ...prev, ...p }));
@@ -463,8 +552,11 @@ export function AgentForm(props: Props) {
     setSaving(true);
     try {
       if (isEdit) {
-        // A mesma régua do servidor, aqui, para o erro aparecer no campo em vez
-        // de voltar como 500 depois de a versão já ter sido gravada.
+        // A mesma régua do cadastro que a Server Action valida de novo
+        // (_actions.ts, `agentMcpPatchSchema` — não a da rota REST, que é
+        // `agentPatchSchema` e diverge em name/description), aqui só para o erro
+        // aparecer no campo em vez de voltar como 500 depois de a versão já ter
+        // sido gravada.
         const cadastro = agentMcpPatchSchema.safeParse(toCadastroPayload(form));
         if (!cadastro.success) {
           toast.error(t("Validação falhou."));
@@ -609,6 +701,7 @@ export function AgentForm(props: Props) {
                 variant="default"
                 onClick={() => setConfirmOpen(true)}
                 disabled={disabled || publishBlockReason !== null}
+                aria-describedby={publishBlockReason ? ID_DO_MOTIVO_DO_PUBLICAR : undefined}
               >
                 {publishing
                   ? t("Publicando…")
@@ -620,6 +713,27 @@ export function AgentForm(props: Props) {
           ) : null}
         </div>
       </div>
+
+      {/*
+        O MOTIVO NA TELA, não só no `title` (issue #951).
+
+        O `title` do span acima continua ali para quem usa mouse, mas ele é
+        hover: em tela de toque não existe, e um botão desabilitado nem entra na
+        ordem do Tab — a explicação do bloqueio ficava inalcançável justamente
+        para quem mais precisa dela. Aqui o MESMO motivo (`publishBlockReason`) é
+        texto da tela, e o `aria-describedby` do botão o anuncia junto do rótulo.
+      */}
+      {isEdit && publishBlockReason ? (
+        <p
+          id={ID_DO_MOTIVO_DO_PUBLICAR}
+          data-testid={ID_DO_MOTIVO_DO_PUBLICAR}
+          role="status"
+          aria-live="polite"
+          className="-mt-2 text-xs text-muted-foreground"
+        >
+          {publishBlockReason}
+        </p>
+      ) : null}
 
       {/*
         NAVEGAÇÃO POR PAPEL (spec 16 §6). Um form só, um save só — os papéis são
@@ -672,6 +786,7 @@ export function AgentForm(props: Props) {
           toolIds={form.operator_tool_ids}
           onToolIdsChange={(ids) => patch({ operator_tool_ids: ids })}
           modeloDoConversador={form.model}
+          agentId={props.mode === "edit" ? props.agent.id : null}
           disabled={disabled}
         />
       ) : null}
@@ -954,6 +1069,42 @@ export function AgentForm(props: Props) {
                   disabled={disabled}
                 />
               </div>
+              <div className="col-span-2 space-y-1">
+                <Label htmlFor="inbound_debounce_ms">
+                  {t("Esperar antes de responder (segundos)")}
+                </Label>
+                <Input
+                  id="inbound_debounce_ms"
+                  type="number"
+                  min={0}
+                  max={60}
+                  step={1}
+                  placeholder={t("Vazio = padrão da instalação")}
+                  value={
+                    form.inbound_debounce_ms === null
+                      ? ""
+                      : String(Math.round(form.inbound_debounce_ms / 1000))
+                  }
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    // Vazio = usa a env da instalação (campo null). A UI fala em
+                    // SEGUNDOS; o banco e o worker falam em ms (conversão aqui,
+                    // num ponto só). Teto de 60s no campo espelha o do worker.
+                    patch({
+                      inbound_debounce_ms:
+                        raw === ""
+                          ? null
+                          : Math.round(Math.max(0, Math.min(60, Number(raw))) * 1000),
+                    });
+                  }}
+                  disabled={disabled}
+                />
+                <p className="text-xs text-muted-foreground">
+                  {t(
+                    "Mensagens do mesmo contato dentro desse tempo viram uma resposta só. Vazio usa a janela padrão da instalação (máximo 60 segundos).",
+                  )}
+                </p>
+              </div>
             </div>
           </Card>
         </div>
@@ -1103,6 +1254,7 @@ export function AgentForm(props: Props) {
               value={form.trigger_config}
               onChange={(v) => patch({ trigger_config: v })}
               disabled={disabled}
+              organizationTimezone={props.organizationTimezone}
             />
           </Card>
 
@@ -1127,6 +1279,19 @@ export function AgentForm(props: Props) {
             />
           </Card>
 
+          {/* O OUTRO caminho para uma pessoa: o clima fechado
+              (`ai.sentiment_alert`, em `workers/ai-sentiment-worker.ts`).
+              Mesma chave que o worker já lia, agora com porta pública — issue
+              #2209. Grava em `ai_agents.config.sentiment_threshold`, por isso
+              só em edição, como o cartão dos comandos do celular. */}
+          {isEdit && (
+            <LimiarDeSentimento
+              agentId={props.agent.id}
+              inicial={(props.agent.config ?? {}).sentiment_threshold}
+              disabled={disabled}
+            />
+          )}
+
           {/* Casos humanos */}
           <Card className="space-y-3 p-4">
             <h3 className="text-sm font-medium">{t("Pedir ajuda sem sair da conversa")}</h3>
@@ -1148,12 +1313,46 @@ export function AgentForm(props: Props) {
             </p>
           </Card>
 
+          {/* Propostas comerciais */}
+          <Card className="space-y-3 p-4">
+            <h3 className="text-sm font-medium">{t("Propostas comerciais")}</h3>
+            <div className="flex items-center gap-2">
+              <Switch
+                id="proposal_ai_draft_enabled"
+                checked={form.proposal_ai_draft_enabled}
+                onCheckedChange={(v) => patch({ proposal_ai_draft_enabled: v })}
+                disabled={disabled}
+              />
+              <Label htmlFor="proposal_ai_draft_enabled">
+                {t("Deixar o agente rascunhar uma proposta quando o cliente pedir orçamento")}
+              </Label>
+            </div>
+          </Card>
+
           {/* Follow-up */}
           <Card className="space-y-3 p-4">
             <h3 className="text-sm font-medium">{t("Follow-up")}</h3>
             <p className="text-xs text-muted-foreground">
               {t(
                 "Retomar sozinho quem parou de responder, para o interessado não sumir sem ninguém perceber.",
+              )}
+            </p>
+            <div className="flex items-center gap-2">
+              <Switch
+                id="callback_enabled"
+                checked={form.followup.callback_enabled}
+                onCheckedChange={(v) =>
+                  patch({ followup: { ...form.followup, callback_enabled: v } })
+                }
+                disabled={disabled}
+              />
+              <Label htmlFor="callback_enabled">
+                {t("Permitir que o agente marque novos retornos por conta própria")}
+              </Label>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {t(
+                "Desligar impede novos retornos prometidos pelo agente. Os fluxos configurados abaixo e a consulta ou o cancelamento de retornos existentes continuam disponíveis.",
               )}
             </p>
             <div className="flex items-center gap-2">
@@ -1174,6 +1373,13 @@ export function AgentForm(props: Props) {
                 "Os fluxos abaixo só entram em ação para um cliente se este agente estiver publicado com follow-up habilitado.",
               )}
             </p>
+            <FollowupWindowEditor
+              value={form.followup.send_window ?? null}
+              onChange={(send_window) =>
+                patch({ followup: { ...form.followup, send_window } })
+              }
+              disabled={disabled || !form.followup.enabled}
+            />
             <FollowupFlowPicker
               value={form.followup.flow_pointer_ids}
               onChange={(ids) =>
@@ -1182,6 +1388,16 @@ export function AgentForm(props: Props) {
               disabled={disabled}
             />
           </Card>
+
+          {/* Comandos pelo celular (`#on`/`#off`, C-076). Salva em
+              `ai_agents.config.aceita_comandos_celular`. */}
+          {isEdit && (
+            <ComandosDoCelular
+              agentId={props.agent.id}
+              inicial={(props.agent.config ?? {}).aceita_comandos_celular}
+              disabled={disabled}
+            />
+          )}
         </div>
       </div>
 

@@ -113,37 +113,43 @@ async function main(): Promise<void> {
     "crm_get_lead",
     "crm_move_lead_stage",
     "crm_list_leads",
-    // ⚠️ AS CINCO ABAIXO ENTRARAM COM O TETO INDO DE 20 PARA 25, e não são enfeite.
+    // ⚠️ AS OITO ABAIXO NÃO SÃO ENFEITE: elas existem para o cenário ESTOURAR.
     //
-    // A jornada do teto (issue #162) só existe se o cenário ESTOURAR: eram 3 do
-    // seed + 18 de "Atender" = 21 contra teto 20, e a tela recusava dizendo
+    // A jornada do teto (issue #162) só existe se a soma passar do teto: eram 3
+    // do seed + 18 de "Atender" = 21 contra teto 20, e a tela recusava dizendo
     // "faltam 1 vaga". Com teto 25 essas mesmas 21 passam, a recusa nunca acontece
     // e o caso vira um clique que sempre dá certo — verde sem medir nada.
     //
-    // Oito reproduziam a MESMA aritmética no teto de 25: 8 + 18 = 26 > 25, recusa
-    // por 1 vaga; desligar uma deixa 7 + 18 = 25, que é o teto exato e passa.
+    // ⚠️ RECONCILIAÇÃO PENDENTE (merge upstream × Automaleads, 2026-10): a
+    // aritmética abaixo (e os comentários "ENTROU COM O TETO INDO DE..." mais
+    // adiante) foi calculada separadamente por cada lado contra tetos
+    // diferentes (31 vs 27) e catálogos diferentes. Com os dois lados
+    // somados, nem a conta nem o `TETO_TOOLS_POR_AGENTE` provisório
+    // (`lib/mcp/tools/selecao-por-pacote.ts`) estão medidos contra o
+    // catálogo real pós-merge. Rode `pnpm test:e2e` (spec
+    // `capacidades-do-agente.spec.ts`) e `tests/unit/selecao-por-pacote.test.ts`
+    // — eles dizem o número real; ajuste esta lista e os comentários por ele,
+    // não o contrário.
     //
     // As escolhidas ficam FORA do pacote "Atender" de propósito — se alguma
     // estivesse dentro, a união seria menor que a soma e a conta acima não valeria.
-    // Quatro são a família de agenda, que é o assunto do defeito que subiu o teto.
+    // Quatro são a família de agenda, que é o assunto do defeito que subiu o teto
+    // pela primeira vez; as quatro últimas são leitura pura de outros pacotes,
+    // para a aritmética continuar estourando a cada subida.
     "crm_find_free_slots",
     "crm_list_appointments",
     "crm_book_appointment",
     "crm_reschedule_appointment",
     "crm_list_pipelines",
-    // ⚠️ A NONA ENTROU COM O TETO INDO DE 25 PARA 29 (incorporação da pousada
-    // Automaleads — "Atender" foi de 18 para 21 vagas com 3 tools da pousada
-    // dentro dele).
+    // Entraram com subidas sucessivas do teto, cada lado medindo contra seu
+    // próprio catálogo (ver aviso de reconciliação acima) — união das duas
+    // listas como ponto de partida; a contagem exata precisa ser re-medida.
     "crm_create_lead",
-    // ⚠️ AS DUAS ÚLTIMAS ENTRARAM COM O TETO INDO DE 29 PARA 31 (segundo
-    // defeito da mesma incorporação: `PACOTE_PADRAO_DO_ONBOARDING` é "vender"
-    // inteiro, e a partir dele nenhum outro pacote cabia mais — ver o
-    // cabeçalho de `TETO_TOOLS_POR_AGENTE`). Mesma aritmética de sempre:
-    // 11 + 21 ("Atender") = 32 > 31, recusa por 1 vaga; desligar uma deixa
-    // 10 + 21 = 31, o teto exato. Também FORA de "Atender" — estão em
-    // "vender" — pela mesma razão das outras.
     "crm_update_lead",
     "crm_list_stages",
+    "crm_list_event_types",
+    "crm_list_human_cases",
+    "crm_list_knowledge_sources",
   ];
 
   // REPÕE TODAS AS VERSÕES DRAFT DESTE AGENTE, não só a de maior número.

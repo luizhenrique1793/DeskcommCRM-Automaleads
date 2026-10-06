@@ -1,8 +1,10 @@
 /**
  * Épico Operação Visível (F1) — central de avisos do agente.
- * GET → agent_inbox_items da org (default: abertos), mais recente primeiro,
- * paginado por cursor opaco (created_at+id, mesma convenção de
- * app/api/v1/ai/agents/[id]/runs/route.ts).
+ * GET → agent_inbox_items da org (default: abertos), paginado por cursor
+ * opaco (created_at+id, mesma convenção de
+ * app/api/v1/ai/agents/[id]/runs/route.ts). Abertos: os mais graves primeiro
+ * e, entre iguais, os mais recentes; resolvidos/todos: mais recente primeiro
+ * (é histórico, não fila).
  * PATCH → resolve/reabre EM MASSA (até 200 ids de uma vez) — sem isto, uma
  * central com mais de uma tela de avisos só dava pra resolver um por um.
  * Itens de plataforma (organization_id null) são do operador do sistema, não
@@ -22,6 +24,9 @@ import { resolverDestinosDosAvisos } from "@/lib/ai/inbox-destino";
 import { traduzir } from "@/lib/i18n/dicionario";
 
 export const dynamic = "force-dynamic";
+
+/** Ordem da fila aberta: a camada de cima sai inteira antes da seguinte. */
+const GRAVIDADES = ["critical", "warn", "info"] as const;
 
 const querySchema = z.object({
   status: z.enum(["open", "ack", "resolved", "all"]).default("open"),
@@ -67,31 +72,46 @@ export async function GET(req: NextRequest): Promise<Response> {
   }
   const { status, limit, cursor } = parsed.data;
 
-  const admin = createAdminClient();
-  let query = admin
-    .from("agent_inbox_items")
-    .select("id, kind, severity, title, body, ref_kind, ref_id, status, created_at")
-    .eq("organization_id", org.orgId)
-    .order("created_at", { ascending: false })
-    .order("id", { ascending: false })
-    .limit(limit + 1);
-  if (status !== "all") {
-    query = query.eq("status", status);
-  }
+  let cursorPayload: CursorPayload | null = null;
   if (cursor) {
-    const c = decodeCursor(cursor);
-    if (!c) return fail("invalid_request", "cursor inválido.", 400, { requestId });
-    // Tuple-aware seek: created_at < c.created_at OR (=, id < c.id).
-    query = query.or(
-      `created_at.lt.${c.created_at},and(created_at.eq.${c.created_at},id.lt.${c.id})`,
-    );
+    cursorPayload = decodeCursor(cursor);
+    if (!cursorPayload) return fail("invalid_request", "cursor inválido.", 400, { requestId });
   }
-  const { data, error } = await query;
-  if (error) {
+
+  const admin = createAdminClient();
+  const buscar = (severity?: (typeof GRAVIDADES)[number]) => {
+    let query = admin
+      .from("agent_inbox_items")
+      .select("id, kind, severity, title, body, ref_kind, ref_id, status, created_at")
+      .eq("organization_id", org.orgId)
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
+      .limit(limit + 1);
+    if (status !== "all") query = query.eq("status", status);
+    if (severity) query = query.eq("severity", severity);
+    if (cursorPayload) {
+      // Tuple-aware seek: created_at < c.created_at OR (=, id < c.id). Aplicada
+      // em CADA camada de gravidade — a página 2 retoma exatamente onde a
+      // página 1 parou, dentro de cada camada, preservando a ordem crítico →
+      // aviso → info entre páginas.
+      query = query.or(
+        `created_at.lt.${cursorPayload.created_at},and(created_at.eq.${cursorPayload.created_at},id.lt.${cursorPayload.id})`,
+      );
+    }
+    return query;
+  };
+  // Ordenar em memória os N mais recentes esconderia um crítico mais antigo
+  // que não coube nos N: a fila aberta é buscada POR CAMADA de gravidade.
+  // ponytail: até 3×(limit+1) linhas lidas para devolver `limit`; consulta
+  // sequencial que para quando enche, se um dia pesar.
+  const resultados = await Promise.all(
+    status === "open" ? GRAVIDADES.map((g) => buscar(g)) : [buscar()],
+  );
+  if (resultados.some((r) => r.error)) {
     return fail("internal_error", t("Falha ao carregar os avisos."), 500, { requestId });
   }
 
-  const rows = data ?? [];
+  const rows = resultados.flatMap((r) => r.data ?? []).slice(0, limit + 1);
   const hasMore = rows.length > limit;
   const items = hasMore ? rows.slice(0, limit) : rows;
   const last = items[items.length - 1];

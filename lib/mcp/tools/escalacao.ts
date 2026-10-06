@@ -32,10 +32,11 @@ import {
 import { getRequestPool } from "@/lib/agent-engine/db/request-pool";
 import { audit } from "@/lib/audit";
 import { carregarRosterDeAtendimento, podeAssumirAgora } from "@/lib/escalacao/atendentes";
-import { lerChamado, listarChamados } from "@/lib/escalacao/chamados";
+import { lerChamado, listarChamados, type ConversasVisiveis } from "@/lib/escalacao/chamados";
 import { lerContinuidadeHumana } from "@/lib/escalacao/continuidade";
 import { devolverAtendimentoAoAgente } from "@/lib/escalacao/retomada";
 import type { McpContext, McpToolDefinition } from "../types";
+import { resolveUserNames } from "./_users";
 
 /** Payload de auditoria a partir do ator do ctx (mesma forma de governance.ts). */
 function actorAudit(ctx: McpContext): {
@@ -62,36 +63,61 @@ export const crmListAvailableAttendants: McpToolDefinition<typeof atendentesInpu
   name: "crm_list_available_attendants",
   description:
     "Atendentes da org com is_available, capacity, current_load e can_take_now (disponível ∧ " +
-    "com folga ∧ dentro do horário — mesmo predicado do worker de roteamento). Use ANTES de " +
-    "escalar: com zero elegíveis a conversa vai para a fila e pode não ser puxada. Sem e-mail " +
-    "nem telefone.",
+    "com folga ∧ dentro do horário — mesmo predicado do worker de roteamento), mais `present` " +
+    "e `last_signal_at`: se a pessoa está com a tela do CRM aberta agora. Presença é SÓ " +
+    "informação — quem pode receber é o can_take_now. Use ANTES de escalar: com zero elegíveis " +
+    "a conversa vai para a fila e pode não ser puxada. Cada linha traz `nome` (só o full_name, " +
+    "mínimo LGPD) para a regra de roteamento citar gente e não UUID (issue #1539); sem e-mail nem telefone.",
   inputSchema: atendentesInputShape,
   category: "read",
   requiresRole: "agent",
   requiresScope: "mcp:read",
   handler: async (input, ctx) => {
     const agora = new Date();
-    const roster = await carregarRosterDeAtendimento(ctx.supabase, ctx.organizationId);
+    const roster = await carregarRosterDeAtendimento(ctx.supabase, ctx.organizationId, agora);
+    // Nome de quem atende (issue #1539): para a IA escrever uma regra de
+    // roteamento no prompt ela precisa de GENTE, não de UUID. O helper expõe
+    // SÓ `full_name` (mínimo LGPD do `team/assignable`) — nunca e-mail,
+    // telefone ou o `user_metadata` inteiro.
+    const nomes = await resolveUserNames(
+      ctx.supabase,
+      roster.map((a) => a.userId),
+    );
     const linhas = roster.map((a) => ({
       user_id: a.userId,
+      nome: nomes.get(a.userId) ?? null,
       role: a.papel,
       is_available: a.disponivel,
       capacity: a.capacidade,
       current_load: a.cargaAtual,
       can_take_now: podeAssumirAgora(a, agora),
+      // Leitor declarado (issue #996): a IA passa a saber se há alguém de fato
+      // na frente da tela. `present: false` NÃO tira ninguém da lista nem
+      // impede a passagem — quem decide isso é `can_take_now`. Serve para
+      // escolher o prazo que o agente promete ao cliente e para dizer a verdade
+      // quando prometer atendimento imediato for exagero.
+      present: a.presente,
+      last_signal_at: a.ultimoSinalEm,
     }));
     const elegiveis = linhas.filter((l) => l.can_take_now);
+    const presentes = elegiveis.filter((l) => l.present).length;
     return {
       attendants: input.only_available ? elegiveis : linhas,
       // O total elegível vai SEMPRE, mesmo com only_available=false: é o número
       // que decide se escalar agora faz sentido, e deixá-lo implícito na
       // contagem do array faria o modelo errar quando a lista vem filtrada.
       available_count: elegiveis.length,
+      // Quantos dos elegíveis têm sinal de presença agora. `present` nunca
+      // reduz `available_count`; este campo é o que permite ao agente medir o
+      // próprio exagero ao prometer "uma pessoa vai te atender".
+      present_count: presentes,
       total_count: linhas.length,
       next_action:
         elegiveis.length === 0
           ? "Ninguém pode assumir agora. Avise o cliente do prazo real em vez de prometer atendimento imediato."
-          : "Há gente disponível: pode passar o atendimento.",
+          : presentes === 0
+            ? "Há gente elegível, mas ninguém com a tela aberta agora: passe o atendimento se o prazo puder ser maior, e não prometa resposta imediata."
+            : "Há gente disponível e com a tela aberta: pode passar o atendimento.",
     };
   },
 };
@@ -99,6 +125,23 @@ export const crmListAvailableAttendants: McpToolDefinition<typeof atendentesInpu
 // ---------------------------------------------------------------------------
 // crm_list_human_cases
 // ---------------------------------------------------------------------------
+
+/**
+ * O recorte dos casos humanos para quem pede: sem contato do turno, `"todas"`
+ * (ver o comentário de `crm_list_human_cases`); com ele, só as conversas desse
+ * contato — o caso é de uma conversa, e a conversa tem dono em
+ * `conversations.contact_id`. Lista vazia é recorte válido: nenhum caso passa.
+ */
+async function casosVisiveisNoTurno(ctx: McpContext): Promise<ConversasVisiveis> {
+  if (!ctx.contatoDoTurno) return "todas";
+  const { data, error } = await ctx.supabase
+    .from("conversations")
+    .select("id")
+    .eq("organization_id", ctx.organizationId)
+    .eq("contact_id", ctx.contatoDoTurno);
+  if (error) throw new Error(`casos_do_turno_falhou: ${error.message}`);
+  return (data ?? []).map((c) => (c as { id: string }).id);
+}
 
 const listaChamadosInputShape = {
   state: z.enum(["abertos", "fechados"]).default("abertos"),
@@ -110,7 +153,8 @@ export const crmListHumanCases: McpToolDefinition<typeof listaChamadosInputShape
   description:
     "Casos humanos da org por estado. 'abertos' = awaiting_human|awaiting_lead; 'fechados' = " +
     "resolved|escalated|cancelled. Devolve title, blocker, status, conversation_id e o nome do " +
-    "contato. open_count é sempre o total de abertos, independente do filtro.",
+    "contato. open_count é sempre o total de abertos, independente do filtro." +
+    " Em conversa de atendimento, só os casos do contato desta conversa (open_count também).",
   inputSchema: listaChamadosInputShape,
   category: "read",
   requiresRole: "agent",
@@ -119,6 +163,15 @@ export const crmListHumanCases: McpToolDefinition<typeof listaChamadosInputShape
     const { chamados, abertos } = await listarChamados(ctx.supabase, ctx.organizationId, {
       estado: input.state,
       limite: input.limit,
+      // `"todas"`, e não o recorte por atendente que a TELA aplica: `ctx.supabase`
+      // é admin por contrato (o agente não é um usuário com sessão, e a org vem
+      // do `ctx`, nunca do input). Recortar aqui faria o agente de IA enxergar
+      // MENOS casos do que enxerga hoje — ele abriu esses casos e é quem
+      // acompanha a fila inteira. A divergência com a tela é deliberada e está
+      // declarada no tipo (`ConversasVisiveis`), não escondida num default.
+      // DURANTE UM TURNO, o recorte é o do contato da conversa — lista e
+      // `open_count` pelo mesmo recorte, como `listarChamados` já garante.
+      visiveisPara: await casosVisiveisNoTurno(ctx),
     });
     return { cases: chamados, open_count: abertos };
   },
@@ -137,13 +190,30 @@ export const crmGetHumanCase: McpToolDefinition<typeof chamadoInputShape> = {
   description:
     "Detalhe de um caso humano + timeline completa (eventos com actor_kind, human_action e o " +
     "texto escrito). Inclui `human_continuity`: o resumo pronto do que a pessoa decidiu nesta " +
-    "conversa — use ele para retomar sem pedir de novo o que já foi combinado.",
+    "conversa — use ele para retomar sem pedir de novo o que já foi combinado." +
+    " Em conversa de atendimento, só abre caso do contato desta conversa.",
   inputSchema: chamadoInputShape,
   category: "read",
   requiresRole: "agent",
   requiresScope: "mcp:read",
   handler: async (input, ctx) => {
-    const chamado = await lerChamado(ctx.supabase, ctx.organizationId, input.case_id);
+    // `"todas"` pela mesma razão de `crm_list_human_cases`: cliente admin por
+    // contrato, e um caso que o agente abriu não pode sumir para ele porque a
+    // conversa não está atribuída a ninguém. DURANTE UM TURNO, o recorte é o
+    // do contato da conversa, e `null` (não existe, outra organização, outro
+    // cliente) vira UMA recusa só — um uuid não vira oráculo de existência.
+    const chamado = await lerChamado(ctx.supabase, ctx.organizationId, input.case_id, {
+      visiveisPara: await casosVisiveisNoTurno(ctx),
+    });
+    if (!chamado && ctx.contatoDoTurno) {
+      return {
+        permitido: false,
+        motivo: "fora_da_conversa",
+        mensagem:
+          "esta conversa é com outra pessoa — um caso que não é deste cliente não é seu para ver; " +
+          "siga a conversa com quem está falando.",
+      };
+    }
     if (!chamado) throw new Error("case_not_found");
 
     const continuidade = await lerContinuidadeHumana(

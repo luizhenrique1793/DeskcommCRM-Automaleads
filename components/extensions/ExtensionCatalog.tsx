@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/select";
 import { useT } from "@/hooks/i18n/useT";
 import { useIdioma } from "@/lib/i18n/IdiomaProvider";
+import { portasLegiveis } from "@/lib/extensions/portas-legiveis";
 import { localize, type CatalogEntry, type ExtensionManifest } from "@/lib/extensions/manifest";
 import { compararVersoes } from "@/lib/extensions/versao";
 import {
@@ -329,11 +330,29 @@ export function CatalogExtensionCard({
           <dt className="text-muted-foreground">{t("Origem revisada")}</dt>
           <dd className="text-right break-all">{origin}</dd>
         </div>
+        {entry.publisher_label ? (
+          <div className="flex justify-between gap-3">
+            <dt className="text-muted-foreground">{t("Publicado por")}</dt>
+            <dd className="text-right break-words">{entry.publisher_label}</dd>
+          </div>
+        ) : null}
         <div className="flex justify-between gap-3">
-          <dt className="text-muted-foreground">{t("Permissão")}</dt>
-          <dd className="text-right">{t("Abre Tarefas; não lê seus dados.")}</dd>
+          {/* A lista de portas é o que a pessoa tem para decidir ANTES de instalar. Era uma
+              string fixa — "Abre Tarefas" aparecia para qualquer extensão, inclusive as que
+              não abrem Tarefas. Agora sai das permissões do próprio pacote. */}
+          <dt className="text-muted-foreground">{t("O que ela abre")}</dt>
+          <dd className="text-right">{portasLegiveis(entry.permissions, t)}</dd>
         </div>
       </dl>
+      {entry.tags && entry.tags.length > 0 ? (
+        <ul className="mt-3 flex flex-wrap gap-1.5" aria-label={t("Etiquetas")}>
+          {entry.tags.map((etiqueta) => (
+            <li key={etiqueta}>
+              <Badge variant="neutral">{etiqueta}</Badge>
+            </li>
+          ))}
+        </ul>
+      ) : null}
       <div className="mt-auto pt-4">
         {sameVersion ? (
           <div className="rounded-md border border-border p-3 text-sm">

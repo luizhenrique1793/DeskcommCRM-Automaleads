@@ -209,10 +209,10 @@ type EntradaDeMarca = {
 
 const MARCA_CONGELADA: Record<string, EntradaDeMarca> = {
   // ─── PROTOCOLO — contrato de fio. Renomear quebra integração alheia. ───
-  "app/api/v1/webhooks/in/[token]/route.ts": {
+  "lib/webhooks/assinatura.ts": {
     categoria: "PROTOCOLO",
     motivo:
-      "header que o webhook de ENTRADA exige de quem envia. Renomear invalida a assinatura de todo integrador já configurado, e o sintoma para ele é 401 sem explicação",
+      "header que o webhook de ENTRADA exige de quem envia. Renomear invalida a assinatura de todo integrador já configurado, e o sintoma para ele é 401 sem explicação. A rota que confere e a tela que ensina importam ESTA constante — o literal não se repete mais em nenhuma das duas",
     marcas: ["x-deskcomm-signature"],
   },
   "lib/automation/actions/call-webhook.ts": {
@@ -225,7 +225,7 @@ const MARCA_CONGELADA: Record<string, EntradaDeMarca> = {
     categoria: "PROTOCOLO",
     motivo:
       "é a guarda do contrato acima: este teste é o que reprova quem renomear o header. Trocar a string aqui para 'limpar a marca' desarmaria a única proteção que o contrato tem",
-    marcas: ["x-deskcomm-event", "x-deskcomm-signature", "x-deskcomm-signature"],
+    marcas: ["x-deskcomm-event", "x-deskcomm-signature", "x-deskcomm-signature", "x-deskcomm-signature"],
   },
   "lib/mcp/server.ts": {
     categoria: "PROTOCOLO",
@@ -799,11 +799,45 @@ type CategoriaDeHost =
   /** Host de plataforma ACEITO na entrada (validação), não destino de chamada. */
   | "PLATAFORMA"
   /** Identificador de fio que gravamos; quem reconhece é código de fora. */
-  | "PROTOCOLO";
+  | "PROTOCOLO"
+  /**
+   * Autoridade de controlo citada ao TITULAR num documento legal (alínea f) do
+   * art. 15.º, n.º 1 do RGPD). O código não fala com ela; quem a visita é a
+   * pessoa que vai reclamar. Uma por país com lei revisada — fechada por nome.
+   */
+  | "AUTORIDADE";
 
 type EntradaDeHost = { categoria: CategoriaDeHost; motivo: string };
 
 const HOSTS_DECLARADOS: Record<string, EntradaDeHost> = {
+  "datamanager.googleapis.com": {
+    categoria: "FORNECEDOR",
+    motivo: "endpoint oficial da Google Data Manager API: recebe conversões e consulta o processamento na conta autorizada pela própria organização. O destino pertence ao fornecedor e não à instalação do CRM.",
+  },
+  // ── localização compartilhada: o link que abre o pino do cliente ──
+  "maps.google.com": {
+    categoria: "PLATAFORMA",
+    motivo:
+      "link de mapa que `lib/messaging/localizacao.ts` monta com as coordenadas do pino que o CLIENTE mandou pelo WhatsApp: é o que o atendente toca para ver o endereço de entrega e o que o agente lê. O código não chama o host; o celular abre o app de mapas. Trocar pelo domínio do revendedor não abriria mapa nenhum.",
+  },
+  // ── empresas e pessoas (metade B2B do #1621): consulta de CNPJ ──
+  "brasilapi.com.br": {
+    categoria: "FORNECEDOR",
+    motivo:
+      "endpoint público da BrasilAPI (`lib/brasil-api/client.ts`) que devolve os dados cadastrais de um CNPJ. É o destino do request, só chamado com o módulo de empresas ligado e só para o CNPJ que alguém da organização cadastrou ou importou; trocar pelo domínio do revendedor faria a consulta não chegar a lugar nenhum.",
+  },
+  // ── geocodificação reversa do pino (0504): destino de chamada ──
+  "maps.googleapis.com": {
+    categoria: "FORNECEDOR",
+    motivo:
+      "endpoint da Geocoding API do Google (`lib/mapas/geocodificacao.ts`), chamado com a chave da PRÓPRIA organização para transformar as coordenadas do pino em rua e cidade aproximadas. É o destino do request: trocar pelo domínio do revendedor faria a chamada não chegar a lugar nenhum. Sem chave cadastrada, o código não fala com ele.",
+  },
+  // ── prospecção (PR #963): destino de chamada do crawler ──
+  "api.apify.com": {
+    categoria: "FORNECEDOR",
+    motivo:
+      "endpoint da plataforma que roda o crawler do Google Places (`lib/prospecting/provider.ts`). É o destino do request, com a chave da PRÓPRIA organização — trocar pelo domínio do revendedor quebraria a chamada, e esconder o nome não esconde para onde o dado vai.",
+  },
   // ── identificador de fio: NÃO é destino de chamada nem texto de tela ──────
   "s.whatsapp.net": {
     categoria: "PROTOCOLO",
@@ -816,6 +850,21 @@ const HOSTS_DECLARADOS: Record<string, EntradaDeHost> = {
     motivo:
       "endpoint da API da OpenAI (embeddings da busca e transcrição de áudio). É o destino do request: trocar pelo domínio do revendedor faria a chamada não chegar a lugar nenhum.",
   },
+  "auth.openai.com": {
+    categoria: "FORNECEDOR",
+    motivo:
+      "endpoint de autorização OAuth da OpenAI usado pelo login por PKCE da assinatura (`lib/ai/pontos/pkce-da-assinatura.ts`): é onde o fluxo troca o code pelo token e renova o acesso. É o destino do request, iniciado pelo próprio usuário na tela de Sistema — trocar pelo domínio do revendedor faria o login não chegar a lugar nenhum.",
+  },
+  "chatgpt.com": {
+    categoria: "FORNECEDOR",
+    motivo:
+      "backend do Codex (`OPENAI_CODEX_ENDPOINT` em `lib/agent-engine/edge/llm/providers.ts`): é para lá que a chamada da ASSINATURA do ChatGPT vai, com o access_token do login por PKCE, e o mesmo host é o painel que a lista de Credenciais aponta em `ondePegarAChave` (`lib/ai/pontos/provedores.ts`). Não é contrato público da OpenAI e a Openai pode mudá-lo sem aviso — é por isto que a queda para a chave da organização existe: muda o destino, não a conversa.",
+  },
+  "api.typesafe.ai": {
+    categoria: "FORNECEDOR",
+    motivo:
+      "endpoint do System One (`lib/ai/decisao/cliente.ts`) — o modelo que devolve decisão tipada em vez de texto, usado hoje no medidor de clima da conversa e na validação da chave dele (`GET /v1/models`, em lib/ai/provider-validators.ts). É o destino do request, com a chave da PRÓPRIA organização: trocar pelo domínio do revendedor faria a chamada não chegar a lugar nenhum. Mesma razão das outras entradas de FORNECEDOR, e vale registrar que a allowlist de egress deriva DESTA base (`baseDaApiDoJev()`), então esconder o nome aqui quebraria também a contenção de saída.",
+  },
   "api.anthropic.com": {
     categoria: "FORNECEDOR",
     motivo:
@@ -825,6 +874,16 @@ const HOSTS_DECLARADOS: Record<string, EntradaDeHost> = {
     categoria: "FORNECEDOR",
     motivo:
       "endpoint da OpenRouter nos três caminhos que falam com ela (runtime, catálogo de modelos e prova de crédito). O `HTTP-Referer` da atribuição NÃO mora aqui — sai de env (OPENROUTER_APP_URL), e quem o defende é tests/unit/openrouter-atribuicao.test.ts.",
+  },
+  "api.deepseek.com": {
+    categoria: "FORNECEDOR",
+    motivo:
+      "endpoint da API da DeepSeek (OpenAI-compatível) no registry de produção, no runtime de ensaio, no validador de chave e na prova de crédito. É o destino do request, não texto de interface; trocar pelo domínio do revendedor faria a chamada não chegar.",
+  },
+  "router.requesty.ai": {
+    categoria: "FORNECEDOR",
+    motivo:
+      "endpoint da Requesty (roteador OpenAI-compatível) no registry de produção, no runtime de ensaio, no validador de chave e na prova de crédito. É o destino do request, não texto de interface.",
   },
   "generativelanguage.googleapis.com": {
     categoria: "FORNECEDOR",
@@ -844,7 +903,12 @@ const HOSTS_DECLARADOS: Record<string, EntradaDeHost> = {
   "oauth2.googleapis.com": {
     categoria: "FORNECEDOR",
     motivo:
-      "endpoint de token do OAuth do Google — o par de `accounts.google.com` no fluxo de autorização da agenda.",
+      "endpoint de token do OAuth do Google — o par de `accounts.google.com` no fluxo de autorização da agenda, e também do Google Ads (`lib/plataformas-de-anuncio/google/token.ts`).",
+  },
+  "googleads.googleapis.com": {
+    categoria: "FORNECEDOR",
+    motivo:
+      "endpoint da Google Ads API, para onde `lib/plataformas-de-anuncio/google/conversions.ts` reporta a venda de volta ao anúncio que trouxe o lead. Irmão de `graph.facebook.com` no eixo da Meta: é contrato do fornecedor, não escolha nossa — a conta de anúncios é do cliente, o domínio é do Google.",
   },
   "accounts.google.com": {
     categoria: "FORNECEDOR",
@@ -865,6 +929,11 @@ const HOSTS_DECLARADOS: Record<string, EntradaDeHost> = {
     motivo:
       "endpoint padrão do adapter do canal de mensagens, com override por ZERNIO_API_BASE_URL. Fixo de propósito: instalação que não configura nada tem de funcionar.",
   },
+  "cloud.datafyapi.com.br": {
+    categoria: "FORNECEDOR",
+    motivo:
+      "endpoint padrão do canal parceiro que espelha a Cloud API (recorte do #1130), com override por DATAFY_API_BASE_URL. É o destino das chamadas de envio e de validação do token — e o canal só existe numa instalação que o liga (DATAFY_ENABLED).",
+  },
   // ── painel do fornecedor: texto de tela apontando para o endereço DELE ────
   "platform.openai.com": {
     categoria: "CONSOLE",
@@ -874,6 +943,21 @@ const HOSTS_DECLARADOS: Record<string, EntradaDeHost> = {
   "console.anthropic.com": {
     categoria: "CONSOLE",
     motivo: "painel de chaves da Anthropic. Mesmo caso: é de onde a credencial do usuário sai.",
+  },
+  "console.typesafe.ai": {
+    categoria: "CONSOLE",
+    motivo:
+      "painel onde o usuário gera a PRÓPRIA chave do Jev (`ondePegarAChave` de PROVEDORES_DE_DECISAO em lib/ai/pontos/provedores.ts). Endereço do fornecedor, não nosso.",
+  },
+  "platform.deepseek.com": {
+    categoria: "CONSOLE",
+    motivo:
+      "painel onde o usuário gera a PRÓPRIA chave da DeepSeek (`ondePegarAChave` em lib/ai/pontos/provedores.ts). Endereço do fornecedor, não nosso.",
+  },
+  "app.requesty.ai": {
+    categoria: "CONSOLE",
+    motivo:
+      "painel onde o usuário gera a PRÓPRIA chave da Requesty (`ondePegarAChave` em lib/ai/pontos/provedores.ts). Endereço do fornecedor, não nosso.",
   },
   "aistudio.google.com": {
     categoria: "CONSOLE",
@@ -885,6 +969,11 @@ const HOSTS_DECLARADOS: Record<string, EntradaDeHost> = {
       "portal de parceiros da Nuvemshop, onde o operador registra o aplicativo e pega client id e secret. Endereço da plataforma, não nosso.",
   },
   // ── amostra de formato: mostra o que digitar, não é destino ──────────────
+  "wa.me": {
+    categoria: "AMOSTRA",
+    motivo:
+      "o encurtador de link do próprio WhatsApp, num exemplo de link GERADO pela tela de Conversões (issue #924): é o formato que quem opera vai colar no botão da landing page. Não é destino de chamada — o produto nunca fala com `wa.me`; quem abre o link é o visitante do site, no navegador dele. E não é marca nossa que um revendedor troque: o endereço é da Meta, e trocá-lo faria o link não abrir conversa nenhuma. Fica AMOSTRA porque chega à TELA, que é a razão de a régua exigir declaração em vez de silêncio.",
+  },
   "meusistema.com": {
     categoria: "AMOSTRA",
     motivo:
@@ -910,6 +999,12 @@ const HOSTS_DECLARADOS: Record<string, EntradaDeHost> = {
     categoria: "PLATAFORMA",
     motivo:
       "host do Google Meet aceito na validação do link de reunião (`meetVideoUrl`): é entrada que o produto CONFERE, não endereço que ele busca. Sem a linha, qualquer host passaria por link de reunião.",
+  },
+  // ── autoridade de controlo: a quem o titular reclama (art. 15.º, n.º 1, f) ──
+  "www.cnpd.pt": {
+    categoria: "AUTORIDADE",
+    motivo:
+      "site oficial da Comissão Nacional de Proteção de Dados, a autoridade de controlo portuguesa (`autoridadeDeSupervisao` do perfil PT em lib/legal/perfil-do-pais.ts). Sai impresso no relatório de acesso do titular, alínea f) do art. 15.º, n.º 1 (#2354). O código nunca chama o host — quem o visita é o titular que vai reclamar —, e trocá-lo pelo domínio do revendedor mandaria a reclamação para quem é reclamado.",
   },
   "deskcomm.app": {
     categoria: "PROTOCOLO",
@@ -1045,6 +1140,7 @@ describe("catraca de host de terceiro no código que embarca", () => {
       "AMOSTRA",
       "PLATAFORMA",
       "PROTOCOLO",
+      "AUTORIDADE",
     ];
     for (const [host, entrada] of Object.entries(HOSTS_DECLARADOS)) {
       expect(categorias, `${host}: categoria desconhecida`).toContain(entrada.categoria);
@@ -1071,12 +1167,23 @@ describe("catraca de host de terceiro no código que embarca", () => {
     ).toEqual([
       "000000000000-xxxxxxxx.apps.googleusercontent.com",
       "aistudio.google.com",
+      // Decisão escrita: painel de chaves da Requesty, o mesmo caso dos outros
+      // CONSOLE (o link "Onde pegar a chave" da tela de Credenciais).
+      "app.requesty.ai",
       "console.anthropic.com",
+      // Decisão escrita: é o painel de chaves do Jev, o mesmo caso dos outros
+      // CONSOLE — o link "Onde pegar a chave" da tela de Credenciais.
+      "console.typesafe.ai",
       "deskcomm.app",
+      // Link que abre o pino que o CLIENTE mandou (`lib/messaging/localizacao.ts`).
+      // Mesma natureza do `wa.me` abaixo: o produto não fala com o host, quem
+      // abre é o celular do atendente. Crescimento escrito, como a regra pede.
+      "maps.google.com",
       "meet.google.com",
       "meusistema.com",
       "mi-gateway.ejemplo.com",
       "partners.tiendanube.com",
+      "platform.deepseek.com",
       "platform.openai.com",
       // Decisão escrita, que é o que esta lista cobra: `s.whatsapp.net` é o
       // sufixo do JID do WhatsApp, lido em `lib/waha/resolve-contact-whatsapp-id.ts`
@@ -1090,6 +1197,15 @@ describe("catraca de host de terceiro no código que embarca", () => {
       // reservado, mesma natureza dos outros placeholders de URL da lista.
       "seu-servidor.exemplo.com",
       "tusitio.com",
+      // Exemplo de link do WhatsApp gerado pela tela de Conversões (#924). Está
+      // aqui, e não em FORNECEDOR, porque o produto NÃO fala com esse host: quem
+      // abre o link é o visitante do site. Crescimento escrito, como a regra pede.
+      "wa.me",
+      // Decisão escrita (#2354): a CNPD, autoridade de controlo citada na
+      // alínea f) do relatório de acesso de Portugal. Categoria própria,
+      // AUTORIDADE, porque não é painel, amostra nem plataforma: é o endereço
+      // a que a lei manda o titular ir. País novo com lei revisada traz a sua.
+      "www.cnpd.pt",
     ]);
   });
 

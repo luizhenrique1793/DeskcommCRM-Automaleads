@@ -89,7 +89,12 @@ function rodarPassoLp(respostas: Record<string, { status: string; html?: string 
     '  if [ -f "$pasta/status" ]; then read -r status < "$pasta/status"; fi',
     '  if [ "$status" = 000 ]; then if [ -n "$formato" ]; then printf 000; fi; return 7; fi',
     '  if [ -n "$falha_http" ] && [ "$status" -ge 400 ]; then return 22; fi',
-    '  if [ "$corpo" = "-" ] && [ -f "$pasta/html" ]; then IFS= read -r html < "$pasta/html"; printf "%s\\n" "$html"; fi',
+    // `-o` grava o CORPO no arquivo, como o curl de verdade — não "não emite corpo".
+    // Enquanto esta linha só escrevia em stdout, um passo que usasse `-o` recebia
+    // corpo VAZIO com o status CERTO, e o caso de sucesso reprovava como se fosse
+    // regressão do passo. O engano é caro justamente porque o status vinha certo.
+    '  if [ -f "$pasta/html" ]; then IFS= read -r html < "$pasta/html"; fi',
+    '  if [ "$corpo" = "-" ]; then printf "%s\\n" "$html"; else printf "%s\\n" "$html" > "$corpo"; fi',
     '  if [ -n "$formato" ]; then printf "%s" "$status"; fi',
     "}",
     "sleep() { :; }",
@@ -156,12 +161,27 @@ describe("a release chega à página de changelog da LP", () => {
     const bloco = passo(PASSO_LP);
     for (const p of ["/changelog", "/en/changelog", "/es/changelog"]) expect(bloco).toContain(p);
     expect(bloco).toContain("https://www.deskcomm.com.br");
-    // Todo ramo que anuncia erro precisa sair com 1. Contar "existe um exit 1" não basta: o passo
-    // tem dois ramos de erro (a lista e a página da versão), e a sabotagem que tirou só o
-    // primeiro passou verde com essa régua.
+    // Todo ramo que anuncia erro precisa sair com 1. Contar "existe um exit 1" não basta: a
+    // sabotagem que tirou só o primeiro passou verde com essa régua.
+    //
+    // São TRÊS, e o número subiu de 2 para 3 de propósito em 19/09/2026:
+    //   1. a lista não trouxe a versão — a vitrine está viva e o CHANGELOG que ela lê não tem;
+    //   2. a página da própria versão não abre;
+    //   3. a VITRINE INTEIRA está fora do ar — as três páginas com status que nenhuma espera
+    //      conserta, em duas tentativas seguidas.
+    //
+    // O terceiro nasceu de um incidente medido: a Vercel desativou o deploy da LP por cobrança e
+    // devolveu 402 em tudo. Sem ele, o passo gastava os 47 minutos inteiros para então dizer "a
+    // versão não aparece" — diagnóstico errado, e o caro: quem lesse o run concluiria que a
+    // RELEASE quebrou, quando tag, release e imagens já tinham sido conferidas.
     const ramos = [...bloco.matchAll(/\n(\s+)if \[[^\n]*\]; then\n([\s\S]*?)\n\1fi\b/g)].map((m) => m[2] ?? "");
     const ramosDeErro = ramos.filter((r) => r.includes("::error::"));
-    expect(ramosDeErro.length, "o passo deixou de ter os dois ramos de erro").toBe(2);
+    expect(ramosDeErro.length, "o passo deixou de ter os três ramos de erro").toBe(3);
+    // E o ramo da vitrine precisa dizer que a ENTREGA aconteceu: sem essa frase, o log continua
+    // induzindo a conclusão errada mesmo com o ramo certo no lugar.
+    const ramoDaVitrine = ramosDeErro.find((r) => r.includes("VITRINE"));
+    expect(ramoDaVitrine, "o ramo da vitrine fora do ar sumiu").toBeTruthy();
+    expect(ramoDaVitrine ?? "").toMatch(/redispare/i);
     for (const r of ramosDeErro) expect(r, "ramo de erro que não reprova o job").toMatch(/\n\s+exit 1(\n|$)/);
     expect(bloco).not.toContain("continue-on-error");
     // A sonda procura o LINK da versão: o número solto casa "1.2.1" dentro de "1.2.10".

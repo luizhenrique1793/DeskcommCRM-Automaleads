@@ -20,7 +20,7 @@ const manifesto = {
   name: "tarefas-praticas",
   version: "1.2.3",
   license: "MIT",
-  host_api: { min: 1, max: 1 },
+  host_api: { min: 1, max: 2 },
   permissions: ["navigation.tasks"],
   dependencies: [],
   data: { mode: "none" },
@@ -133,7 +133,7 @@ describe("montarAnterior", () => {
     name: "tarefas-praticas",
     version,
     license: "MIT",
-    host_api: { min: 1, max: 1 },
+    host_api: { min: 1, max: 2 },
     display: manifesto.display,
     permissions: ["navigation.tasks"],
     sha256,
@@ -159,7 +159,7 @@ describe("montarAnterior", () => {
       compatible: false,
       compatibility_reason: MOTIVO_PACOTE_ILEGIVEL,
     });
-    const outraApi = artefato(JSON.stringify({ ...manifesto, host_api: { min: 2, max: 2 } }));
+    const outraApi = artefato(JSON.stringify({ ...manifesto, host_api: { min: 3, max: 3 } }));
     expect(montarAnterior(outraApi, item, [])).toMatchObject({
       version: "1.2.3",
       compatible: false,

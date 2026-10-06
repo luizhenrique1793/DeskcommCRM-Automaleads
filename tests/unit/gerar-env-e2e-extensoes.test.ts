@@ -22,7 +22,7 @@ describe("o preparo habitual do E2E inclui o catálogo local de extensões", () 
 set -eu
 if [ "$*" = 'status' ]; then exit 0; fi
 if [ "$*" = 'status -o env' ]; then
-  printf '%s\\n' 'API_URL="http://127.0.0.1:54321"' 'ANON_KEY="synthetic-anon"' 'SERVICE_ROLE_KEY="synthetic-service"'
+  printf '%s\\n' 'API_URL="http://127.0.0.1:54321"' 'ANON_KEY="synthetic-anon"' 'SERVICE_ROLE_KEY="synthetic-service"' 'DB_URL="postgresql://postgres:senha-sintetica@127.0.0.1:54322/postgres"'
   exit 0
 fi
 exit 2
@@ -47,6 +47,9 @@ exit 2
       expect(ambiente).toContain(`NEXT_PUBLIC_APP_URL=http://localhost:${porta || "3001"}\n`);
       expect(ambiente).toContain("NEXT_PUBLIC_SUPABASE_URL=http://127.0.0.1:54321\n");
       expect(ambiente).toContain("EXTENSIONS_LOCAL_CATALOG_ORIGIN=http://127.0.0.1:56331\n");
+      // A spec do Jev sobe o dublê nesta porta; o servidor sob teste só o
+      // alcança se o gerador a escrever.
+      expect(ambiente).toContain("JEV_API_BASE_URL=http://127.0.0.1:3996\n");
       expect(ambiente).toContain(`CPF_ENCRYPTION_KEY=${chave}\n`);
       expect(ambiente).toContain("SENTRY_DSN=off\n");
     } finally {

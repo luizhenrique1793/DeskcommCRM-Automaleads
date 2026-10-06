@@ -1,5 +1,6 @@
 import { ok } from "@/lib/api/wrappers";
 import { requireRole } from "@/lib/auth/require-role";
+import { destinoDaCapacidade } from "@/lib/extensions/capacidades";
 import {
   ExtensionServiceError,
   extensionFailure,
@@ -39,9 +40,19 @@ export async function POST(
         "Este card não existe na versão instalada. Recarregamos o guia.",
       );
     }
-    // Esta capacidade só resolve um destino do núcleo. Nenhum dado de tarefa
-    // vai ao pacote; a rota de Tarefas continua exigindo sua autorização própria.
-    return ok({ href: "/app/tasks" });
+    // O destino vem do MAPA, nunca de literal. Este ponto ficou com `/app/tasks` fixo depois
+    // que a ADR-0003 abriu seis portas: o schema recusava as novas, e quando parou de recusar,
+    // todas as seis abriam Tarefas. Medido em tela: o clique em `inbox.open` navegava para
+    // `/app/tasks`. Nenhum dado do pacote entra aqui — ele nomeia a capacidade, o host traduz,
+    // e a tela de destino continua exigindo a autorização própria dela.
+    const href = destinoDaCapacidade(input.capability);
+    if (!href) {
+      throw new ExtensionServiceError(
+        "extension_card_unavailable",
+        "Este card não existe na versão instalada. Recarregamos o guia.",
+      );
+    }
+    return ok({ href });
   } catch (error) {
     return extensionFailure(error);
   }

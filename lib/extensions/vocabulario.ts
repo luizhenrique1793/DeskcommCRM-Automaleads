@@ -16,6 +16,8 @@ export const EXTENSION_OPERATION_KINDS = [
   "revert",
   "removal",
   "configure",
+  // Módulo opcional instalado na instância (ADR-0002, D3 — migration 0340). Recibo de plataforma.
+  "module_install",
 ] as const;
 export type ExtensionOperationKind = (typeof EXTENSION_OPERATION_KINDS)[number];
 
