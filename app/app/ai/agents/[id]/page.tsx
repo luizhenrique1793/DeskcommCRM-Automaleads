@@ -141,6 +141,22 @@ export default async function AgentEditorPage({ params }: { params: Promise<{ id
         .order("created_at", { ascending: true }),
     ]);
 
+  // Achado em produção (fork Automaleads): `versionsRes.data ?? []` nunca
+  // conferia `versionsRes.error` — uma falha TRANSITÓRIA desta consulta (lock,
+  // timeout, hiccup de conexão) virava silenciosamente "este agente não tem
+  // versão nenhuma": a tela renderizava o formulário em branco, sem nenhum
+  // aviso, com `draft`/`published` nulos e `tool_ids: []` — indistinguível de
+  // um agente novo de verdade. Sem um `error.tsx` a avisar, o passo seguinte
+  // ("Salvar") persistia esse `[]` como a nova versão, apagando as capacidades
+  // da versão anterior (o caso real: Solzinho v25 → v26). Lançar aqui (capturado
+  // por app/app/error.tsx) troca "parece um agente vazio" por um erro visível —
+  // a mesma regra que o resto do produto já segue para falha de leitura crítica.
+  if (versionsRes.error) {
+    throw new Error(
+      `Não foi possível carregar as versões deste agente (${versionsRes.error.message}). ` +
+        `Recarregue a página — NÃO salve enquanto este erro aparecer.`,
+    );
+  }
   const versions = (versionsRes.data ?? []) as unknown as AgentVersionRow[];
   const funis = (funisRes.data ?? []) as unknown as FunilDaResposta[];
   const materiaisVivos = (acervoRes.data ?? []) as unknown as MaterialDoAcervo[];

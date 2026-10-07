@@ -108,7 +108,11 @@ function aplicar(linhas: VersaoRow[], filtros: Array<[string, unknown]>) {
   return linhas.filter((l) => filtros.every(([c, v]) => l[c] === v));
 }
 
-function adminDuble(agente: Record<string, unknown>, versoes: VersaoRow[]) {
+function adminDuble(
+  agente: Record<string, unknown>,
+  versoes: VersaoRow[],
+  erroNaLeituraDeVersoes: { message: string } | null = null,
+) {
   return {
     from(tabela: string) {
       if (tabela === "ai_agents") {
@@ -150,9 +154,15 @@ function adminDuble(agente: Record<string, unknown>, versoes: VersaoRow[]) {
           maybeSingle: async () => ({ data: linhas()[0] ?? null, error: null }),
           single: async () => ({ data: linhas()[0] ?? null, error: null }),
           // Query sem `.maybeSingle()`/`.single()` é aguardada direto — é assim
-          // que o supabase-js devolve a LISTA.
-          then: (r: (v: { data: VersaoRow[]; error: null }) => unknown) =>
-            r({ data: linhas(), error: null }),
+          // que o supabase-js devolve a LISTA. Com erro injetado, `data` vem
+          // `null` — é exatamente o que o supabase-js devolve numa falha real,
+          // nunca um array vazio (`[]` é "zero linhas", não "não consegui ler").
+          then: (r: (v: { data: VersaoRow[] | null; error: { message: string } | null }) => unknown) =>
+            r(
+              erroNaLeituraDeVersoes
+                ? { data: null, error: erroNaLeituraDeVersoes }
+                : { data: linhas(), error: null },
+            ),
         };
         return q;
       };
@@ -318,6 +328,41 @@ describe("saveAgentDraftAction — em qual versão a escrita cai", () => {
     expect(res.data?.version_id).toBe("v5");
     expect(versoes).toHaveLength(2);
     expect(versoes.find((v) => v.id === "v5")!.system_prompt).toBe(PROMPT_NOVO);
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // ACHADO EM PRODUÇÃO (fork Automaleads, Solzinho v25→v26): a consulta que
+  // decide ONDE a escrita cai nunca conferia `error` — `versoes ?? []` tratava
+  // uma falha TRANSITÓRIA (lock, timeout, hiccup de conexão) como "este agente
+  // não tem rascunho nenhum", e a função caía no ramo de CRIAR versão nova.
+  // Combinado com a mesma falha na TELA (`page.tsx`), o formulário também
+  // abria em branco — e o próximo "Salvar" persistia `tool_ids: []` por cima
+  // de uma versão que tinha 22 capacidades ligadas. Falhar alto aqui, como a
+  // tela já faz, troca "parece um agente sem rascunho" por um erro visível.
+  // ─────────────────────────────────────────────────────────────────────────
+  it("a consulta de versões falhando NÃO é tratada como 'sem rascunho' — falha alto, não cria versão", async () => {
+    const versoes = [
+      versao(5, "draft", "trabalho antigo, parado no rascunho v5"),
+      versao(6, "published", "o texto que atende hoje"),
+    ];
+    vi.mocked(createAdminClient).mockReturnValue(
+      adminDuble(agenteCom("v6"), versoes, { message: "banco indisponível" }) as never,
+    );
+    const res = (await saveAgentDraftAction(AGENTE, VERSION_PAYLOAD)) as {
+      ok: boolean;
+      error?: string;
+      message?: string;
+    };
+
+    expect(res.ok, "a falha de leitura foi tratada como sucesso").toBe(false);
+    expect(res.error).toBe("internal_error");
+    expect(res.message).toContain("banco indisponível");
+    // Nenhuma versão nova nasceu, e as duas que já existiam continuam intactas
+    // — o ramo de CRIAR nunca deveria ter sido alcançado.
+    expect(versoes).toHaveLength(2);
+    expect(versoes.find((v) => v.id === "v5")!.system_prompt).toBe(
+      "trabalho antigo, parado no rascunho v5",
+    );
   });
 
   it("quem decide a publicada é o PONTEIRO, não a coluna status", async () => {

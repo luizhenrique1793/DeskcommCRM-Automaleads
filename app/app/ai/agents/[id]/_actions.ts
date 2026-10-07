@@ -199,12 +199,24 @@ export async function saveAgentDraftAction(
   //      `fn_ai_agent_version_content_immutable` não pega este caso, porque ele
   //      congela conteúdo de `status <> 'draft'` e o rascunho superado ainda é
   //      `draft`.
-  const { data: versoes } = await admin
+  const { data: versoes, error: versoesError } = await admin
     .from("ai_agent_versions")
     .select("id, version_number, status")
     .eq("organization_id", activeOrg.orgId)
     .eq("agent_id", agentId)
     .order("version_number", { ascending: false });
+
+  // Achado em produção (fork Automaleads): `versoes ?? []` sem conferir o
+  // `error` — uma falha TRANSITÓRIA desta consulta (lock, timeout) fazia
+  // `escolherVersoesDaTela([], ...)` devolver `existingDraft: null` mesmo
+  // quando o rascunho existe de verdade, e esta função cai no ramo de CRIAR
+  // versão nova em vez de corrigir a existente. Mesma classe de defeito do
+  // "prompt sumiu" documentado no cabeçalho de versoes-da-tela.ts — lá era a
+  // TELA que confundia "não consegui perguntar" com "a resposta é não"; aqui é
+  // a ESCRITA. Falhar alto aqui é melhor que gravar uma versão no ramo errado.
+  if (versoesError) {
+    return { ok: false, error: "internal_error", message: versoesError.message };
+  }
 
   const { draft: existingDraft } = escolherVersoesDaTela(
     versoes ?? [],
