@@ -1301,19 +1301,34 @@ export async function runBeforeSend(args: RunBeforeSendArgs): Promise<BeforeSend
     const bodyDoModelo =
       estilo !== null ? aplicarAjustesDeEstilo(args.body, estilo.ajustes) : args.body;
 
-    // `args.optedOutThisTurn` já chega como `contact.is_blocked` puro (todo
-    // chamador que o seta — inbound-turn.ts, followup-turn.ts — lê só essa
-    // coluna): quando ele é true, o motivo é sempre 'is_blocked'. Senão, relê
-    // as três travas direto da fonte (sob o lock desta tentativa) via
-    // `readStopFlags`, que decide qual delas é o motivo a reportar.
-    const stop = args.optedOutThisTurn
-      ? { stopped: true, reason: 'is_blocked' as const }
-      : await readStopFlags(
-          client,
-          args.tenantId,
-          args.leadId,
-          meetingPolicy?.humanCommand === true || replyPolicy !== null,
-        );
+    // `readStopFlags` lê as três travas DIRETO da fonte, sob o lock desta
+    // tentativa — é sempre a verdade mais atual. `args.optedOutThisTurn` é um
+    // SNAPSHOT tirado na abertura do turno (inbound-turn.ts/followup-turn.ts
+    // leem só `contact.is_blocked` nesse momento); ele é rede de segurança
+    // para o caso raro de a leitura concorrente perder a trava entre a
+    // abertura do turno e esta tentativa — NUNCA para SUBSTITUIR o motivo que
+    // a leitura fresca encontrou.
+    //
+    // ⚠️ MEDIDO EM PRODUÇÃO (fork Automaleads, 07/10): o turno abria com
+    // `is_blocked=true` (herdado de um bloqueio de teste já revertido) e, no
+    // meio do turno, o motivo REAL virava `force_human` (o próprio modelo
+    // disparou `crm_request_human_handoff`). Com o snapshot decidindo sozinho,
+    // o veto reportava 'is_blocked' mesmo depois de `readStopFlags` já
+    // enxergar `force_human` puro — o aviso ao lead e a atividade da Central
+    // diziam opt-out para uma conversa que só estava com humano. A leitura
+    // fresca agora SEMPRE roda e vence quando está "stopped"; o snapshot só
+    // decide quando a leitura fresca não encontra trava nenhuma.
+    const live = await readStopFlags(
+      client,
+      args.tenantId,
+      args.leadId,
+      meetingPolicy?.humanCommand === true || replyPolicy !== null,
+    );
+    const stop = live.stopped
+      ? live
+      : args.optedOutThisTurn
+        ? { stopped: true, reason: 'is_blocked' as const }
+        : live;
     const optedOut = stop.stopped;
     const pacingCfg = await loadChannelKnobs(
       client,
