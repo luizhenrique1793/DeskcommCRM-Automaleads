@@ -171,7 +171,19 @@ jobs:
   build-and-push:
     needs: [a-tag-veio-da-main]
     if: github.event_name != 'pull_request'
-    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    # Só amd64: o runner ARM64 nativo do GitHub (`ubuntu-24.04-arm`) travou o
+    # `pnpm build`/"Running TypeScript..." sem erro, duas vezes seguidas, no PR
+    # #16 — o runner recebia "shutdown signal" depois de ~28min parado, sem
+    # nenhuma mensagem de heap/memória. Como `juntar-manifestos` só cria o
+    # manifest combinado quando AMBAS as tags de arquitetura existem, uma
+    # arm64 que nunca publica trava a atualização de `latest`/`stable` para
+    # TODO MUNDO — inclusive quem só usa amd64 (única arquitetura real deste
+    # fork: a VPS de produção é x86_64, via EasyPanel). Capacidade/estabilidade
+    # do runner arm64 é infraestrutura do GitHub, fora do nosso controle;
+    # remover o eixo evita que ela trave uma publicação que nenhum self-hoster
+    # deste fork hoje precisa. Reversível: `git revert` deste commit reabre o
+    # eixo quando/se arm64 voltar a ser suportado.
+    runs-on: ubuntu-latest
     concurrency:
       group: ${{ github.workflow }}-build-and-push-${{ matrix.name }}-${{ matrix.arch }}-${{ github.event.pull_request.number || github.ref }}${{ github.event_name == 'pull_request' && github.run_attempt != '1' && format('-reentrada-{0}', github.event.pull_request.head.sha) || '' }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
@@ -205,7 +217,7 @@ jobs:
             dockerfile: Dockerfile.voice-agent
             title: DeskcommCRM voice agent
         name: [deskcommcrm, deskcomm-worker, deskcomm-scheduler, deskcomm-voice-agent]
-        arch: [amd64, arm64]
+        arch: [amd64]
 
     steps:
       - uses: actions/checkout@v7
@@ -281,8 +293,8 @@ jobs:
         with:
           context: .
           file: ${{ matrix.dockerfile }}
-          # Cada arquitetura compila no runner nativo; o job abaixo une os manifests.
-          platforms: ${{ matrix.arch == 'arm64' && 'linux/arm64' || 'linux/amd64' }}
+          # Só amd64 (ver o comentário do `runs-on` no topo do job).
+          platforms: linux/amd64
           # PR de fork não tem permissão de escrita no GHCR, e publicar imagem
           # de código não revisado seria pior que não gatear. Em PR: constrói
           # (que é o gate) e descarta.
@@ -335,7 +347,12 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ github.ref_type == 'branch' && github.ref_name == 'main' }}
 
-      - name: Unir AMD64 e ARM64 em cada tag
+      # Só amd64 (ver o comentário do `runs-on` de `build-and-push`, no topo
+      # daquele job): a tag sem sufixo ainda precisa existir — é ela que o
+      # self-hoster (e o `docker-compose.prod.yml`) referencia — então o join
+      # fica, só com uma entrada. `imagetools create` aceita manifest de uma
+      # arquitetura só.
+      - name: Publicar a tag sem sufixo de arquitetura
         env:
           TAGS: ${{ steps.meta.outputs.tags }}
         run: |
@@ -344,8 +361,7 @@ jobs:
             [ -n "$tag" ] || continue
             docker buildx imagetools create \
               --tag "$tag" \
-              "${tag}-amd64" \
-              "${tag}-arm64"
+              "${tag}-amd64"
           done <<< "$TAGS"
 
   # A imagem do app CONSTRÓI e MORRE ao subir? Este job existe porque isso
@@ -370,15 +386,16 @@ jobs:
     # Na `main` e em tag esta imagem vira a que o parque instala: ela se constrói
     # nas máquinas do GitHub, nunca numa máquina nossa. Guarda contra fork:
     # comentário do e2e-parte no e2e.yml.
-    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || (vars.EXECUTOR_PROPRIO == 'ligado' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && 'deskcomm-proprio' || 'ubuntu-latest') }}
+    #
+    # Só amd64: ver o comentário do `runs-on` de `build-and-push` (PR #16) —
+    # o runner ARM64 nativo do GitHub travou o build sem erro duas vezes.
+    runs-on: ${{ vars.EXECUTOR_PROPRIO == 'ligado' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && 'deskcomm-proprio' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: amd64
             platform: linux/amd64
-          - arch: arm64
-            platform: linux/arm64
     concurrency:
       group: ${{ github.workflow }}-imagem-do-app-sobe-${{ matrix.arch }}-${{ github.event.pull_request.number || github.ref }}${{ github.event_name == 'pull_request' && github.run_attempt != '1' && format('-reentrada-{0}', github.event.pull_request.head.sha) || '' }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
@@ -597,15 +614,16 @@ jobs:
     # Na `main` e em tag esta imagem vira a que o parque instala: ela se constrói
     # nas máquinas do GitHub, nunca numa máquina nossa. Guarda contra fork:
     # comentário do e2e-parte no e2e.yml.
-    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || (vars.EXECUTOR_PROPRIO == 'ligado' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && 'deskcomm-proprio' || 'ubuntu-latest') }}
+    #
+    # Só amd64: ver o comentário do `runs-on` de `build-and-push` (PR #16) —
+    # o runner ARM64 nativo do GitHub travou o build sem erro duas vezes.
+    runs-on: ${{ vars.EXECUTOR_PROPRIO == 'ligado' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && 'deskcomm-proprio' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: amd64
             platform: linux/amd64
-          - arch: arm64
-            platform: linux/arm64
     concurrency:
       group: ${{ github.workflow }}-imagens-de-fundo-sobem-${{ matrix.arch }}-${{ github.event.pull_request.number || github.ref }}${{ github.event_name == 'pull_request' && github.run_attempt != '1' && format('-reentrada-{0}', github.event.pull_request.head.sha) || '' }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}

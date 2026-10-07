@@ -141,7 +141,9 @@ describe("toda imagem publicada é construída em PR", () => {
   it("a matriz gera um job por receita E por arquitetura — nenhum item do include engole o anterior", () => {
     const jobs = jobsDaMatriz();
     const pares = new Set(jobs.map((j) => `${j.dockerfile ?? "?"} ${j.arch ?? "?"}`));
-    const esperado = receitasPublicadas().flatMap((r) => ["amd64", "arm64"].map((a) => `${r} ${a}`));
+    // Só amd64 desde o PR #16: o runner ARM64 nativo do GitHub travava o build
+    // sem erro (ver o comentário do `runs-on` de `build-and-push`).
+    const esperado = receitasPublicadas().flatMap((r) => ["amd64"].map((a) => `${r} ${a}`));
     expect(
       [...pares].sort(),
       "A matriz de build-and-push não gera todas as combinações imagem × arquitetura. Declare `name` e\n" +
@@ -165,7 +167,10 @@ describe("toda imagem publicada é construída em PR", () => {
     const sabotado = yml.replace(/^ {8}name: \[[^\n]*\]\n/m, "");
     expect(sabotado).not.toBe(yml);
     const jobs = jobsDaMatriz(sabotado);
-    expect(jobs).toHaveLength(2);
+    // `arch` tem 1 valor só desde o PR #16 (só amd64): com UM eixo de um valor
+    // só, todo item do `include` cabe na ÚNICA combinação e sobrescreve a
+    // anterior — sobra 1 job (o da última imagem), não 2.
+    expect(jobs).toHaveLength(1);
     expect(new Set(jobs.map((j) => j.name)).size).toBe(1);
   });
 });

@@ -78,8 +78,10 @@ describe("a guarda da máquina", () => {
 
 const TODOS =
   "${{ vars.EXECUTOR_PROPRIO == 'ligado' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && 'deskcomm-proprio' || 'ubuntu-latest' }}";
+// Desde o PR #16, só amd64: o runner ARM64 nativo do GitHub travava o build
+// sem erro (ver o comentário do `runs-on` de `build-and-push` em publish-image.yml).
 const SO_PR =
-  "${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || (vars.EXECUTOR_PROPRIO == 'ligado' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && 'deskcomm-proprio' || 'ubuntu-latest') }}";
+  "${{ vars.EXECUTOR_PROPRIO == 'ligado' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && 'deskcomm-proprio' || 'ubuntu-latest' }}";
 
 const ESPERADO: Record<string, string> = {
   "ci.yml::verify-parte": TODOS,
@@ -121,10 +123,14 @@ describe("o roteamento dos workflows", () => {
     expect(naMaquina).toEqual(ESPERADO);
   });
 
-  it("publica cada arquitetura em runner nativo do GitHub", () => {
-    expect(mapa.get("publish-image.yml::build-and-push")).toBe(
-      "${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}",
-    );
+  it("build-and-push publica só amd64, em máquina do GitHub (desde o PR #16)", () => {
+    // Era `matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest'`: o
+    // runner ARM64 nativo do GitHub travava o build sem erro (duas vezes,
+    // ~28min cada, "shutdown signal" sem heap/memória) — e como
+    // `juntar-manifestos` só cria o manifest combinado quando AMBAS as tags
+    // de arquitetura existem, uma arm64 que nunca publica trava `latest` para
+    // quem só usa amd64 (única arquitetura real deste fork).
+    expect(mapa.get("publish-image.yml::build-and-push")).toBe("ubuntu-latest");
   });
 
   it("nenhum workflow com pull_request_target manda job para a máquina", () => {
