@@ -72,6 +72,15 @@ const nextConfig: NextConfig = {
       "./node_modules/.pnpm/pdfjs-dist@*/node_modules/pdfjs-dist/**",
     ],
   },
+  // O `next build` roda o próprio tsc interno ("Running TypeScript...") sobre
+  // o projeto inteiro, DE NOVO — `pnpm typecheck` (tsc --noEmit, passo próprio
+  // do CI) já cobre a mesma checagem antes do build rodar. Essa segunda
+  // passagem, dentro do `docker buildx` do GitHub Actions, ficou presa por
+  // ~28min sem imprimir nada (duas vezes em arm64, uma em amd64, PR #16) até o
+  // runner ser desligado por fora — sem erro de heap, sem stack trace, nada
+  // que apontasse uma causa de código. Pular a checagem AQUI não abre brecha:
+  // nenhum PR chega a este passo sem o `pnpm typecheck` já ter passado.
+  typescript: { ignoreBuildErrors: true },
   reactStrictMode: true,
   poweredByHeader: false,
   // typedRoutes moved out of experimental in Next 15.5+
