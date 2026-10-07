@@ -602,11 +602,17 @@ jobs:
         # Release no GitHub — `gh release view` e `/releases/latest` sempre
         # voltam vazios aqui, e o passo reprova sempre, para qualquer PR (achado
         # do PR #16). A variável do repo (vars.CONFERENCIA_KIT_RELEASE) aponta
-        # pra a tag `v1.74.0`, criada em 07/10/2026 sobre o HEAD da main de
-        # ANTES do merge com upstream/main — é a melhor aproximação disponível
-        # de "última release publicada" até que o fork corte uma release de
-        # verdade (release.yml, que exige um GitHub App próprio, não configurado
-        # ainda). Remova esta linha quando isso acontecer.
+        # pra `v1.74.0`. A primeira tentativa (07/10/2026) foi criar essa tag
+        # sobre o HEAD da main de ANTES do merge — e falhou: o fork estava
+        # defasado o bastante para nunca ter recebido a própria conferência
+        # de isolamento (#1909) antes deste merge, então nenhum commit PRÉVIO
+        # do fork tem os marcadores que o script procura. `v1.74.0` e `v1.63.0`
+        # (esta, fixa no script, sem variável) são as tags REAIS do upstream
+        # (melgarafael/DeskcommCRM), copiadas para este `origin` — são código-
+        # base sem as features Automaleads, mas têm a conferência de verdade, o
+        # que o objetivo deste passo exige. Troca para uma release própria do
+        # fork quando houver uma (release.yml exige um GitHub App, não
+        # configurado ainda) — remova esta linha quando isso acontecer.
         env:
           GH_TOKEN: ${{ github.token }}
           CONFERENCIA_KIT_RELEASE: ${{ vars.CONFERENCIA_KIT_RELEASE }}
