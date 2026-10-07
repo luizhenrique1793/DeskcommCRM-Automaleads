@@ -86,14 +86,17 @@ afterAll(async () => {
 
 describe("veto vira atividade no negócio certo", () => {
   it("com agente identificado: actor 'ai' com o trace como lastro", async () => {
-    const traceId = await novoTrace(CONTATO_COM_LEAD, "stop", "opted_out");
+    // Código REAL do gate `stop` (não um placeholder): desde a correção da
+    // classificação opt-out × handoff × pessoal, `vetoReason` olha o código
+    // antes do nome do gate — "opted_out" não existe no sistema de verdade.
+    const traceId = await novoTrace(CONTATO_COM_LEAD, "stop", "contato_bloqueado");
     const r = await emitVetoActivity({
       pool,
       organizationId: ORG,
       contactId: CONTATO_COM_LEAD,
       traceId,
       gate: "stop",
-      code: "opted_out",
+      code: "contato_bloqueado",
       agentId: AGENT,
     });
     expect(r.routed).toBe(true);
@@ -184,8 +187,20 @@ describe("veto sem negócio para pendurar", () => {
 
 describe("vetoReason", () => {
   it("traduz os gates conhecidos para linguagem de gente", () => {
-    expect(vetoReason("stop", "opted_out")).toContain("pediu para parar");
+    expect(vetoReason("stop", "contato_bloqueado")).toContain("pediu para parar");
     expect(vetoReason("budget", "exhausted")).toContain("orçamento");
+  });
+
+  it("o mesmo gate 'stop' distingue opt-out de handoff e de pessoal PELO CÓDIGO", () => {
+    // As três travas (is_blocked/force_human/is_personal) armam o MESMO gate
+    // `stop` — o que as distingue é o código, nunca o nome do gate. Achado em
+    // produção: antes desta cerca, "Fico no aguardo" (handoff humano) saía na
+    // timeline como "pediu para parar de receber mensagens".
+    expect(vetoReason("stop", "contato_bloqueado")).toContain("pediu para parar");
+    expect(vetoReason("stop", "contato_encaminhado_para_humano")).not.toContain("pediu para parar");
+    expect(vetoReason("stop", "contato_encaminhado_para_humano")).toContain("atendimento humano");
+    expect(vetoReason("stop", "contato_pessoal_sem_envio_automatico")).not.toContain("pediu para parar");
+    expect(vetoReason("stop", "contato_pessoal_sem_envio_automatico")).toContain("pessoal");
   });
 
   it("gate desconhecido não vira linha vazia — mostra a regra e o código", () => {

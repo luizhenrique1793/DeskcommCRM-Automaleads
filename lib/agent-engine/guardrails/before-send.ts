@@ -78,6 +78,20 @@ import type { ChannelProvider } from '@/lib/channels/capabilities';
 import { aplicarAjustesDeEstilo, lerAjustesDeEstiloDaOrg } from './ajustes-de-estilo-da-org';
 import type { AjusteDeEstilo, LeituraDosAjustes } from './ajustes-de-estilo-da-org';
 
+/**
+ * QUAL trava armou o STOP (`optedOut`). As três são vetos IRREVOGÁVEIS — nenhuma
+ * libera envio —, mas são coisas DIFERENTES e não podem compartilhar a mesma
+ * frase: `is_blocked` é o cliente pedindo pra não receber mensagem (opt-out de
+ * verdade); `force_human` é a conversa ter passado para atendimento humano
+ * (handoff — nada a ver com o cliente ter pedido pra sair); `is_personal` é o
+ * contato estar marcado como pessoal (spec 21, etapa 11). Achado em produção
+ * (fork Automaleads): "Fico no aguardo" do cliente levou a IA a abrir caso
+ * humano (`force_human = true`), e a resposta retida seguinte mostrava "O
+ * contato pediu para não receber mensagens (opt-out)" — classificação errada,
+ * ninguém pediu opt-out.
+ */
+export type OptOutReason = 'is_blocked' | 'force_human' | 'is_personal';
+
 /** O que os gates enxergam — carregado UMA vez sob o lock, por tentativa de envio. */
 export interface GateContext {
   now: Date;
@@ -89,6 +103,15 @@ export interface GateContext {
    * OR o sinal lido no `get_lead_context` deste turno.
    */
   optedOut: boolean;
+  /**
+   * QUAL das três travas armou `optedOut`, para o `stopGate` escolher a
+   * CLASSIFICAÇÃO certa (código + frase) — nunca para decidir SE veta, isso é
+   * só `optedOut`. Ausente (preview, approved-reply, meet-delivery: todos só
+   * armam via `is_blocked`) = o `stopGate` assume `'is_blocked'`, que é o
+   * motivo correto nesses chamadores — nenhum deles chega aqui por
+   * `force_human`/`is_personal` sem também ter `is_blocked`.
+   */
+  optOutReason?: OptOutReason;
   /**
    * Canal desta tentativa. Nenhum gate pergunta QUEM é o provider (invariante 1
    * de `docs/doctrine/restricao-de-canal.md`) — só o entrega a `capabilitiesOf`
@@ -338,19 +361,39 @@ export interface Gate {
   evaluate(ctx: GateContext): GateVerdict;
 }
 
-/** Gate 1 — STOP/opt-out/força-humano: veto IRREVOGÁVEL (regra dura nº 2), 1ª linha. */
+/**
+ * Código e frase por motivo do STOP — as três travas vetam igual, mas a
+ * CLASSIFICAÇÃO precisa dizer qual é qual (ver `OptOutReason`). `is_blocked`
+ * continua com o código histórico `contato_bloqueado` (nada muda para quem já
+ * lia esse código); os outros dois são novos.
+ */
+const STOP_CODE: Record<OptOutReason, string> = {
+  is_blocked: 'contato_bloqueado',
+  force_human: 'contato_encaminhado_para_humano',
+  is_personal: 'contato_pessoal_sem_envio_automatico',
+};
+const STOP_REASON: Record<OptOutReason, string> = {
+  is_blocked:
+    'o lead optou por sair do atendimento (bloqueio/opt-out irrevogável) — não é ' +
+    'possível enviar nada a ele; encerre o turno sem tentar de novo.',
+  force_human:
+    'esta conversa foi encaminhada para atendimento humano (force_human) — não é opt-out, ' +
+    'o lead não pediu para sair; a IA não pode mais responder aqui; encerre o turno sem tentar de novo.',
+  is_personal:
+    'este contato está marcado como pessoal — não é opt-out, é uma marcação deliberada ' +
+    'para que a IA nunca envie mensagem automática a ele; encerre o turno sem tentar de novo.',
+};
+
+/** Gate 1 — STOP/opt-out/força-humano/pessoal: veto IRREVOGÁVEL (regra dura nº 2), 1ª linha. */
 const stopGate: Gate = {
   name: 'stop',
-  evaluate: (ctx) =>
-    ctx.optedOut
-      ? {
-          pass: false,
-          code: 'contato_bloqueado',
-          reason:
-            'o lead optou por sair do atendimento (bloqueio/opt-out irrevogável) — não é ' +
-            'possível enviar nada a ele; encerre o turno sem tentar de novo.',
-        }
-      : { pass: true },
+  evaluate: (ctx) => {
+    if (!ctx.optedOut) return { pass: true };
+    // Ausente = 'is_blocked': todo chamador que não passa optOutReason (preview,
+    // approved-reply, meet-delivery) só arma optedOut a partir de is_blocked.
+    const motivo = ctx.optOutReason ?? 'is_blocked';
+    return { pass: false, code: STOP_CODE[motivo], reason: STOP_REASON[motivo] };
+  },
 };
 
 /**
@@ -1258,14 +1301,20 @@ export async function runBeforeSend(args: RunBeforeSendArgs): Promise<BeforeSend
     const bodyDoModelo =
       estilo !== null ? aplicarAjustesDeEstilo(args.body, estilo.ajustes) : args.body;
 
-    const optedOut =
-      args.optedOutThisTurn ||
-      (await readStopFlags(
-        client,
-        args.tenantId,
-        args.leadId,
-        meetingPolicy?.humanCommand === true || replyPolicy !== null,
-      ));
+    // `args.optedOutThisTurn` já chega como `contact.is_blocked` puro (todo
+    // chamador que o seta — inbound-turn.ts, followup-turn.ts — lê só essa
+    // coluna): quando ele é true, o motivo é sempre 'is_blocked'. Senão, relê
+    // as três travas direto da fonte (sob o lock desta tentativa) via
+    // `readStopFlags`, que decide qual delas é o motivo a reportar.
+    const stop = args.optedOutThisTurn
+      ? { stopped: true, reason: 'is_blocked' as const }
+      : await readStopFlags(
+          client,
+          args.tenantId,
+          args.leadId,
+          meetingPolicy?.humanCommand === true || replyPolicy !== null,
+        );
+    const optedOut = stop.stopped;
     const pacingCfg = await loadChannelKnobs(
       client,
       args.tenantId,
@@ -1318,6 +1367,7 @@ export async function runBeforeSend(args: RunBeforeSendArgs): Promise<BeforeSend
       now: args.now,
       body: bodyDoModelo,
       optedOut,
+      ...(stop.reason !== null ? { optOutReason: stop.reason } : {}),
       provider,
       messagingWindow: { lastInboundAt, ...(args.isTemplate === true ? { isTemplate: true } : {}) },
       pacing: {
@@ -1472,21 +1522,44 @@ export async function loadChannelProvider(
   return provider === undefined ? DEFAULT_CHANNEL_PROVIDER : (provider as ChannelProvider);
 }
 
-async function readStopFlags(
+/**
+ * Veredito do STOP + QUAL motivo reportar (`OptOutReason`) quando mais de uma
+ * trava está ativa — a prioridade importa porque elas não são sinônimos:
+ * `is_blocked` (opt-out real do cliente) nunca pode ficar escondido atrás de
+ * `force_human` (handoff interno) ou `is_personal` (marcação administrativa);
+ * `force_human` só conta quando o encontro (humanMeetingCommand) não o isenta
+ * — mesma regra que já isentava force_human do `stopped` no ramo do encontro,
+ * agora também isentando do motivo.
+ */
+export async function readStopFlags(
   db: Queryable,
   organizationId: string,
   contactId: string,
   humanMeetingCommand = false,
-): Promise<boolean> {
+): Promise<{ stopped: boolean; reason: OptOutReason | null }> {
   // Pessoal não recebe nem via encontro (spec 21, etapa 11): o `or is_personal`
-  // vale nos DOIS ramos — o veto segue o bloqueio até aqui.
-  const { rows } = await db.query<{ stopped: boolean }>(
+  // vale nos DOIS ramos — o veto segue o bloqueio até aqui. Os TRÊS campos
+  // crus (não só o booleano combinado) viajam junto para o motivo poder
+  // distinguir qual trava armou, sem uma segunda ida ao banco.
+  const { rows } = await db.query<{
+    is_blocked: boolean;
+    force_human: boolean;
+    is_personal: boolean;
+    stopped: boolean;
+  }>(
     humanMeetingCommand
-      ? 'select (is_blocked or is_personal) as stopped from contacts where organization_id = $1 and id = $2'
-      : 'select (is_blocked or force_human or is_personal) as stopped from contacts where organization_id = $1 and id = $2',
+      ? 'select is_blocked, force_human, is_personal, (is_blocked or is_personal) as stopped from contacts where organization_id = $1 and id = $2'
+      : 'select is_blocked, force_human, is_personal, (is_blocked or force_human or is_personal) as stopped from contacts where organization_id = $1 and id = $2',
     [organizationId, contactId],
   );
-  return rows[0]?.stopped === true;
+  const row = rows[0];
+  if (row?.stopped !== true) return { stopped: false, reason: null };
+  const reason: OptOutReason = row.is_blocked
+    ? 'is_blocked'
+    : !humanMeetingCommand && row.force_human
+      ? 'force_human'
+      : 'is_personal';
+  return { stopped: true, reason };
 }
 
 /**

@@ -15,7 +15,12 @@ export interface RetentionContext {
   timezone: string;
 }
 
-export type RetentionKind = "protection" | "compliance" | "quality";
+// "handoff" é NOVO: cobre force_human e is_personal — vetos tão irrevogáveis
+// quanto "compliance" (nenhum libera envio), mas que não são opt-out nem LGPD.
+// Achado em produção (fork Automaleads): os dois caíam no código
+// `contato_bloqueado` e saíam na tela como "O contato pediu para não receber
+// mensagens (opt-out)" — mentira para quem nunca pediu opt-out.
+export type RetentionKind = "protection" | "compliance" | "quality" | "handoff";
 
 export interface RetentionCopy {
   kind: RetentionKind;
@@ -27,6 +32,7 @@ const TITLES: Record<RetentionKind, string> = {
   protection: "Resposta segurada pela proteção do número",
   compliance: "Resposta bloqueada por conformidade",
   quality: "Resposta retida para correção",
+  handoff: "Resposta retida — não é opt-out",
 };
 
 /**
@@ -76,6 +82,20 @@ export function retentionCopy(
       return make(
         "compliance",
         t("O contato pediu para não receber mensagens (opt-out). Nada será enviado a ele."),
+      );
+    case "contato_encaminhado_para_humano":
+      return make(
+        "handoff",
+        t(
+          "Esta conversa está em atendimento humano. Isto NÃO é um pedido de opt-out — o contato não pediu para parar de receber mensagens; a IA só está pausada aqui porque alguém da equipe assumiu.",
+        ),
+      );
+    case "contato_pessoal_sem_envio_automatico":
+      return make(
+        "handoff",
+        t(
+          "Este contato está marcado como pessoal. Isto NÃO é um pedido de opt-out — é uma marcação administrativa para que a IA nunca envie mensagem automática a ele.",
+        ),
       );
     case "lgpd_anonymized":
       return make(

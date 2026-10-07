@@ -3,7 +3,7 @@
 import { useLocaleDeData } from "@/hooks/i18n/useLocaleDeData";
 import { formatDistanceToNowStrict } from "date-fns";
 import { useT } from "@/hooks/i18n/useT";
-import { ArrowsClockwise, Scales, ShieldCheck } from "@/lib/ui/icons";
+import { ArrowsClockwise, Scales, ShieldCheck, UsersThree } from "@/lib/ui/icons";
 import { retentionCopy, type RetentionKind } from "@/lib/inbox/retention-copy";
 import { useRetention } from "@/hooks/inbox/useRetention";
 import { cn } from "@/lib/utils";
@@ -12,12 +12,19 @@ const KIND_ICON: Record<RetentionKind, typeof ShieldCheck> = {
   protection: ShieldCheck,
   compliance: Scales,
   quality: ArrowsClockwise,
+  // force_human/is_personal: não é opt-out nem LGPD — equipe/pessoa, não balança.
+  handoff: UsersThree,
 };
 
 const KIND_CLASS: Record<RetentionKind, string> = {
   protection: "border-warning bg-warning-bg text-warning-fg",
   compliance: "border-destructive/40 bg-destructive/10 text-destructive",
   quality: "border-border bg-muted/40 text-muted-foreground",
+  // Cor NEUTRA de propósito: compliance usa a cor de alerta/destrutiva (regra
+  // irrevogável e séria). handoff é uma decisão operacional comum, não um
+  // alarme — usar a mesma cor voltaria a confundir "passou para humano" com
+  // "o cliente pediu pra parar".
+  handoff: "border-border bg-muted/40 text-muted-foreground",
 };
 
 /**
