@@ -1,28 +1,28 @@
 /**
  * GET/POST /api/v1/cron/retry-queued-messages
  *
- * Repesca mensagem outbound de HUMANO (`sent_via='user'`) ou de SISTEMA
- * (`sent_via='system'` — cron/regra automática, ex.: pix-watcher) presa em
- * `queued` porque o canal não estava pronto no instante do envio
- * (`queued_reason: channel_session_not_working` ou `<provider>_not_configured`
- * — `app/api/v1/messages/_handler.ts`).
+ * Repesca mensagem outbound de HUMANO (`sent_via='user'`), de INTEGRAÇÃO
+ * (`sent_via='system'` — ator `api_token`) ou de AUTOMAÇÃO (`sent_via='automation'`
+ * — ator `webhook_source`, ex.: pix-watcher, cron/regra sem IA no caminho —
+ * decisão do mantenedor na issue #652, `origemDaMensagem()` em
+ * `lib/operacao/autoria.ts`) presa em `queued` porque o canal não estava
+ * pronto no instante do envio (`queued_reason: channel_session_not_working`
+ * ou `<provider>_not_configured` — `app/api/v1/messages/_handler.ts`).
  *
  * ─── Por que ela fica órfã sem este cron ────────────────────────────────────
  *
  * O comentário de `removerEcoDoProprioEnvio` (`_handler.ts`) já registra que
  * "`queued` é estado de espera com DONO: o agent-engine reagenda o job
  * (`SEND_QUEUED_RETRY_MS`)". Isso é verdade só para mensagem de um TURNO DE
- * AGENTE, que passa pela fila de job (`sent_via='ai'`, ator `ai_agent`).
- * Mensagem digitada no composer (`user`) ou disparada por cron/regra
- * automática fora de um turno (`system`, ator `webhook_source` —
- * `especieDe()` em `lib/operacao/autoria.ts`) nunca cria job nenhum, só grava
- * `status:'queued'` e para. Medido em homologação real (2026-08-14): atendente
- * mandou mensagem 3 minutos antes do canal subir, ficou presa para sempre.
- * Medido AO VIVO em produção (2026-08-18): o próprio `pix-watcher` — que só
- * ganhou o rótulo `system` correto nesta mesma correção, antes caía em `ai`
- * sem estar coberto por nenhum dos dois resgates — travou 3 confirmações de
- * pagamento quando o canal caiu no instante do envio, e ficaram presas até
- * este cron passar a olhar `system` também.
+ * AGENTE, que passa pela fila de job (`sent_via='ai'`, ator `ai_agent`). As
+ * outras três categorias nunca criam job nenhum, só gravam `status:'queued'`
+ * e param. Medido em homologação real (2026-08-14): atendente mandou mensagem
+ * 3 minutos antes do canal subir, ficou presa para sempre. Medido AO VIVO em
+ * produção (2026-08-18): o `pix-watcher` travou 3 confirmações de pagamento
+ * quando o canal caiu no instante do envio, e ficaram presas até este cron
+ * passar a olhar a categoria dele também (então `system`; depois do merge com
+ * o upstream, 2026-10, `webhook_source` passou a gravar `automation`, e o
+ * filtro acompanhou).
  *
  * ─── Por que é SEGURO reenviar (ao contrário de `recover-stuck-messages`) ──
  *
@@ -33,16 +33,16 @@
  *
  * ─── Escopo deliberadamente estreito ────────────────────────────────────────
  *
- *   - só `sent_via IN ('user','system')` — mensagem de TURNO DE AGENTE
- *     (`sent_via='ai'`) tem dono próprio (agent-engine);
+ *   - só `sent_via IN ('user','system','automation')` — mensagem de TURNO DE
+ *     AGENTE (`sent_via='ai'`) tem dono próprio (agent-engine);
  *   - só `type != 'template'` — template pede pré-voo de definição aprovada
  *     (`lib/channels/conferir-definicao.ts`), fora de escopo aqui; o operador
  *     já tem uma saída manual (`JanelaFechadaAviso`);
  *   - reusa `getAdapter`/`adapter.send` — o MESMO seam do envio imediato,
  *     nunca um transporte próprio.
  *
- * Auth: mesmo contrato dos demais crons (Bearer INTERNAL_CRON_SECRET|
- * INTERNAL_SECRET, fail-closed).
+ * Auth: mesmo contrato dos demais crons — `autorizaCron()` de
+ * `lib/auth/cron-auth.ts`.
  */
 import { randomUUID } from "node:crypto";
 import type { NextRequest } from "next/server";
@@ -61,9 +61,10 @@ import {
   previewFrom,
   removerEcoDoProprioEnvio,
 } from "@/app/api/v1/messages/_handler";
-import { env } from "@/lib/env";
+import { autorizaCron } from "@/lib/auth/cron-auth";
 import { logger } from "@/lib/logger";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { STATUS_OPERANTE, ehOperante, statusDaOrgEmbutida } from "@/lib/organizacao/operante";
 
 export const dynamic = "force-dynamic";
 
@@ -80,6 +81,8 @@ interface QueuedRow {
   media_mime: string | null;
   media_storage_path: string | null;
   metadata: Record<string, unknown> | null;
+  /** Status da org embutido — quem decide é `ehOperante`, não uma lista de ids. */
+  organizations: { status: string | null } | { status: string | null }[] | null;
 }
 
 interface ConvJoin {
@@ -121,11 +124,16 @@ export async function retryQueuedMessages(
 ): Promise<RetryQueuedResult> {
   const { data, error } = await admin
     .from("messages")
-    .select("id, organization_id, conversation_id, type, body, media_url, media_mime, media_storage_path, metadata")
+    .select(
+      "id, organization_id, conversation_id, type, body, media_url, media_mime, media_storage_path, metadata, organizations:organization_id!inner(status)",
+    )
     .eq("direction", "outbound")
     .eq("status", "queued")
-    .in("sent_via", ["user", "system"])
+    .in("sent_via", ["user", "system", "automation"])
     .neq("type", "template")
+    // Org parada sai no banco, ANTES do `limit`: filtrar só em memória deixaria
+    // a varredura ocupada por mensagem de uma org que não opera mais.
+    .eq("organizations.status", STATUS_OPERANTE)
     .order("created_at", { ascending: true })
     .limit(SCAN_LIMIT);
 
@@ -137,6 +145,12 @@ export async function retryQueuedMessages(
   let aindaEmFila = 0;
 
   for (const row of fila) {
+    // Org parada não gasta nem fala: o corte já saiu no banco (embed `!inner` +
+    // filtro de status, acima); isto é cinto, mesmo padrão de agenda-reminder.
+    // Antes do claim: a linha fica intocada em `queued`, sem virar `sending` e
+    // voltar — reativação sem rajada, se a org voltar a operar.
+    if (!ehOperante(statusDaOrgEmbutida(row.organizations))) continue;
+
     // CLAIM ATÔMICO — se outra rodada (ou o envio original, corrida rara)
     // já tirou esta linha de `queued`, o UPDATE não casa nada e pulamos: sem
     // isto, duas invocações concorrentes do cron poderiam mandar a mesma
@@ -332,10 +346,7 @@ export async function retryQueuedMessages(
 async function handle(req: NextRequest): Promise<Response> {
   const requestId = randomUUID();
 
-  const auth = req.headers.get("authorization") ?? "";
-  const provided = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length).trim() : "";
-  const accepted = [env.INTERNAL_CRON_SECRET, env.INTERNAL_SECRET].filter(Boolean);
-  if (accepted.length === 0 || !provided || !accepted.includes(provided)) {
+  if (!autorizaCron(req)) {
     return fail("forbidden", "Cron secret missing or invalid.", 403, { requestId });
   }
 

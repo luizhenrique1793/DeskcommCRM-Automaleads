@@ -100,7 +100,7 @@ describe("o elo que some sem barulho", () => {
     ["zernio_social", "facebook", "Messenger"],
     ["zernio_social", null, "Canal"],
   ])("identifica %s/%s mesmo com uma conexão", (provider, social_platform, label) => {
-    pintar({ ...base, channel_sessions: { provider, social_platform, phone_number: null, display_name: "Comercial" } }, false);
+    pintar({ ...base, channel_sessions: { provider, social_platform, phone_number: null, display_name: "Comercial", status: "WORKING" } }, false);
     expect(screen.getByRole("img", { name: label })).toBeInTheDocument();
     expect(screen.getByText("Cliente")).toBeInTheDocument();
   });

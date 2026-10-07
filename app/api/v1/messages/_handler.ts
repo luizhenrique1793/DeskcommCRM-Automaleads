@@ -26,7 +26,6 @@ import { ApiError } from "@/lib/api/types";
 import { decidirPreGoLiveDoCanalViaSupabase } from "@/lib/ai/elegibilidade/consulta-pre-go-live";
 import type { Actor, HandlerCtx } from "@/lib/api/handlers/types";
 import { audit } from "@/lib/audit";
-import { especieDe } from "@/lib/operacao/autoria";
 import { traduzir } from "@/lib/i18n/dicionario";
 import { assertOrgOperante } from "@/lib/organizacao/operante";
 import {
@@ -817,26 +816,13 @@ export async function sendMessageHandler(
     media_mime: input.media_mime ?? null,
     media_storage_path: input.media_storage_path ?? null,
     media_size_bytes: input.media_size_bytes ?? null,
-    // especieDe() distingue quem NÃO é humano: ai_agent (turno de agente, com
-    // dono próprio no job do agent-engine) vs webhook_source (cron/regra
-    // automática, SEM job nenhum por trás). Antes disto, os dois viravam
-    // 'ai' — e mensagem de cron presa em 'queued' (canal fora do ar no
-    // instante do envio) não tinha NENHUM cron de resgate, porque
-    // retry-queued-messages só cobre 'user' (achado ao vivo 2026-08-18: as
-    // mensagens do pix-watcher travaram e nunca se recuperaram sozinhas).
-    //
-    // ⚠️ Reconciliação pendente (merge upstream × Automaleads, 2026-10): o
-    // upstream introduziu `origemDaMensagem()`, com vocabulário mais fino
-    // (distingue 'automation' de 'system' e de 'ai'-por-regra) e já consumido
-    // por `MessageBubble.tsx`, `lib/waha/ingest.ts` e outros. Mantive
-    // `especieDe()` aqui de propósito — é dele que
-    // `app/api/v1/cron/retry-queued-messages/route.ts` depende (filtra
-    // `sent_via IN ('user','system')`) para resgatar mensagem de cron/regra
-    // presa em `queued`, como o pix-watcher. Trocar para `origemDaMensagem`
-    // sem também atualizar aquele filtro reabre o defeito que este bloco
-    // existe para fechar. Decidir deliberadamente, não como efeito colateral
-    // de um merge.
-    sent_via: especieDe(ctx.actor),
+    // origemDaMensagem() — decisão do mantenedor na #652: mensagem que não é
+    // de pessoa nem da IA ganha categoria própria, 'automation'. Mensagem de
+    // cron/regra (`webhook_source`, ex.: pix-watcher) presa em 'queued' é
+    // resgatada por app/api/v1/cron/retry-queued-messages/route.ts, que
+    // filtra `sent_via IN ('user','system','automation')` — as três
+    // categorias que não têm dono de job próprio.
+    sent_via: origemDaMensagem(ctx.actor),
     sent_by_user_id: ctx.actor.type === "user" ? ctx.actor.id : null,
     // A PESSOA, não o token (#1613). Só chega aqui pelo ctx validado na rota
     // — ver a recusa acima —, e fica na coluna para consulta e auditoria.

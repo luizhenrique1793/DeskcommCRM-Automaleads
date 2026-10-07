@@ -182,10 +182,17 @@ describe("useMessagesRealtime — fiação da rede de segurança", () => {
     const onChange = (realtimeChannelSpy.mock.calls[0]![0] as { onChange: (p: unknown) => void }).onChange;
     onChange({ tipo: "mensagem-nova-de-teste" });
 
-    const chaves = invalidateSpy.mock.calls.map((c) => JSON.stringify((c[0] as { queryKey: unknown }).queryKey));
-    expect(chaves, "não invalidou a thread da conversa aberta").toContain(JSON.stringify(["messages", "conv-1"]));
-    expect(chaves, "não invalidou a lista de conversas — a costura quebrou").toContain(
-      JSON.stringify(["conversations"]),
+    const chaves = () =>
+      invalidateSpy.mock.calls.map((c) => JSON.stringify((c[0] as { queryKey: unknown }).queryKey));
+    expect(chaves(), "não invalidou a thread da conversa aberta").toContain(JSON.stringify(["messages", "conv-1"]));
+    // A invalidação de `["conversations"]` passou a ser AGRUPADA
+    // (`agendarRecargaDasConversas`, janela de 150ms) para uma rajada de
+    // eventos virar uma busca só — por isso espera a janela, não confere na
+    // hora. Ver o cabeçalho de `hooks/inbox/recargaDasConversas.ts`.
+    await waitFor(() =>
+      expect(chaves(), "não invalidou a lista de conversas — a costura quebrou").toContain(
+        JSON.stringify(["conversations"]),
+      ),
     );
   });
 });

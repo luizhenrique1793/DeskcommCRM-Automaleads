@@ -98,6 +98,26 @@ export const ESCOPO_DAS_ESCRITAS: Readonly<Record<string, Readonly<Record<string
 
   // ---- sem registro de cliente ----
   crm_save_org_memory: {},
+
+  // ---- pousada (reservas) ----
+  // Cadastra/consulta o hóspede DIRETO no PMS externo — nenhum campo é
+  // identificador de registro do CRM (cpf/nome/email/telefone são dados
+  // livres do titular, não um `_id`).
+  pousada_verificar_ou_cadastrar_hospede: {},
+  pousada_criar_reserva: { contact_id: "contato" },
+  // `reserva_id` é o NÚMERO da reserva no PMS externo (string livre,
+  // `custom_fields.pms_reserva_id`), não um uuid de `crm_leads` — não há,
+  // hoje, caminho de `DonoDoCampo` que resolva "reserva → lead → contato do
+  // turno" por esse campo. Mapeado como "negocio" (sem verificação, mesmo
+  // comportamento que `lead_id` já tem nesta tabela) para não regredir:
+  // antes do merge este gate não existia, e o handler já filtra por
+  // `organization_id`. Risco residual: um turno poderia gerar PIX de uma
+  // reserva de OUTRO contato da mesma organização se o modelo receber (por
+  // injeção de prompt) o `reserva_id` de outra pessoa. Seguir-up: ensinar
+  // `negocioDaEscritaDoTurno` (lib/ai/runtime/tools.ts) a resolver por
+  // `custom_fields.pms_reserva_id` em vez de só por `lead_id`.
+  pousada_gerar_cobranca_pix: { reserva_id: "negocio" },
+  pousada_enviar_botao_copiar_pix: { conversation_id: "conversa" },
 };
 
 export type VereditoDaEscrita =

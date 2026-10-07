@@ -29,6 +29,8 @@ vi.mock("@/hooks/inbox/useMessagesRealtime", () => ({
     isFetchingNextPage: false,
     fetchNextPage: vi.fn(),
     refetch: vi.fn(),
+    realtimeStatus: "subscribed",
+    seguranca: { divergencias: 0 },
   }),
 }));
 vi.mock("@/hooks/inbox/useConversationNotes", () => ({ useConversationNotes: () => [] }));

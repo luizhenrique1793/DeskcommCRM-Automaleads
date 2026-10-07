@@ -47,6 +47,11 @@ vi.mock("@/hooks/contacts/usePersonalContact", () => ({
 vi.mock("@/hooks/ai/useAutomaticoAtivo", () => ({
   useAutomaticoAtivo: () => ({ data: false }),
 }));
+// Automaleads: botão "Salvar na agenda do WhatsApp" — mesmo motivo do mock de
+// usePersonalContact acima, `useMutation` real exigiria QueryClientProvider.
+vi.mock("@/hooks/inbox/useSaveContactToWhatsapp", () => ({
+  useSaveContactToWhatsapp: () => ({ mutate: vi.fn(), isPending: false }),
+}));
 vi.mock("@/components/kanban/OwnerBadge", () => ({ OwnerBadge: () => null }));
 vi.mock("@/components/inbox/ReassignDialog", () => ({ ReassignDialog: () => null }));
 vi.mock("@/components/inbox/SnoozeButton", () => ({ SnoozeButton: () => null }));

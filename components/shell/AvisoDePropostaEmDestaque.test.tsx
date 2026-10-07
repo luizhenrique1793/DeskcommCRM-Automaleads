@@ -93,8 +93,9 @@ const DE_OUTRO_KIND: AgentInboxItem = {
 };
 
 /** Carga da Central: SEMPRE um objeto novo, porque o efeito só refaz com `data` novo. */
+// Formato PAGINADO (useInfiniteQuery) — mesmo ajuste do AlertsBell.tsx.
 function abertos(items: AgentInboxItem[]) {
-  return { items, open_count: items.length, unseen_count: items.length };
+  return { pages: [{ data: { items, open_count: items.length, unseen_count: items.length } }] };
 }
 
 const cartao = () => screen.queryByTestId("aviso-proposta-destaque");

@@ -48,6 +48,9 @@ vi.mock("@/hooks/inbox/usePauseAiAttendance", () => ({
 vi.mock("@/hooks/ai/useAutomaticoAtivo", () => ({
   useAutomaticoAtivo: () => ({ data: false }),
 }));
+vi.mock("@/hooks/inbox/useSaveContactToWhatsapp", () => ({
+  useSaveContactToWhatsapp: () => ({ mutate: vi.fn(), isPending: false }),
+}));
 vi.mock("@/hooks/contacts/usePersonalContact", () => ({
   useMarkPersonalContact: () => ({ mutate: marcarMutate, isPending: false }),
   useUnmarkPersonalContact: () => ({ mutate: desmarcarMutate, isPending: false }),

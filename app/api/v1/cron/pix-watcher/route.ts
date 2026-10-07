@@ -19,7 +19,7 @@ import { randomUUID } from "node:crypto";
 import type { NextRequest } from "next/server";
 
 import { ok, fail } from "@/lib/api/wrappers";
-import { env } from "@/lib/env";
+import { autorizaCron } from "@/lib/auth/cron-auth";
 import { logger } from "@/lib/logger";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { moveLeadHandler } from "@/app/api/v1/leads/_handler";
@@ -27,6 +27,7 @@ import { sendMessageHandler } from "@/app/api/v1/messages/_handler";
 import { unwrapPmsObject } from "@/lib/pousada/pms-client";
 import { loadPousadaSettings, type PousadaSettings } from "@/lib/pousada/settings";
 import { executarChamadaPousada } from "@/lib/pousada/executor";
+import { STATUS_OPERANTE, ehOperante, statusDaOrgEmbutida } from "@/lib/organizacao/operante";
 
 export const dynamic = "force-dynamic";
 
@@ -40,6 +41,8 @@ type LeadRow = {
   organization_id: string;
   contact_id: string | null;
   custom_fields: Record<string, unknown> | null;
+  /** Status da org embutido — quem decide é `ehOperante`, não uma lista de ids. */
+  organizations: { status: string | null } | { status: string | null }[] | null;
 };
 
 /**
@@ -250,10 +253,7 @@ async function processarLead(
 async function handle(req: NextRequest): Promise<Response> {
   const requestId = randomUUID();
 
-  const auth = req.headers.get("authorization") ?? "";
-  const provided = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length).trim() : "";
-  const accepted = [env.INTERNAL_CRON_SECRET, env.INTERNAL_SECRET].filter(Boolean);
-  if (accepted.length === 0 || !provided || !accepted.includes(provided)) {
+  if (!autorizaCron(req)) {
     return fail("forbidden", "Cron secret missing or invalid.", 403, { requestId });
   }
 
@@ -262,8 +262,11 @@ async function handle(req: NextRequest): Promise<Response> {
 
   const { data: rows, error } = await admin
     .from("crm_leads")
-    .select("id, organization_id, contact_id, custom_fields")
+    .select("id, organization_id, contact_id, custom_fields, organizations:organization_id!inner(status)")
     .eq("custom_fields->>pix_status", "pending")
+    // Org parada sai no banco, ANTES do `limit`: filtrar só em memória deixaria
+    // a varredura ocupada por reservas de uma org que não opera mais.
+    .eq("organizations.status", STATUS_OPERANTE)
     .limit(LEAD_LIMIT);
 
   if (error) {
@@ -281,6 +284,9 @@ async function handle(req: NextRequest): Promise<Response> {
   const settingsPorOrg = new Map<string, PousadaSettings>();
 
   for (const lead of leads) {
+    // Org parada não gasta nem fala: o corte já saiu no banco (embed `!inner` +
+    // filtro de status, acima); isto é cinto, mesmo padrão de agenda-reminder.
+    if (!ehOperante(statusDaOrgEmbutida(lead.organizations))) continue;
     try {
       let settings = settingsPorOrg.get(lead.organization_id);
       if (!settings) {

@@ -65,6 +65,19 @@ const DIR_MIGRATIONS = path.join(process.cwd(), "supabase", "migrations");
  * dado existente faz o `update.sh` de um clone quebrar no meio.
  */
 const REMOCOES_DELIBERADAS: Record<string, { valores: string[]; porque: string }> = {
+  "20260922164700_0387_canal_datafy.sql::webhook_events_log_provider_check": {
+    valores: ["uazapi"],
+    porque:
+      "Mesma classe dos dois casos abaixo (branches represadas se encontrando), mas via " +
+      "MERGE de fork: NÃO existe no upstream sozinho — a 0387 é 100% upstream e nunca viu " +
+      "`uazapi`. A 0565/0566 (ex-0266/0267, Automaleads) somaram `uazapi` a esta constraint " +
+      "em 13/08, com timestamp ANTERIOR ao da 0387 (22/09) — então na cadeia combinada do " +
+      "merge, a 0387 'reconstrói e perde' um valor que só existe no OUTRO lado da história. " +
+      "A forward-fix é a 0568 (`reconciliacao_provider_uazapi_pos_merge`), que reafirma a " +
+      "união das três constraints afetadas (`channel_sessions_provider_check`, " +
+      "`channel_sessions_provider_ref_check` e esta). O estado FINAL da cadeia tem o valor " +
+      "de volta — gate `tests/unit/check-do-baseline-nao-diverge-da-cadeia.test.ts`.",
+  },
   "20260918231000_0312_aviso_de_followup_sem_agente.sql::agent_inbox_items_kind_check": {
     valores: ["aviso_de_caso_nao_entregue"],
     porque:

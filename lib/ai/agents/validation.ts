@@ -256,6 +256,7 @@ export const versionPatchSchema = versionShapeSchema
     cases_enabled: versionShapeSchema.shape.cases_enabled.removeDefault(),
     split_messages: versionShapeSchema.shape.split_messages.removeDefault(),
     split_max_chars: versionShapeSchema.shape.split_max_chars.removeDefault(),
+    typing_indicator_enabled: versionShapeSchema.shape.typing_indicator_enabled.removeDefault(),
     followup: followupPatchSchema,
     operator_enabled: versionShapeSchema.shape.operator_enabled.removeDefault(),
     operator_model: versionShapeSchema.shape.operator_model.removeDefault(),

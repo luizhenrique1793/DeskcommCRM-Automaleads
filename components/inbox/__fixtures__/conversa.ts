@@ -56,6 +56,7 @@ const conversation: ConversationWithContact = {
     // Sem nomear o provider (doutrina restrição-de-canal) — o teste não
     // pergunta pela capacidade dele, um rótulo neutro basta.
     provider: "canal-de-teste",
+    status: "WORKING",
   },
 };
 

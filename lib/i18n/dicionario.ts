@@ -12819,7 +12819,6 @@ export const DICIONARIO: Traducoes = {
   "Digite este código no WhatsApp do celular, em Aparelhos conectados.": {
     es: "Escribe este código en el WhatsApp del celular, en Dispositivos conectados.",
   },
-  "Endereço do servidor": { es: "Dirección del servidor" },
   "Id da instância": { es: "Id de la instancia" },
   "id devolvido ao criar a instância": { es: "id devuelto al crear la instancia" },
   "Token da instância": { es: "Token de la instancia" },
@@ -13571,7 +13570,6 @@ export const DICIONARIO: Traducoes = {
   "O número principal precisa ser um contato desta empresa.": {
     es: "El número principal debe ser un contacto de esta empresa.",
   },
-  Nenhuma: { es: "Ninguna" },
   "Nova empresa…": { es: "Nueva empresa…" },
 
   // Asaas (0261)

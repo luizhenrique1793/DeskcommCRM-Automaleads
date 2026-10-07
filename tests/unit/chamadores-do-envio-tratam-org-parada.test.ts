@@ -18,6 +18,8 @@ const TRATA = "trata";
 
 const CHAMADORES: Record<string, string> = {
   "app/api/v1/cron/agenda-reminder/route.ts": TRATA, // tests/unit/lembrete-pula-org-parada.test.ts
+  "app/api/v1/cron/pix-watcher/route.ts":
+    "nunca alcança org parada: o filtro de organização operante (embed !inner + ehOperante) corta o lead antes do laço chamar enviarMensagem",
   "lib/campanhas/rodada.ts": TRATA, // registrarExcecaoDoEnvio, tests/unit/suspensao-nao-dispara-campanha.test.ts
   "lib/prospecting/worker.ts": TRATA, // tests/unit/prospecting-worker.test.ts
   "lib/followup/enviar-texto-fixo.ts": TRATA, // lib/followup/enviar-texto-fixo.test.ts
