@@ -48,10 +48,31 @@ export async function emitVetoActivity(
   return r.routed ? { routed: true } : { routed: false, reason: r.reason };
 }
 
-/** Motivo legível — o humano lê "não enviei porque", não um código de gate. */
+/**
+ * Motivo legível — o humano lê "não enviei porque", não um código de gate.
+ *
+ * O gate `stop` sozinho NÃO basta para escolher a frase: ele arma por três
+ * causas diferentes (`contato_bloqueado`/`contato_encaminhado_para_humano`/
+ * `contato_pessoal_sem_envio_automatico` — ver `OptOutReason` em
+ * `before-send.ts`), e as três têm o MESMO `gate: 'stop'`. Achado em produção
+ * (fork Automaleads): a timeline dizia "pediu para parar de receber mensagens"
+ * para uma conversa que só tinha ido para atendimento humano — ninguém pediu
+ * opt-out. Por isso o CÓDIGO é olhado primeiro (é ele que distingue as três),
+ * e o nome do gate só serve de fallback para os demais vetos (window/pacing/…,
+ * que têm um único código cada e nunca precisaram desta distinção).
+ */
 export function vetoReason(gate: string, code: string): string {
+  const porCodigo: Record<string, string> = {
+    // Texto IDÊNTICO ao que já saía por `gate: 'stop'` antes desta correção —
+    // só o código real (`contato_bloqueado`), não um placeholder.
+    contato_bloqueado: "Não enviei: o contato pediu para parar de receber mensagens",
+    contato_encaminhado_para_humano:
+      "Não enviei: esta conversa está em atendimento humano (não é opt-out)",
+    contato_pessoal_sem_envio_automatico:
+      "Não enviei: este contato está marcado como pessoal (não é opt-out)",
+  };
+  if (code in porCodigo) return porCodigo[code]!;
   const porGate: Record<string, string> = {
-    stop: "Não enviei: o contato pediu para parar de receber mensagens",
     window: "Não enviei: fora da janela de horário permitida",
     pacing: "Não enviei: limite de ritmo de envio atingido",
     budget: "Não enviei: orçamento de IA esgotado",
