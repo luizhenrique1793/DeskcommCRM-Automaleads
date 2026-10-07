@@ -69,6 +69,7 @@ const CONTATO = {
   cpf_hash: null,
   birthdate: null,
   is_blocked: false,
+  is_personal: false,
   blocked_reason: null,
   is_anonymized: false,
   anonymized_at: null,
@@ -140,6 +141,14 @@ describe("'Cliente desde' na ficha do contato", () => {
   });
 });
 
+describe("nome do perfil do WhatsApp na ficha do contato", () => {
+  it("identifica o campo sem expor o rótulo técnico em inglês", () => {
+    render(comQuery(<ContactDetailClient contactId="c-1" />));
+    expect(screen.getByText("Nome · WhatsApp")).toBeInTheDocument();
+    expect(screen.queryByText("Display name")).toBeNull();
+  });
+});
+
 describe("opção fixa 'cliente' no filtro de etiquetas", () => {
 
   const botaoDeTag = () => screen.getByRole("button", { name: /^Tag:/ });
@@ -164,7 +173,7 @@ describe("funil de clientes na tela de Funis", () => {
   ];
 
   it("desligada: sem botão, sem selo 'Clientes', e o rodapé aponta onde ligar", () => {
-    render(comQuery(<FunisClient funis={FUNIS} podeGerenciar podeImportar />));
+    render(comQuery(<FunisClient funis={FUNIS} arquivados={[]} podeGerenciar podeImportar />));
     expect(screen.queryByTestId("clientes-f1")).toBeNull();
     expect(screen.queryByTestId("clientes-f2")).toBeNull();
     // "Clientes" é também o NOME do funil f2: o selo é o SEGUNDO texto igual.
@@ -177,7 +186,7 @@ describe("funil de clientes na tela de Funis", () => {
 
   it("ligada: botão em cada funil, selo no marcado, e o rodapé do roteamento", () => {
     ligada = true;
-    render(comQuery(<FunisClient funis={FUNIS} podeGerenciar podeImportar />));
+    render(comQuery(<FunisClient funis={FUNIS} arquivados={[]} podeGerenciar podeImportar />));
     expect(screen.getByTestId("clientes-f1")).toHaveTextContent("Funil de clientes");
     expect(screen.getByTestId("clientes-f2")).toHaveTextContent("Deixar de ser funil de clientes");
     expect(screen.getAllByText("Clientes")).toHaveLength(2);

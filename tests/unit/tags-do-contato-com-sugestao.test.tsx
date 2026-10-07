@@ -4,6 +4,14 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { ContactTagsEditor } from "@/components/inbox/ContactTagsEditor";
+import { ProvedorDeCoresDasEtiquetas } from "@/components/tags/CoresDasEtiquetas";
+
+// O provider das cores lê a organização ATIVA pelo `useAuth` (mesmo harness do
+// teste irmão, `chip-de-etiqueta.test.tsx`): sem isto ele derruba com "useAuth
+// must be used inside <AuthProvider>" — erro certo para a tela, ruído aqui.
+vi.mock("@/hooks/auth/AuthProvider", () => ({
+  useAuth: () => ({ activeOrg: { orgId: "org-1" } }),
+}));
 
 /**
  * Tags do CONTATO sem sugestão (#852, item 1 da divisão). O editor de tags da
@@ -141,5 +149,34 @@ describe("ContactTagsEditor", () => {
     await userEvent.click(google);
 
     expect(mutate).toHaveBeenCalledWith({ tags: ["cliente", "google"] });
+  });
+
+  it("a sugestão mostra a cor da etiqueta, e não desenha nada quando ela não tem cor", async () => {
+    // #1271: a cor serve para RECONHECER antes de ler — inclusive na hora de
+    // ESCOLHER a etiqueta. `get` passa a responder por URL porque agora são duas
+    // leituras na mesma tela (o vocabulário das sugestões e o mapa de cores).
+    get.mockImplementation(async (url: string) =>
+      url === "/api/v1/tags/cores"
+        ? { data: [{ tag: "google", cor: "#e35537" }] }
+        : { data: ["google", "vip"] },
+    );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <ProvedorDeCoresDasEtiquetas>
+          <ContactTagsEditor contactId="c-1" orgId={ORG} tags={["cliente"]} />
+        </ProvedorDeCoresDasEtiquetas>
+      </QueryClientProvider>,
+    );
+
+    const google = await screen.findByRole("button", { name: "+ google" }, { timeout: 5000 });
+    const ponto = google.querySelector('[data-ponto-da-etiqueta="google"]');
+    expect(ponto).not.toBeNull();
+    expect(ponto?.getAttribute("style") ?? "").toMatch(/rgb\(227,\s*85,\s*55\)|#e35537/i);
+
+    // A que não tem cor continua sem ponto: um ponto cinza ao lado de cada
+    // etiqueta transformaria "não escolhi" em "escolhi cinza".
+    const vip = screen.getByRole("button", { name: "+ vip" });
+    expect(vip.querySelector("[data-ponto-da-etiqueta]")).toBeNull();
   });
 });

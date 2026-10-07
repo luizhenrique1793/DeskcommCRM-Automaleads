@@ -40,6 +40,7 @@
 
 <!-- Contribuindo de fora? Marque o que conseguiu; o resto é nosso. Nada aqui trava PR externo. -->
 
+- [ ] `pnpm cercas` zerado (~30 s — as guardas estruturais que mais reprovam PR)
 - [ ] `pnpm typecheck` zerado
 - [ ] `pnpm lint` zerado
 - [ ] Testes relevantes existem e passam (`pnpm test:unit`)
@@ -47,7 +48,7 @@
 - [ ] Audit log emitido, se há mutação relevante
 - [ ] Zod valida todo input externo novo
 - [ ] Sem `console.log` esquecido
-- [ ] Mudança de schema saiu como migration versionada + apêndice no `baseline.sql` + linha no MANIFEST
+- [ ] Mudança de schema saiu como migration versionada + apêndice no `baseline.sql` + linha `-- manifest:` no cabeçalho do `.sql`
 - [ ] Doc atualizada se mudou contrato (PRD/spec)
 
 Convenções completas em [`CLAUDE.md`](../CLAUDE.md) · fluxo em [`CONTRIBUTING.md`](../CONTRIBUTING.md).

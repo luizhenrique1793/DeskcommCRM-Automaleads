@@ -1,7 +1,21 @@
 import { z } from "zod";
 
+import {
+  EXTENSION_CAPABILITIES,
+  EXTENSION_PERMISSIONS,
+  permissaoDaCapacidade,
+  type ExtensionCapability,
+  type ExtensionPermission,
+} from "./capacidades";
+
 import { ExtensionError } from "./errors";
 import { parseStrictJson } from "./strict-json";
+import {
+  esquemaDaContribuicaoDeTema,
+  PALETAS_DE_TEMA,
+  type PaletaDeTema,
+  type TemaDeExtensao,
+} from "./tema";
 
 export const EXTENSION_LIMITS = {
   packageBytes: 64 * 1_024,
@@ -24,6 +38,8 @@ export type LocalizedText = { "pt-BR": string; es?: string };
 export type ExtensionConfiguration = {
   density: "comfortable" | "compact";
   show_description: boolean;
+  /** A paleta de tema escolhida (opcional) — o "qual paleta" da organização. */
+  theme?: PaletaDeTema;
 };
 
 export type ExtensionManifest = {
@@ -34,7 +50,7 @@ export type ExtensionManifest = {
   version: string;
   license: "MIT";
   host_api: { min: number; max: number };
-  permissions: ["navigation.tasks"];
+  permissions: ExtensionPermission[];
   dependencies: [];
   data: { mode: "none" };
   display: {
@@ -51,15 +67,32 @@ export type ExtensionManifest = {
       description: LocalizedText;
       icon: "ListChecks" | "BookOpen" | "Lightbulb";
       blocks: Array<{ heading: LocalizedText; body: LocalizedText }>;
-      action: { label: LocalizedText; capability: "tasks.open" };
+      action: { label: LocalizedText; capability: ExtensionCapability };
     }>;
+    /** Um tema opcional que a organização pode escolher para pintar o produto. */
+    theme?: TemaDeExtensao;
   };
 };
 
 export type CatalogEntry = Pick<
   ExtensionManifest,
   "publisher" | "name" | "version" | "license" | "host_api" | "display" | "permissions"
-> & { sha256: string; byte_length: number };
+> & { sha256: string; byte_length: number   /**
+   * Metadado de LOJA. Mora aqui, e não no manifesto, por duas razões que se somam
+   * (ADR-0003, D3): a spec recusa URL dentro do pacote — um endereço clicável vindo de
+   * terceiro, renderizado na tela de quem instalou, é porta de engano —, e o manifesto é
+   * validado por conjunto fechado no banco (migration 0271), onde cada campo novo seria
+   * uma migration. O catálogo é o artefato que NÓS revisamos antes de publicar, então a
+   * autoria passa a ser afirmada por quem revisou, não por quem enviou.
+   *
+   * Todos opcionais: um catálogo escrito antes destes campos continua válido.
+   */
+  publisher_label?: string;
+  homepage?: string;
+  repository?: string;
+  tags?: string[];
+  published_at?: string;
+};
 
 export type ExtensionCatalog = {
   format_version: 1;
@@ -84,7 +117,7 @@ export interface CompatibilityResult {
 type CompatibilitySubject = Pick<ExtensionManifest, "host_api" | "permissions"> &
   Partial<Pick<ExtensionManifest, "format_version" | "profile" | "dependencies" | "contributions">>;
 
-const HOST_API_VERSION = 1;
+const HOST_API_VERSION = 2;
 const FORBIDDEN_SNAPSHOT_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 const slugSchema = z
   .string()
@@ -96,6 +129,26 @@ const semverSchema = z
   .max(EXTENSION_LIMITS.versionCharacters)
   .regex(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
 const iconSchema = z.enum(["ListChecks", "BookOpen", "Lightbulb"]);
+
+/**
+ * URL de loja: só aparece no CATÁLOGO revisado, nunca no pacote. `https` obrigatório,
+ * sem credencial embutida e sem fragmento — o link vai para a tela de alguém, e um
+ * `user:senha@` ali é phishing com a nossa cara.
+ */
+const httpsUrlSchema = z
+  .string()
+  .max(200)
+  .refine((valor) => {
+    let url: URL;
+    try {
+      url = new URL(valor);
+    } catch {
+      return false;
+    }
+    return (
+      url.protocol === "https:" && url.username === "" && url.password === "" && url.hash === ""
+    );
+  }, "url de loja precisa ser https, sem credencial e sem fragmento");
 
 function textSchema(maxCharacters: number) {
   return z.string().refine((text) => text.trim().length > 0 && [...text].length <= maxCharacters);
@@ -127,10 +180,24 @@ export const configurationSchema = z
   .object({
     density: z.enum(["comfortable", "compact"]),
     show_description: z.boolean(),
+    // A paleta escolhida pela organização. Ausente = quem nunca escolheu tema.
+    theme: z.enum(PALETAS_DE_TEMA).optional(),
   })
   .strict();
 
-const permissionsSchema = z.tuple([z.literal("navigation.tasks")]);
+/**
+ * Era uma tupla de um elemento. Virou lista para o pacote poder pedir mais de uma porta
+ * (ADR-0003) — e continua fechada: `z.enum` recusa qualquer nome fora do vocabulário.
+ * Sem repetição, porque a tela mostra estas linhas a quem vai aceitar a extensão, e um
+ * item duplicado ali lê como duas permissões diferentes.
+ */
+const permissionsSchema = z
+  .array(z.enum(EXTENSION_PERMISSIONS))
+  .min(1)
+  .max(EXTENSION_PERMISSIONS.length)
+  .refine((lista) => new Set(lista).size === lista.length, {
+    message: "permissao repetida",
+  });
 const dependenciesSchema: z.ZodType<[]> = z.tuple([]);
 
 const manifestSchema: z.ZodType<ExtensionManifest> = z
@@ -172,7 +239,7 @@ const manifestSchema: z.ZodType<ExtensionManifest> = z
                 action: z
                   .object({
                     label: localizedTextSchema(EXTENSION_LIMITS.titleCharacters),
-                    capability: z.literal("tasks.open"),
+                    capability: z.enum(EXTENSION_CAPABILITIES),
                   })
                   .strict(),
               })
@@ -185,6 +252,7 @@ const manifestSchema: z.ZodType<ExtensionManifest> = z
               ctx.addIssue({ code: "custom", message: "id de card repetido" });
             }
           }),
+        theme: esquemaDaContribuicaoDeTema.optional(),
       })
       .strict(),
   })
@@ -218,6 +286,14 @@ const catalogEntrySchema: z.ZodType<CatalogEntry> = z
     permissions: permissionsSchema,
     sha256: z.string().regex(/^[a-f0-9]{64}$/),
     byte_length: z.number().int().positive().max(EXTENSION_LIMITS.packageBytes),
+    publisher_label: z.string().min(2).max(64).optional(),
+    homepage: httpsUrlSchema.optional(),
+    repository: httpsUrlSchema.optional(),
+    tags: z.array(slugSchema).max(8).optional(),
+    published_at: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .optional(),
   })
   .strict();
 
@@ -375,14 +451,32 @@ export function checkCompatibility(subject: CompatibilitySubject): Compatibility
   if (subject.host_api.min > HOST_API_VERSION || subject.host_api.max < HOST_API_VERSION) {
     return incompatible("host_api_unsupported");
   }
-  if (subject.permissions.length !== 1 || subject.permissions[0] !== "navigation.tasks") {
+  if (
+    subject.permissions.length === 0 ||
+    subject.permissions.some((permissao) => !EXTENSION_PERMISSIONS.includes(permissao))
+  ) {
     return incompatible("permission_unsupported");
   }
   if (subject.dependencies !== undefined && subject.dependencies.length !== 0) {
     return incompatible("dependency_unsupported");
   }
-  if (subject.contributions?.crm_cards.some((card) => card.action.capability !== "tasks.open")) {
+  const capacidades = subject.contributions?.crm_cards.map((card) => card.action.capability) ?? [];
+  if (capacidades.some((capacidade) => !EXTENSION_CAPABILITIES.includes(capacidade))) {
     return incompatible("capability_unsupported");
+  }
+  // Cobertura: usar uma porta sem tê-la declarado esconderia de quem aceita a extensão
+  // exatamente a informação que a tela existe para mostrar.
+  const declaradas = new Set<ExtensionPermission>(subject.permissions);
+  if (capacidades.some((capacidade) => !declaradas.has(permissaoDaCapacidade(capacidade)))) {
+    return incompatible("permission_unsupported");
+  }
+  // Um tema declarado sem a permissão que o anuncia fica invisível para quem vai aceitar a
+  // extensão — a mesma regra de cobertura dos cards, para a contribuição de tema.
+  if (
+    subject.contributions?.theme !== undefined &&
+    !declaradas.has("theme.apply")
+  ) {
+    return incompatible("permission_unsupported");
   }
   return { compatible: true, reason: null };
 }

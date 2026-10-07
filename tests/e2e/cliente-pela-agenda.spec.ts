@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { createClient } from "@supabase/supabase-js";
-import { expect, test, type Page, type TestInfo } from "@playwright/test";
+import { expect, test, type Page, type TestInfo } from "./helpers/test";
 
 import { credenciaisSupabaseDeTeste } from "../../scripts/lib/env-de-teste";
 import { escolherDiaDesenhado, irParaASemanaSeguinte } from "./helpers/agenda-semana-integra";
@@ -100,7 +100,7 @@ async function entrar(page: Page, email: string) {
   await page.goto("/login");
   await page.getByLabel(/e-?mail/i).fill(email);
   await page.getByLabel(/senha/i).fill(senha);
-  await page.getByRole("button", { name: /entrar/i }).click();
+  await page.getByRole("button", { name: "Entrar", exact: true }).click();
   await page.waitForURL(/\/app(?:\/|$)/, { timeout: 60_000 });
 }
 
@@ -151,9 +151,10 @@ test("ligar 'Clientes pela agenda' transforma quem tem horário marcado em clien
   const dias = await irParaASemanaSeguinte(page);
   await page.getByRole("button", { name: /novo agendamento/i }).click();
   await expect(page.getByTestId("painel-de-marcacao")).toBeVisible({ timeout: 15_000 });
-  const quem = page.getByLabel("Quem será atendido");
-  await expect(quem.locator(`option[value="${f.contato}"]`)).toHaveCount(1, { timeout: 15_000 });
-  await quem.selectOption(f.contato);
+  const quem = page.getByTestId("quem-sera-atendido");
+  await quem.click();
+  await expect(page.getByRole("option", { name: "Bruna Tatuada" })).toBeVisible({ timeout: 15_000 });
+  await page.getByRole("option", { name: "Bruna Tatuada" }).click();
   await page.getByRole("button", { name: /^Sessão de estúdio/ }).click();
   await escolherDiaDesenhado(page, dias);
   await page.locator('[data-testid^="horario-"]').first().click();
@@ -225,7 +226,10 @@ test("ligar 'Clientes pela agenda' transforma quem tem horário marcado em clien
   await page.goto("/app/contacts");
   await expect(linhaDoContato(page).getByText("Cliente", { exact: true })).toBeVisible({ timeout: 30_000 });
   await page.getByRole("button", { name: /^Tag:/ }).click();
-  await page.getByRole("menuitem", { name: "cliente", exact: true }).click();
+  // Checkbox (#1274): marca e NÃO fecha o menu; fecha-se para o gatilho sair
+  // do aria-hidden que o Radix põe no resto da página.
+  await page.getByRole("menuitemcheckbox", { name: "cliente", exact: true }).click();
+  await page.keyboard.press("Escape");
   await expect(page.getByRole("button", { name: "Tag: cliente" })).toBeVisible();
   await expect(linhaDoContato(page)).toBeVisible({ timeout: 30_000 });
   await evidencia(page, info, "5-contatos-filtro-cliente");

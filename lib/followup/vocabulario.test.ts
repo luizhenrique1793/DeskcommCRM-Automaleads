@@ -21,7 +21,7 @@ import * as ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 import { enumsDoFollowup } from "@/tests/support/enums-do-grafo";
-import { traduzir } from "@/lib/i18n/dicionario";
+import { DICIONARIO, traduzir } from "@/lib/i18n/dicionario";
 
 import { triggerConfigSchema } from "./api-schemas";
 import { conditionLabel } from "./edge-condition-options";
@@ -453,6 +453,46 @@ describe("o ramo em frase — o registro do dossiê", () => {
   });
 });
 
+describe("a regra mostra o que a pessoa escolheu, nunca o identificador", () => {
+  const ID_DA_ETAPA = "0b3c6a3e-8a1f-4a51-9d0e-3f2b7c9d1e22";
+  const nomes = { etapa: (id: string) => (id === ID_DA_ETAPA ? "Pago · Vendas" : null) };
+
+  it("etapa gravada por id aparece pelo nome, com o funil junto", () => {
+    // O motor compara `stage_id`; a tela grava o id e LÊ o nome. Sem o nome, o
+    // card mostraria o uuid — o defeito que este módulo existe para impedir.
+    expect(fraseDaCondicao("lead_stage", "eq", ID_DA_ETAPA, nomes)).toBe("O lead está na etapa “Pago · Vendas”");
+    expect(fraseDaRegraSemNome("lead_stage", "neq", ID_DA_ETAPA, nomes)).toBe(
+      "quando o lead não está na etapa “Pago · Vendas”",
+    );
+  });
+
+  it("valor que não é id de etapa nenhuma aparece como foi salvo — o texto antigo não some", () => {
+    expect(fraseDaCondicao("lead_stage", "eq", "PAGO", nomes)).toBe("O lead está na etapa “PAGO”");
+  });
+
+  it("id de etapa sem nome resolvido nunca vai para a tela", () => {
+    // Etapa apagada, de outra org, ou leitura que falhou: o uuid não é nome de
+    // nada para quem lê, e aparecer entre aspas o faria parecer um.
+    const OUTRO_ID = "1b2c3d4e-5f60-4a7b-8c9d-0e1f2a3b4c5d";
+    expect(fraseDaCondicao("lead_stage", "eq", OUTRO_ID, nomes)).toBe("O lead está na etapa (não encontrada)");
+    expect(fraseDaCondicao("lead_stage", "neq", ID_DA_ETAPA)).toBe("O lead não está na etapa (não encontrada)");
+  });
+
+  it("o nome da etapa só vale para o campo etapa", () => {
+    const tudoViraNome = { etapa: () => "NÃO DEVIA APARECER" };
+    expect(fraseDaCondicao("tag", "eq", "vip", tudoViraNome)).toBe("O contato tem a etiqueta “vip”");
+    expect(fraseDaCondicao("last_outcome", "eq", "x", tudoViraNome)).toBe("O desfecho do passo anterior foi “x”");
+  });
+
+  it("regra sem valor diz que falta preencher, em vez de aspas vazias", () => {
+    // `“”` se lia como "a etapa de nome vazio" — uma regra que parecia pronta.
+    expect(fraseDaCondicao("lead_stage", "eq", "")).toBe("O lead está na etapa (a preencher)");
+    expect(fraseDaCondicao("tag", "eq", "  ")).toBe("O contato tem a etiqueta (a preencher)");
+    expect(fraseDaCondicao("steps_taken", "gte", "")).toBe("O fluxo já deu pelo menos (a preencher) passos");
+    expect(fraseDaCondicao("lead_stage", "eq", "", nomes)).toBe("O lead está na etapa (a preencher)");
+  });
+});
+
 describe("o antigo 'Grace' virou uma pergunta com consequência", () => {
   it("o mínimo declarado é exatamente o piso do schema", () => {
     const base = { classes: ["x"], target: "last_reply" as const };
@@ -492,6 +532,33 @@ describe("rótulos sob contrato de e2e", () => {
     // tests/e2e/followup-builder.spec.ts seleciona as duas opções pelo nome exato.
     expect(GATILHOS.manual).toBe("Manual");
     expect(GATILHOS.silence).toBe("Silêncio");
+  });
+});
+
+describe("o desfecho fala a língua de quem opera o dossiê (#2014)", () => {
+  it("todo valor do CHECK de outcome tem rótulo e tradução em espanhol", () => {
+    // Os valores vêm do mesmo lugar que o banco: `EnrollmentOutcome` é o vocabulário
+    // que o CHECK `outcome in ('converted','replied',...)` aceita (migration 0054).
+    // Cada um precisa de um rótulo em português (o dossiê mostra `t(DESFECHOS[...])`)
+    // e esse rótulo tem de ter espanhol — senão quem escolheu espanhol lê o wire cru.
+    for (const valor of DESFECHOS_NO_TIPO) {
+      const rotulo = DESFECHOS[valor as keyof typeof DESFECHOS];
+      expect(rotulo, `'${valor}' sem rótulo em DESFECHOS`).toBeTruthy();
+      expect(DICIONARIO[rotulo]?.es, `rótulo '${rotulo}' (de '${valor}') sem espanhol`).toBeTruthy();
+      // O rótulo não pode ser o identificador de wire — ex.: `exhausted` não vira
+      // "exhausted" na tela, vira frase.
+      expect(rotulo).not.toBe(valor);
+    }
+  });
+
+  it("o desfecho esgotado lê 'Encerrado sem conversão', e o nó final segue 'Esgotado'", () => {
+    // A issue nomeia as duas palavras de propósito: a que o OPERADOR vê no fim do
+    // acompanhamento (DESFECHOS) é frase; a que o DONO DO FLUXO escolhe no construtor
+    // (RESULTADOS_DO_FIM) é contrato do e2e e não muda aqui.
+    // "sem conversão", não "sem resposta": o nó Fim nasce com `exhausted`, então
+    // o dado não garante que o contato ficou calado (ver o comentário de DESFECHOS).
+    expect(DESFECHOS.exhausted).toBe("Encerrado sem conversão");
+    expect(RESULTADOS_DO_FIM.exhausted).toBe("Esgotado");
   });
 });
 

@@ -9,9 +9,24 @@ import { SQL_ERRORS } from "./erros-do-banco";
 
 const RAIZ = path.resolve(__dirname, "../..");
 const pasta = path.join(RAIZ, "supabase/migrations");
-const arquivo = readdirSync(pasta).find((nome) => /_0271_extensoes_declarativas\.sql$/.test(nome));
-if (!arquivo) throw new Error("Migration 0271 das extensões não encontrada");
-const migration = readFileSync(path.join(pasta, arquivo), "utf8");
+/**
+ * Varre TODA migration que levante código `extension_*`, não só a 0271.
+ *
+ * A versão anterior casava `_0271_extensoes_declarativas.sql` e mais nada. Quando a 0280
+ * acrescentou `extension_permissions_changed`, o código nasceu FORA desta vigilância: sem
+ * frase e sem status, o serviço responderia 503 "não foi possível confirmar o resultado" —
+ * e o defeito seria mudo, porque este teste continuaria verde.
+ *
+ * O filtro é por CONTEÚDO (a migration levanta algum `extension_*`?) e não por nome de
+ * arquivo, para alcançar também uma migration futura que não se chame "extensoes".
+ */
+const LEVANTA = /message\s*=\s*'(extension_[a-z_]+)'/g;
+const migrations = readdirSync(pasta)
+  .filter((nome) => nome.endsWith(".sql"))
+  .map((nome) => readFileSync(path.join(pasta, nome), "utf8"))
+  .filter((conteudo) => new RegExp(LEVANTA.source).test(conteudo));
+if (migrations.length === 0) throw new Error("Nenhuma migration de extensões encontrada");
+const migration = migrations.join("\n");
 
 describe("códigos das funções de extensão", () => {
   it("todo código que o banco levanta tem frase e status no serviço", () => {

@@ -8,7 +8,7 @@ import { randomInt, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { createClient } from "@supabase/supabase-js";
-import { test, expect, type Page, type TestInfo } from "@playwright/test";
+import { test, expect, type Page, type TestInfo } from "./helpers/test";
 import { credenciaisSupabaseDeTeste } from "../../scripts/lib/env-de-teste";
 import { escolherDiaDesenhado, irParaASemanaSeguinte } from "./helpers/agenda-semana-integra";
 import { enviarTextoFixoPendente } from "../../lib/followup/enviar-texto-fixo";
@@ -142,8 +142,19 @@ async function login(page: Page, email: string) {
   await page.goto("/login");
   await page.getByLabel(/e-?mail/i).fill(email);
   await page.getByLabel(/senha/i).fill(password);
-  await page.getByRole("button", { name: /entrar/i }).click();
+  await page.getByRole("button", { name: "Entrar", exact: true }).click();
   await page.waitForURL(/\/app(?:\/|$)/, { timeout: 60000 });
+}
+// O radar só pinta as listas depois que a tela busca /api/v1/leads/at-risk, e
+// no CI essa resposta levou ~3,9 s nas duas falhas medidas (#1879), disputando o
+// servidor com os prefetches do menu. O `expect` de 5 s começava junto com a
+// busca e perdia a corrida por ~1 s. Espera-se o EVENTO (a resposta), não um prazo.
+async function abrirRadar(page: Page) {
+  const carregou = page.waitForResponse(
+    (r) => new URL(r.url()).pathname === "/api/v1/leads/at-risk" && r.request().method() === "GET",
+  );
+  await page.goto("/app/radar");
+  expect((await carregou).status()).toBe(200);
 }
 async function detail(page: Page, id: string, title: string) {
   await page.goto(`/app/agenda?compromisso=${id}`);
@@ -286,7 +297,7 @@ test("Inbox marca cliente/conversa; detalhe antigo confirma presença com evidê
   await page.getByRole("link", { name: "Marcar compromisso", exact: true }).click();
   const panel = page.getByTestId("painel-de-marcacao");
   await expect(panel).toBeVisible();
-  await expect(page.getByLabel("Quem será atendido")).toHaveValue(p.contact);
+  await expect(page.getByTestId("quem-sera-atendido")).toHaveAttribute("data-contact-id", p.contact);
   await expect(page.getByLabel("Conversa vinculada (opcional)")).toHaveValue(p.conversation);
   // Fecha o painel para navegar a grade; reabre pela mesma entrada contextual.
   await page.keyboard.press("Escape");
@@ -488,7 +499,7 @@ test("ir para a Agenda pelo menu apaga o cliente da conversa — \"Novo agendame
   await page.goto(`/app/inbox/${p.conversation}`);
   await page.getByRole("link", { name: "Marcar compromisso", exact: true }).click();
   await expect(page.getByTestId("painel-de-marcacao")).toBeVisible();
-  await expect(page.getByLabel("Quem será atendido")).toHaveValue(p.contact);
+  await expect(page.getByTestId("quem-sera-atendido")).toHaveAttribute("data-contact-id", p.contact);
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("painel-de-marcacao")).toBeHidden();
 
@@ -496,7 +507,7 @@ test("ir para a Agenda pelo menu apaga o cliente da conversa — \"Novo agendame
   await expect(page).toHaveURL(/\/app\/agenda$/);
   await page.getByRole("button", { name: /novo agendamento/i }).click();
   await expect(page.getByTestId("painel-de-marcacao")).toBeVisible();
-  await expect(page.getByLabel("Quem será atendido")).toHaveValue("");
+  await expect(page.getByTestId("quem-sera-atendido")).toHaveValue("");
 });
 
 test("gestão configura prazos e gatilho; falta inicia uma vez e resposta interrompe", async ({
@@ -1069,7 +1080,7 @@ test("Radar recorta demandas pela RLS real, além do pool frio, e preserva gest�
   };
   await policy("own");
   await login(page, members.agent!.email);
-  await page.goto("/app/radar");
+  await abrirRadar(page);
   await expect(page.getByTestId("radar-sem-proximo-passo")).toContainText("Própria fora do pool");
   const own = await read();
   expect(own.sem_proximo_passo.map((d) => d.id).sort()).toEqual(
@@ -1088,7 +1099,7 @@ test("Radar recorta demandas pela RLS real, além do pool frio, e preserva gest�
   );
   expect(unassigned.total_sem_proximo_passo).toBe(3);
   await login(page, members.manager!.email);
-  await page.goto("/app/radar");
+  await abrirRadar(page);
   await expect(page.getByTestId("radar-sem-proximo-passo")).toContainText("Órfã de gestão");
   expect((await read()).total_sem_proximo_passo).toBe(6);
   await login(page, members.viewer!.email);
@@ -1108,7 +1119,7 @@ test("Radar recorta demandas pela RLS real, além do pool frio, e preserva gest�
   await page.getByRole("button", { name: /Acompanhar/ }).click();
   await page.getByRole("button", { name: "Confirmar e entrar" }).click();
   await page.waitForURL("**/app/inbox");
-  await page.goto("/app/radar");
+  await abrirRadar(page);
   await expect(page.getByTestId("radar-sem-proximo-passo")).toContainText("Órfã de gestão");
   expect((await read()).total_sem_proximo_passo).toBe(6);
   await page.getByRole("button", { name: "Sair do acompanhamento" }).click();

@@ -101,7 +101,7 @@ describe("o atraso humano NÃO substitui o throttle anti-ban entre bolhas", () =
 });
 
 /**
- * FIAÇÃO — mesmo padrão de `handoff-fernando-fiacao.test.ts`.
+ * FIAÇÃO — mesmo padrão de `handoff-fantasma-fiacao.test.ts`.
  *
  * `jaEsperouComoHumano` mora num closure no meio de um arquivo de ~2700 linhas e
  * não é alcançável por teste de função pura: o turno inteiro precisaria de pool,
@@ -112,17 +112,37 @@ describe("o atraso humano NÃO substitui o throttle anti-ban entre bolhas", () =
  *
  * O conserto do "responde rápido demais" viraria o defeito simétrico, pior que o
  * original. Guardar a fiação na fonte é a rede mais barata que alcança isso.
+ *
+ * Desde a #654 a pausa é paga em `esperaForaDoLock` — fora da posse do lock do
+ * número — e a guarda do flag migrou junto para lá.
  */
 const FONTE_INBOUND = fs.readFileSync(
   path.join(process.cwd(), "lib/agent-engine/agent/inbound-turn.ts"),
   "utf8",
 );
 
+describe("fiação — o \"digitando…\" cobre o tempo do modelo", () => {
+  it("acende ANTES da chamada principal ao modelo, só em turno que fala com o lead", () => {
+    // Medido numa instalação real: 7s de LLM contra ~2s de alvo — a pausa humana
+    // zera, e espera zero não acende presença. Sem esta chamada o cliente esperava
+    // o modelo inteiro sem indicador nenhum.
+    const modelo = FONTE_INBOUND.indexOf("    const turn = await runModelCall(");
+    expect(modelo).toBeGreaterThan(-1);
+    // Entre a montagem das mensagens de abertura e a chamada — nada roda no meio.
+    const abertura = FONTE_INBOUND.lastIndexOf("    const openingMessages: ModelMessage[] =", modelo);
+    expect(abertura).toBeGreaterThan(-1);
+    const janela = FONTE_INBOUND.slice(abertura, modelo);
+    expect(janela).toMatch(
+      /if \(channel\?\.signalTyping && turnoVaiFalarComOLead\(liveJob\(\)\)\) \{\s*acenderDigitando\(/,
+    );
+  });
+});
+
 describe("fiação — a espera humana é paga UMA vez por turno", () => {
-  it("`antesDaPrimeira` abre com a guarda do flag e a arma antes de esperar", () => {
-    const i = FONTE_INBOUND.indexOf("antesDaPrimeira: async (primeiraBolha: string)");
+  it("`esperaForaDoLock` abre com a guarda do flag e a arma antes de esperar", () => {
+    const i = FONTE_INBOUND.indexOf("esperaForaDoLock: async (): Promise<void> => {");
     expect(i).toBeGreaterThan(-1);
-    const janela = FONTE_INBOUND.slice(i, i + 300);
+    const janela = FONTE_INBOUND.slice(i, i + 400);
     // Ordem importa: guardar DEPOIS de esperar não impediria a segunda espera.
     expect(janela).toMatch(/if \(jaEsperouComoHumano\) return;\s*\n\s*jaEsperouComoHumano = true;/);
   });
@@ -133,13 +153,30 @@ describe("fiação — a espera humana é paga UMA vez por turno", () => {
     expect(FONTE_INBOUND).toMatch(/^ {2}let jaEsperouComoHumano = false;$/m);
   });
 
-  it("o call site mantém o jitter anti-ban entre bolhas ao lado do atraso humano", () => {
-    const i = FONTE_INBOUND.indexOf("sendInBubbles(finalBody, {");
+  it("o call site mantém o jitter anti-ban entre bolhas, sem a pausa humana dentro do lock", () => {
+    // O `send` que a cadeia chama. Desde as fotos do catálogo (0390) ele manda
+    // bolhas E fotos, e o MESMO jitter vale entre as duas — por isso a âncora é o
+    // callback, não mais a chamada de `sendInBubbles`.
+    // O do `send_message` — o `send_template`, antes dele, tem um callback homônimo.
+    const doSendMessage = FONTE_INBOUND.indexOf("send_message: tool({");
+    expect(doSendMessage).toBeGreaterThan(-1);
+    const i = FONTE_INBOUND.indexOf("send: (finalBody: string) =>", doSendMessage);
     expect(i).toBeGreaterThan(-1);
-    const janela = FONTE_INBOUND.slice(i, i + 1600);
+    const janela = FONTE_INBOUND.slice(i, i + 2400);
     // Os dois convivem: o jitter é throttle anti-ban entre mensagens físicas, o
     // atraso humano é a pausa do turno. Perder o primeiro é afrouxar o anti-ban.
-    expect(janela).toMatch(/jitter:\s*\(\)\s*=>\s*1200 \+ Math\.floor\(Math\.random\(\) \* 800\)/);
-    expect(janela).toContain("antesDaPrimeira:");
+    // Desde a 0499 o jitter LÊ os knobs da conexão (throttleMs + jitterMaxMs,
+    // defaults 1200/800) em vez do literal `1200 + rand*800` — mesma proteção,
+    // agora configurável por número.
+    expect(janela).toMatch(/const jitter = \(\) =>/);
+    expect(janela).toMatch(/pacingDoTurno\?\.knobs\.throttleMs \?\? 1200/);
+    expect(janela).toMatch(/Math\.floor\(Math\.random\(\) \* \(pacingDoTurno\?\.knobs\.jitterMaxMs \?\? 800\)\)/);
+    expect(janela).toContain("sendInBubbles(texto, {");
+    // Issue #654: a pausa humana saiu daqui. Ela era paga no `antesDaPrimeira`, que
+    // rodava dentro do callback `send` — isto é, com o `pg_advisory_xact_lock` do
+    // NÚMERO na mão. Trazer `esperarComoHumano(` de volta para esta janela reintroduz
+    // o defeito: a posse do lock volta a durar a pausa inteira (1.2s–7.5s).
+    expect(janela).not.toContain("antesDaPrimeira:");
+    expect(janela).not.toContain("esperarComoHumano(");
   });
 });

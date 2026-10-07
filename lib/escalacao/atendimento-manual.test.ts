@@ -60,6 +60,8 @@ function silenciadaAte(patch: Record<string, unknown>): Date {
  */
 function iaCaladaEm(ate: Date, quando: Date): boolean {
   const d = decidirElegibilidade({
+    orgStatus: "active",
+    canalDesativado: false,
     modo: "open",
     forceHuman: false,
     botSilencedUntil: normalizarInstante(ate.toISOString()),
@@ -156,7 +158,7 @@ describe("pausarIaPorAtendimentoManual — cada fala humana RENOVA o prazo", () 
 /**
  * Portado de `tests/unit/silenciar-bot-retomada-humana.test.ts`, que morreu junto
  * com `silenciarBotPorRetomadaHumana` quando os dois caminhos viraram um só. A
- * lacuna que aqueles casos guardam foi medida em produção (tenant YADEA): um
+ * lacuna que aqueles casos guardam foi medida em produção: um
  * humano respondeu direto pelo WhatsApp, o bot não foi silenciado, e na mensagem
  * seguinte do lead voltou a rodar sozinho, alucinando sobre algo que só o humano
  * tinha tratado (PIX). A rede continua armada, agora em cima do helper novo.
@@ -243,5 +245,90 @@ describe("pausarIaPorAtendimentoManual — o que NÃO grava, e o que não derrub
     await expect(
       pausarIaPorAtendimentoManual(admin, { organizationId: ORG, conversationId: CONV, agora: T0 }),
     ).resolves.toBe(false);
+  });
+});
+
+/**
+ * Dublê que separa as duas tabelas: `organizations` devolve o `settings` (ou
+ * falha), `conversations` devolve a conversa sem silêncio e registra o UPDATE.
+ */
+function adminComAjuste(org: { settings?: unknown; erro?: string; lanca?: boolean }) {
+  const updates: Array<Record<string, unknown>> = [];
+  const conversa = {
+    select: () => conversa,
+    update: (patch: Record<string, unknown>) => {
+      updates.push(patch);
+      return conversa;
+    },
+    eq: () => conversa,
+    maybeSingle: () => Promise.resolve({ data: { bot_silenced_until: null }, error: null }),
+    then: (r: (v: unknown) => unknown) => Promise.resolve({ error: null }).then(r),
+  };
+  const organizacao = {
+    select: () => organizacao,
+    eq: () => organizacao,
+    maybeSingle: () => {
+      if (org.lanca) throw new Error("rede caiu");
+      return Promise.resolve(
+        org.erro
+          ? { data: null, error: { message: org.erro } }
+          : { data: { settings: org.settings ?? {} }, error: null },
+      );
+    },
+  };
+  const admin = {
+    from: vi.fn((tabela: string) => (tabela === "organizations" ? organizacao : conversa)),
+  } as never;
+  return { admin, updates };
+}
+
+describe("pausarIaPorAtendimentoManual — o prazo é o da EMPRESA (#2005)", () => {
+  it("empresa com 15 min grava agora + 15 min, e a IA volta depois disso", async () => {
+    const { admin, updates } = adminComAjuste({
+      settings: { routing: { manual_reply_silence_minutes: 15 } },
+    });
+    await pausarIaPorAtendimentoManual(admin, { organizationId: ORG, conversationId: CONV, agora: T0 });
+    const ate = silenciadaAte(updates[0]!);
+    expect(ate.getTime()).toBe(T0.getTime() + 15 * 60 * 1000);
+    expect(iaCaladaEm(ate, new Date(T0.getTime() + 14 * 60 * 1000))).toBe(true);
+    expect(iaCaladaEm(ate, new Date(T0.getTime() + 16 * 60 * 1000))).toBe(false);
+  });
+
+  it("empresa sem ajuste fica com o padrão de 60 min", async () => {
+    const { admin, updates } = adminComAjuste({ settings: { routing: { mode: "manual" } } });
+    await pausarIaPorAtendimentoManual(admin, { organizationId: ORG, conversationId: CONV, agora: T0 });
+    expect(silenciadaAte(updates[0]!).getTime()).toBe(T0.getTime() + PRAZO_DO_SILENCIO_MS);
+  });
+
+  it("leitura do ajuste com ERRO não impede a pausa — vale o padrão", async () => {
+    const { admin, updates } = adminComAjuste({ erro: "permission denied" });
+    await expect(
+      pausarIaPorAtendimentoManual(admin, { organizationId: ORG, conversationId: CONV, agora: T0 }),
+    ).resolves.toBe(true);
+    expect(silenciadaAte(updates[0]!).getTime()).toBe(T0.getTime() + PRAZO_DO_SILENCIO_MS);
+  });
+
+  it("leitura do ajuste que LANÇA não impede a pausa — vale o padrão", async () => {
+    const { admin, updates } = adminComAjuste({ lanca: true });
+    await expect(
+      pausarIaPorAtendimentoManual(admin, { organizationId: ORG, conversationId: CONV, agora: T0 }),
+    ).resolves.toBe(true);
+    expect(silenciadaAte(updates[0]!).getTime()).toBe(T0.getTime() + PRAZO_DO_SILENCIO_MS);
+  });
+
+  it("pausa durável (#off) nem consulta o ajuste: grava 'infinity'", async () => {
+    const { admin, updates } = adminComAjuste({
+      settings: { routing: { manual_reply_silence_minutes: 15 } },
+    });
+    await pausarIaPorAtendimentoManual(admin, {
+      organizationId: ORG,
+      conversationId: CONV,
+      agora: T0,
+      duravel: true,
+    });
+    expect(updates[0]!.bot_silenced_until).toBe("infinity");
+    expect((admin as unknown as { from: ReturnType<typeof vi.fn> }).from).not.toHaveBeenCalledWith(
+      "organizations",
+    );
   });
 });

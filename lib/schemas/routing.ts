@@ -9,12 +9,19 @@
  */
 import { z } from "zod";
 
+import { PRAZO_MAX_MINUTOS, PRAZO_MIN_MINUTOS } from "@/lib/escalacao/devolucao-automatica";
 import { fusoValido } from "@/lib/tempo/fusos";
 
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 
-/** Modos de roteamento no MVP (decisão G1-06b); "load" fica pós-MVP. */
-export const ROUTING_MODES = ["manual", "round_robin"] as const;
+/**
+ * Modos de roteamento. `manual` e `round_robin` são o MVP (decisão G1-06b);
+ * `load` — o de menor carga, com desempate pelo rodízio — era o "pós-MVP"
+ * prometido ali e entrou pela issue #1539. O worker (lib/routing/decide.ts) e
+ * as DUAS telas que oferecem o modo (settings/atendimento e team) derivam desta
+ * lista, então acrescentar um modo aqui os atualiza sem tocar em mais nada.
+ */
+export const ROUTING_MODES = ["manual", "round_robin", "load"] as const;
 export type RoutingMode = (typeof ROUTING_MODES)[number];
 
 /**
@@ -25,8 +32,67 @@ export const routingConfigSchema = z.object({
   mode: z.enum(ROUTING_MODES).default("manual"),
   max_retries: z.number().int().min(0).max(20).default(5),
   backoff_seconds: z.number().int().min(1).max(3600).default(60),
+  /**
+   * Prazo, em minutos, para devolver ao agente de IA uma conversa que ficou
+   * com uma pessoa e não teve mais nenhum sinal dela. `null` = nunca — a regra
+   * IA-06 de sempre (o bot não reassume até alguém clicar "Devolver"), que é o
+   * padrão para não mudar o comportamento de quem já instalou. Quem devolve é
+   * o cron `handoff-devolucao`; a regra pura está em
+   * `lib/escalacao/devolucao-automatica.ts`, e a faixa (5 min – 24 h) também.
+   */
+  handoff_return_after_minutes: z
+    .number()
+    .int()
+    .min(PRAZO_MIN_MINUTOS)
+    .max(PRAZO_MAX_MINUTOS)
+    .nullable()
+    .default(null),
+  /**
+   * Quantos minutos a IA fica calada numa conversa depois que alguém da equipe
+   * responde por FORA do CRM (pelo celular, no próprio aplicativo do canal).
+   * `null` = o padrão de 60 min. Cada nova resposta à mão renova o prazo. Quem
+   * lê é `lerPrazoDoSilencioManualMinutos` (`lib/escalacao/atendimento-manual.ts`),
+   * que trata ausente/fora da faixa como 60. Nasceu do diagnóstico de
+   * @gaberaldo-svg (#2005): a clínica que atende o dia inteiro pelo celular
+   * renovava os 60 min a cada fala, e a IA não respondia ninguém o dia todo.
+   */
+  manual_reply_silence_minutes: z
+    .number()
+    .int()
+    .min(PRAZO_MIN_MINUTOS)
+    .max(PRAZO_MAX_MINUTOS)
+    .nullable()
+    .default(null),
+  /**
+   * "A conversa fica com quem atendeu" (ideia de @gustavorodcruz96, #1527).
+   * Desligado = o comportamento de sempre: a resposta humana cala a IA por
+   * alguns minutos e a conversa encerrada que recebe mensagem nova volta para a
+   * fila e para o roteamento. Ligado: responder pelo Inbox numa conversa sem
+   * dono a assume (a IA fica calada até alguém devolver), e a conversa
+   * encerrada volta direto para o último atendente, se ele ainda é da equipe.
+   *
+   * ⚠️ O BANCO LÊ ESTE CAMINHO EXATO: `fn_service_inbound` (migration 0396)
+   * compara `settings->'routing'->'conversation_stays_with_attendant'` com o
+   * booleano `true`. Renomear ou mover a chave desliga a reabertura em silêncio.
+   * No TypeScript, quem lê é `conversaFicaComQuemAtendeu()`, com a mesma régua.
+   */
+  conversation_stays_with_attendant: z.boolean().default(false),
 });
 export type RoutingConfig = z.infer<typeof routingConfigSchema>;
+
+/**
+ * Lê o ajuste "a conversa fica com quem atendeu" sem nunca lançar.
+ *
+ * A régua é a MESMA do banco: só o booleano `true` liga. Qualquer outra coisa
+ * (chave ausente, `"true"` em texto, outra chave de `routing` inválida ao lado)
+ * é desligado — o padrão de toda empresa que nunca abriu a tela.
+ */
+export function conversaFicaComQuemAtendeu(settings: unknown): boolean {
+  if (!settings || typeof settings !== "object") return false;
+  const routing = (settings as Record<string, unknown>).routing;
+  if (!routing || typeof routing !== "object") return false;
+  return (routing as Record<string, unknown>).conversation_stays_with_attendant === true;
+}
 
 /**
  * `organizations.settings.visibility_mode` — o escopo de leitura do role
@@ -53,8 +119,74 @@ export type VisibilityModeInput = (typeof VISIBILITY_MODES)[number];
  */
 export const atendimentoConfigPatchSchema = routingConfigSchema.extend({
   visibility_mode: z.enum(VISIBILITY_MODES).optional(),
+  /**
+   * Opcional pela MESMA razão de `visibility_mode`: a rota preserva o prazo em
+   * vigor quando a chave não vem — um cliente antigo, que só conhece o modo de
+   * roteamento, não pode desligar a devolução automática por omissão.
+   */
+  handoff_return_after_minutes: z
+    .number()
+    .int()
+    .min(PRAZO_MIN_MINUTOS)
+    .max(PRAZO_MAX_MINUTOS)
+    .nullable()
+    .optional(),
+  /** Opcional pela mesma razão: cliente antigo não desliga o ajuste por omissão. */
+  conversation_stays_with_attendant: z.boolean().optional(),
+  /** Opcional pela mesma razão: cliente antigo não volta o prazo para 60 por omissão. */
+  manual_reply_silence_minutes: z
+    .number()
+    .int()
+    .min(PRAZO_MIN_MINUTOS)
+    .max(PRAZO_MAX_MINUTOS)
+    .nullable()
+    .optional(),
 });
 export type AtendimentoConfigPatch = z.infer<typeof atendimentoConfigPatchSchema>;
+
+/**
+ * O `settings` da organização depois de um PATCH — a regra num lugar só, para
+ * a rota e o teste lerem a MESMA mescla (o teste era uma cópia da rota, e cópia
+ * diverge sem avisar).
+ *
+ * Merge não-destrutivo em DOIS níveis: preserva as demais chaves de `settings`
+ * (o provedor de IA mora nele) e, para o que veio OMITIDO do corpo —
+ * `visibility_mode`, `handoff_return_after_minutes`, `conversation_stays_with_attendant`
+ * e `manual_reply_silence_minutes` —, preserva o que já
+ * valia. Um cliente antigo, que só conhece o modo de roteamento, não pode
+ * desligar a restrição de visibilidade nem a devolução automática por omissão.
+ */
+export function mesclarSettingsDeAtendimento(
+  atual: Record<string, unknown>,
+  input: AtendimentoConfigPatch,
+): { settings: Record<string, unknown>; routing: RoutingConfig } {
+  const {
+    visibility_mode,
+    handoff_return_after_minutes,
+    conversation_stays_with_attendant,
+    manual_reply_silence_minutes,
+    ...routingInput
+  } = input;
+  const routingAtual = routingConfigSchema
+    .catch(routingConfigSchema.parse({}))
+    .parse(atual.routing ?? {});
+  const routing: RoutingConfig = {
+    ...routingInput,
+    handoff_return_after_minutes:
+      handoff_return_after_minutes !== undefined
+        ? handoff_return_after_minutes
+        : routingAtual.handoff_return_after_minutes,
+    conversation_stays_with_attendant:
+      conversation_stays_with_attendant ?? routingAtual.conversation_stays_with_attendant,
+    manual_reply_silence_minutes:
+      manual_reply_silence_minutes !== undefined
+        ? manual_reply_silence_minutes
+        : routingAtual.manual_reply_silence_minutes,
+  };
+  const settings: Record<string, unknown> = { ...atual, routing };
+  if (visibility_mode !== undefined) settings.visibility_mode = visibility_mode;
+  return { settings, routing };
+}
 
 /** Uma janela de disponibilidade: dow 0=domingo … 6=sábado, "HH:MM"–"HH:MM". */
 export const scheduleWindowSchema = z

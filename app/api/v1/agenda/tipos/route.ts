@@ -32,15 +32,21 @@ import { requireSupportWrite } from "@/lib/impersonate/support";
  * durante toda a vida dele e recebeu 422 "Nenhum campo para alterar." — uma
  * recusa que não nomeia o que foi descartado. Quem vigia a travessia hoje é
  * `tests/unit/agenda-reativar-tipo.test.ts`.
+ *
+ * Auth: sessão de navegador OU Bearer `dsk_...` (api_tokens) via
+ * `lib/api/auth-dual.ts` — a mesma dualidade das demais rotas de configuração
+ * que aceitam token. No ramo do token, a org sai da linha do token.
  */
+import { randomUUID } from "node:crypto";
 import { type NextRequest } from "next/server";
 import { z } from "zod";
 
+import { resolveAuthDual, tetoDeEscritaDoToken } from "@/lib/api/auth-dual";
 import { fail, ok } from "@/lib/api/wrappers";
 import { audit } from "@/lib/audit";
-import { requireRole } from "@/lib/auth/require-role";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { listaTiposDeAtendimento } from "@/lib/agenda/consulta";
+import { TETO_DE_LEMBRETES_EXTRAS } from "@/lib/agenda/lembretes";
 import { traduzir } from "@/lib/i18n/dicionario";
 
 export const dynamic = "force-dynamic";
@@ -112,6 +118,15 @@ const camposDoTipo = {
    * o default da 0177 é 1440) segue valendo no banco e o cron a respeita: o que
    * ela perde é poder ser reenviada por esta rota sem entrar na faixa.
    */
+  /**
+   * O PREÇO PADRÃO do serviço, em centavos.
+   *
+   * Opcional e sem default: nem todo negócio tem preço fixo, e obrigar um número
+   * faria quem cobra por hora inventar um. Vazio significa "digite na hora".
+   *
+   * É semente do item da comanda, nunca o preço dele — o item congela o seu.
+   */
+  default_price_cents: z.number().int().min(0).max(100_000_000).nullish(),
   reminder_minutes_before: z
     .number()
     .int()
@@ -125,9 +140,9 @@ const camposDoTipo = {
    * ele. Vazio é o comportamento anterior, um lembrete só, e por isso o campo
    * não tem `.default()`: quem não manda não ganha aviso nenhum a mais.
    *
-   * O teto de 3 é o mesmo do CHECK da 0241, e existe para que "lembrar" não
-   * vire "insistir". A faixa de cada degrau é a do principal, pelo mesmo motivo
-   * escrito acima dele: 0 min nunca sai e 30 dias não é lembrete, é convite.
+   * O teto é o mesmo do CHECK (`fn_degraus_de_lembrete_validos`): guarda contra
+   * laço de formulário, não contra a operação. Quem decide quantos avisos o
+   * cliente recebe é quem edita o tipo.
    */
   reminder_extra_offsets_minutes: z
     .array(
@@ -137,7 +152,9 @@ const camposDoTipo = {
         .min(15, { message: "O lembrete precisa sair pelo menos 15 minutos antes do compromisso." })
         .max(10_080, { message: "O lembrete não pode sair mais de 7 dias (10080 minutos) antes." }),
     )
-    .max(3, { message: "No máximo 3 lembretes adicionais por tipo." })
+    .max(TETO_DE_LEMBRETES_EXTRAS, {
+      message: `No máximo ${TETO_DE_LEMBRETES_EXTRAS} lembretes adicionais por tipo.`,
+    })
     // Duplicata não é erro de quem preenche, é ruído: dois degraus iguais
     // produziriam o mesmo aviso duas vezes se algum dia alguém lesse a lista
     // sem deduplicar. Some aqui, uma vez, em vez de virar guarda em cada leitor.
@@ -148,7 +165,47 @@ const camposDoTipo = {
 const criarSchema = z.object(camposDoTipo);
 // `.partial()` em vez de repetir os doze campos como opcionais: repetir criaria
 // duas listas para manter em sincronia, e a segunda envelhece calada.
-const alterarSchema = criarSchema.partial().extend({ id: z.string().uuid() });
+const alterarSchema = criarSchema.partial().extend({
+  id: z.string().uuid(),
+  /**
+   * O TEXTO que o cron manda. Vazio/nulo = a frase padrão. Distinto de
+   * `reminder_template_name` (nome do template no provedor oficial).
+   *
+   * Mora só no PATCH de propósito: o tipo nasce com a frase de fábrica, e
+   * quem quer outra escreve depois. No POST, o campo nem entra — senão um
+   * `""` no nascimento gravaria nulo por cima do default, e a ausência no
+   * formulário de criação deixaria de ser ausência.
+   *
+   * Transforma string em branco em `null` para o PATCH poder VOLTAR ao padrão
+   * sem um campo-sentinela: quem apaga o textarea está pedindo o texto de
+   * fábrica, não uma mensagem vazia no WhatsApp.
+   */
+  reminder_body: z
+    .string()
+    .max(1000, { message: "A mensagem do lembrete cabe em 1000 caracteres." })
+    .nullish()
+    .transform((v) => (v == null ? v : v.trim() === "" ? null : v.trim())),
+  /**
+   * Texto de cada extra. Chave = minutos antes. String em branco some do mapa
+   * (cai na frase de fábrica). Mora só no PATCH pelo mesmo motivo de
+   * `reminder_body`: o tipo nasce sem texto próprio.
+   */
+  reminder_bodies: z
+    .record(
+      z.string().regex(/^\d+$/),
+      z.string().max(1000, { message: "A mensagem do lembrete cabe em 1000 caracteres." }),
+    )
+    .optional()
+    .transform((v) => {
+      if (!v) return v;
+      const out: Record<string, string> = {};
+      for (const [k, corpo] of Object.entries(v)) {
+        const t = corpo.trim();
+        if (t) out[k] = t;
+      }
+      return out;
+    }),
+});
 const desativarSchema = z.object({ id: z.string().uuid() });
 
 /**
@@ -162,7 +219,7 @@ const desativarSchema = z.object({ id: z.string().uuid() });
 function slugDe(nome: string): string {
   return nome
     .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "")
+    .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
@@ -170,9 +227,14 @@ function slugDe(nome: string): string {
 }
 
 export async function GET(req: NextRequest): Promise<Response> {
-  const requestId = req.headers.get("x-request-id") ?? undefined;
-  const autorizado = await requireRole("viewer", { requestId, resource: "calendar_event_types" });
-  if (!autorizado.ok) return autorizado.response;
+  const requestId = req.headers.get("x-request-id") ?? randomUUID();
+  const authz = await resolveAuthDual(req, {
+    requestId,
+    resource: "calendar_event_types",
+    role: "viewer",
+    scope: "mcp:read",
+  });
+  if (!authz.ok) return authz.response;
 
   // A MESMA coleta que a ferramenta MCP usa. Esta query era inline aqui, e havia
   // outras três iguais no repo — a tela e a IA respondendo por recortes
@@ -180,7 +242,7 @@ export async function GET(req: NextRequest): Promise<Response> {
   //
   // `incluirInativos: true` porque quem chama esta rota administra o cadastro:
   // esconder o tipo desativado tiraria dele a única porta para reativá-lo.
-  const r = await listaTiposDeAtendimento(createAdminClient(), autorizado.org.orgId, {
+  const r = await listaTiposDeAtendimento(createAdminClient(), authz.organizationId, {
     incluirInativos: true,
   });
   if (!r.ok) return fail("internal_error", r.motivoParaOperador, 500, { requestId });
@@ -210,6 +272,9 @@ export async function GET(req: NextRequest): Promise<Response> {
       reminder_enabled: t.lembreteLigado,
       reminder_minutes_before: t.lembreteAntecedenciaMin,
       reminder_extra_offsets_minutes: t.lembreteDegrausExtras,
+      reminder_body: t.lembreteMensagem,
+      reminder_bodies: t.lembreteMensagens,
+      default_price_cents: t.precoPadraoCents,
     })),
     { requestId },
   );
@@ -219,10 +284,18 @@ export async function POST(req: NextRequest): Promise<Response> {
   const supportDenied = await requireSupportWrite();
   if (supportDenied) return supportDenied;
 
-  const requestId = req.headers.get("x-request-id") ?? undefined;
-  const autorizado = await requireRole("manager", { requestId, resource: "calendar_event_types" });
-  if (!autorizado.ok) return autorizado.response;
-  const t = (texto: string) => traduzir(texto, autorizado.user.idioma);
+  const requestId = req.headers.get("x-request-id") ?? randomUUID();
+  const authz = await resolveAuthDual(req, {
+    requestId,
+    resource: "calendar_event_types",
+    role: "manager",
+    scope: "mcp:write",
+  });
+  if (!authz.ok) return authz.response;
+  const t = (texto: string) => traduzir(texto, authz.idioma ?? "pt-BR");
+
+  const teto = await tetoDeEscritaDoToken(authz, "agenda_tipos", requestId ?? "");
+  if (teto) return teto;
 
   const lido = criarSchema.safeParse(await req.json().catch(() => ({})));
   if (!lido.success) {
@@ -236,7 +309,7 @@ export async function POST(req: NextRequest): Promise<Response> {
   const admin = createAdminClient();
   const { data, error } = await admin
     .from("calendar_event_types")
-    .insert({ ...lido.data, organization_id: autorizado.org.orgId, slug: slugDe(lido.data.name) })
+    .insert({ ...lido.data, organization_id: authz.organizationId, slug: slugDe(lido.data.name) })
     .select("id, slug")
     .single();
 
@@ -249,9 +322,10 @@ export async function POST(req: NextRequest): Promise<Response> {
   }
 
   await audit({
-    actorUserId: autorizado.user.id,
+    actorUserId: authz.actor.type === "user" ? authz.actor.id : null,
+    actorApiTokenId: authz.apiTokenId ?? null,
     action: "agenda.tipo_criado",
-    organizationId: autorizado.org.orgId,
+    organizationId: authz.organizationId,
     resourceType: "calendar_event_types",
     resourceId: data.id,
     metadata: { nome: lido.data.name, categoria: lido.data.category, duracao: lido.data.duration_minutes },
@@ -263,10 +337,18 @@ export async function PATCH(req: NextRequest): Promise<Response> {
   const supportDenied = await requireSupportWrite();
   if (supportDenied) return supportDenied;
 
-  const requestId = req.headers.get("x-request-id") ?? undefined;
-  const autorizado = await requireRole("manager", { requestId, resource: "calendar_event_types" });
-  if (!autorizado.ok) return autorizado.response;
-  const t = (texto: string) => traduzir(texto, autorizado.user.idioma);
+  const requestId = req.headers.get("x-request-id") ?? randomUUID();
+  const authz = await resolveAuthDual(req, {
+    requestId,
+    resource: "calendar_event_types",
+    role: "manager",
+    scope: "mcp:write",
+  });
+  if (!authz.ok) return authz.response;
+  const t = (texto: string) => traduzir(texto, authz.idioma ?? "pt-BR");
+
+  const teto = await tetoDeEscritaDoToken(authz, "agenda_tipos", requestId ?? "");
+  if (teto) return teto;
 
   const lido = alterarSchema.safeParse(await req.json().catch(() => ({})));
   if (!lido.success) {
@@ -274,7 +356,10 @@ export async function PATCH(req: NextRequest): Promise<Response> {
     // legível a quem opera em espanhol.
     return fail("validation_failed", t(lido.error.issues[0]?.message ?? "corpo inválido"), 422, { requestId });
   }
-  const { id, ...campos } = lido.data;
+  const { id, ...bruto } = lido.data;
+  const campos = Object.fromEntries(
+    Object.entries(bruto).filter(([, v]) => v !== undefined),
+  );
   if (Object.keys(campos).length === 0) {
     // Recusa em vez de UPDATE vazio: "alterei" sobre nada é a mesma família de
     // mentira que o "Marcado ✓" sem linha no banco.
@@ -286,7 +371,7 @@ export async function PATCH(req: NextRequest): Promise<Response> {
     .from("calendar_event_types")
     .update(campos)
     .eq("id", id)
-    .eq("organization_id", autorizado.org.orgId)
+    .eq("organization_id", authz.organizationId)
     .select("id")
     .maybeSingle();
 
@@ -294,9 +379,10 @@ export async function PATCH(req: NextRequest): Promise<Response> {
   if (!data) return fail("not_found", t("Tipo de agendamento não encontrado."), 404, { requestId });
 
   await audit({
-    actorUserId: autorizado.user.id,
+    actorUserId: authz.actor.type === "user" ? authz.actor.id : null,
+    actorApiTokenId: authz.apiTokenId ?? null,
     action: "agenda.tipo_alterado",
-    organizationId: autorizado.org.orgId,
+    organizationId: authz.organizationId,
     resourceType: "calendar_event_types",
     resourceId: id,
     metadata: { campos: Object.keys(campos) },
@@ -308,10 +394,18 @@ export async function DELETE(req: NextRequest): Promise<Response> {
   const supportDenied = await requireSupportWrite();
   if (supportDenied) return supportDenied;
 
-  const requestId = req.headers.get("x-request-id") ?? undefined;
-  const autorizado = await requireRole("manager", { requestId, resource: "calendar_event_types" });
-  if (!autorizado.ok) return autorizado.response;
-  const t = (texto: string) => traduzir(texto, autorizado.user.idioma);
+  const requestId = req.headers.get("x-request-id") ?? randomUUID();
+  const authz = await resolveAuthDual(req, {
+    requestId,
+    resource: "calendar_event_types",
+    role: "manager",
+    scope: "mcp:write",
+  });
+  if (!authz.ok) return authz.response;
+  const t = (texto: string) => traduzir(texto, authz.idioma ?? "pt-BR");
+
+  const teto = await tetoDeEscritaDoToken(authz, "agenda_tipos", requestId ?? "");
+  if (teto) return teto;
 
   const lido = desativarSchema.safeParse(await req.json().catch(() => ({})));
   if (!lido.success) return fail("validation_failed", t("corpo inválido"), 422, { requestId });
@@ -321,7 +415,7 @@ export async function DELETE(req: NextRequest): Promise<Response> {
     .from("calendar_event_types")
     .update({ is_active: false })
     .eq("id", lido.data.id)
-    .eq("organization_id", autorizado.org.orgId)
+    .eq("organization_id", authz.organizationId)
     .select("id")
     .maybeSingle();
 
@@ -329,9 +423,10 @@ export async function DELETE(req: NextRequest): Promise<Response> {
   if (!data) return fail("not_found", t("Tipo de agendamento não encontrado."), 404, { requestId });
 
   await audit({
-    actorUserId: autorizado.user.id,
+    actorUserId: authz.actor.type === "user" ? authz.actor.id : null,
+    actorApiTokenId: authz.apiTokenId ?? null,
     action: "agenda.tipo_desativado",
-    organizationId: autorizado.org.orgId,
+    organizationId: authz.organizationId,
     resourceType: "calendar_event_types",
     resourceId: lido.data.id,
     metadata: {},

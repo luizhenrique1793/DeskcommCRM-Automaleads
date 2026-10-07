@@ -14,7 +14,14 @@
  *
  * ─── A fórmula, e por que estes números ─────────────────────────────────────
  *
- *   atraso = clamp(NOTAR + POR_CARACTERE × comprimento, MINIMO, MAXIMO)
+ *   alvo   = clamp(NOTAR + POR_CARACTERE × comprimento, MINIMO, MAXIMO)
+ *   espera = max(0, alvo - tempo que o turno JÁ gastou processando)
+ *
+ * O desconto existe porque o alvo mede o que o CLIENTE espera, não o que o
+ * processo dorme. Quando o turno levou mais tempo do que o alvo para pensar, o
+ * silêncio humano já foi pago com folga — dormir de novo por cima é atraso
+ * puro. O throttle ENTRE bolhas (anti-banimento) é outro mecanismo e segue
+ * intocado: quem o aplica é a cadeia `before_send`, não esta função.
  *
  * `NOTAR` (900ms) é a parcela que NÃO depende do texto: ver a notificação,
  * abrir a conversa, ler o que o cliente escreveu. Ela existe separada do termo
@@ -42,7 +49,10 @@
  */
 import type { Logger } from '../obs/logger';
 
-/** Ver o cabeçalho: a parcela que não depende do tamanho do texto. */
+/**
+ * Ver o cabeçalho: a parcela que não depende do tamanho do texto.
+ * É o DEFAULT — quem configura por conexão (channel_knobs 0499) recebe outro.
+ */
 export const ATRASO_NOTAR_MS = 900;
 
 /** ≈45 caracteres/s — rápido de propósito; ver o cabeçalho. */
@@ -54,21 +64,48 @@ export const ATRASO_MINIMO_MS = 1200;
 /** Acima disto o silêncio lê como queda, não como digitação. */
 export const ATRASO_MAXIMO_MS = 7500;
 
+/** Os quatro números do atraso humano — o default é o do código de antes. */
+export interface AtrasoHumanoKnobs {
+  atrasoNotarMs?: number;
+  msPorCaractere?: number;
+  atrasoMinimoMs?: number;
+  atrasoMaximoMs?: number;
+}
+
+/** Os quatro números com o default do módulo preenchido (NULL/ausente = valor de antes). */
+export function atrasoHumanoEfetivo(knobs: AtrasoHumanoKnobs | undefined): Required<AtrasoHumanoKnobs> {
+  return {
+    atrasoNotarMs: knobs?.atrasoNotarMs ?? ATRASO_NOTAR_MS,
+    msPorCaractere: knobs?.msPorCaractere ?? MS_POR_CARACTERE,
+    atrasoMinimoMs: knobs?.atrasoMinimoMs ?? ATRASO_MINIMO_MS,
+    atrasoMaximoMs: knobs?.atrasoMaximoMs ?? ATRASO_MAXIMO_MS,
+  };
+}
+
 /**
  * Quanto esperar antes de mandar `texto`, em ms. Pura — é o que a torna
- * testável sem relógio e sem canal.
+ * testável sem relógio e sem canal. `knobs` opcional: sem eles vale
+ * EXATAMENTE o comportamento histórico (regressão zero).
  */
-export function calcularAtrasoHumano(texto: string): number {
+export function calcularAtrasoHumano(texto: string, knobs?: AtrasoHumanoKnobs): number {
+  const ef = atrasoHumanoEfetivo(knobs);
   const comprimento = (texto ?? '').trim().length;
-  const bruto = ATRASO_NOTAR_MS + MS_POR_CARACTERE * comprimento;
-  return Math.min(ATRASO_MAXIMO_MS, Math.max(ATRASO_MINIMO_MS, bruto));
+  const bruto = ef.atrasoNotarMs + ef.msPorCaractere * comprimento;
+  return Math.min(ef.atrasoMaximoMs, Math.max(ef.atrasoMinimoMs, bruto));
 }
 
 export interface EsperaHumanaArgs {
   /** O corpo que vai sair — é o tamanho DELE que dita a espera. */
   texto: string;
+  /** Tempo já gasto neste turno. Não desconta o throttle ENTRE envios. */
+  processamentoMs?: number;
   sleep: (ms: number) => Promise<void>;
   log: Logger;
+  /**
+   * Os quatro números do atraso por conexão (channel_knobs 0499). Omitir =
+   * comportamento histórico (defaults de atraso-humano.ts).
+   */
+  knobs?: AtrasoHumanoKnobs;
   /**
    * Acende o "digitando…" no aparelho do cliente. OPCIONAL: canal que não sabe
    * sinalizar presença simplesmente espera, e o ganho principal (não responder
@@ -89,7 +126,14 @@ export interface EsperaHumanaArgs {
  * os segundos de silêncio sem a explicação visual que os torna naturais.
  */
 export async function esperarComoHumano(args: EsperaHumanaArgs): Promise<number> {
-  const ms = calcularAtrasoHumano(args.texto);
+  const gasto = args.processamentoMs ?? 0;
+  const ms = Math.max(
+    0,
+    calcularAtrasoHumano(args.texto, args.knobs) - (Number.isFinite(gasto) ? Math.max(0, gasto) : 0),
+  );
+
+  // O cliente já esperou o alvo: não acrescentar presença decorativa nem sleep.
+  if (ms === 0) return 0;
 
   if (args.sinalizarDigitando !== undefined) {
     try {
@@ -105,4 +149,26 @@ export async function esperarComoHumano(args: EsperaHumanaArgs): Promise<number>
 
   await args.sleep(ms);
   return ms;
+}
+
+/**
+ * Acende o "digitando…" SEM esperar a resposta do canal — para o início do turno,
+ * antes da chamada ao modelo.
+ *
+ * Por que existe além de `esperarComoHumano`: aquela desconta do alvo o tempo que
+ * o turno já gastou, e o modelo quase sempre gasta mais que o alvo (medido numa
+ * instalação real: 7s de LLM contra ~2s de alvo, `atraso_ms: 0`). Espera zero é
+ * retorno antes da presença — e o indicador nunca acendia justamente nos segundos
+ * em que o cliente está esperando. Acender aqui cobre esses segundos.
+ *
+ * Não espera o transporte: uma ida à rede a mais antes do modelo seria latência
+ * paga pelo cliente por um enfeite. Falha vira warn, com a mesma disciplina de
+ * `esperarComoHumano` (sem corpo de erro no log).
+ */
+export function acenderDigitando(sinalizarDigitando: () => Promise<void>, log: Logger): void {
+  void sinalizarDigitando().catch((err: unknown) => {
+    log.warn('não consegui sinalizar "digitando" (segue o turno)', {
+      error: err instanceof Error ? err.name : 'unknown',
+    });
+  });
 }

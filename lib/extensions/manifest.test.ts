@@ -25,7 +25,7 @@ const manifest: ExtensionManifest = {
   name: "tarefas-praticas",
   version: "1.2.3",
   license: "MIT",
-  host_api: { min: 1, max: 1 },
+  host_api: { min: 1, max: 2 },
   permissions: ["navigation.tasks"],
   dependencies: [],
   data: { mode: "none" },
@@ -260,9 +260,24 @@ describe("manifesto declarativo", () => {
     expect(checkCompatibility({ ...manifest, profile: "code" } as never).reason).toBe(
       "profile_unsupported",
     );
-    expect(checkCompatibility({ ...manifest, host_api: { min: 2, max: 3 } }).reason).toBe(
+    expect(checkCompatibility({ ...manifest, host_api: { min: 3, max: 4 } }).reason).toBe(
       "host_api_unsupported",
     );
+    // ADR-0003, D4: o host passou a 2, e a janela do manifesto é FECHADA — quem declarou
+    // atender só até 1 disse até onde garantia, e deixa de ser atendido. É comportamento
+    // desejado, não regressão; o que a gestão não pode fazer é deixar isso mudo na tela.
+    expect(checkCompatibility({ ...manifest, host_api: { min: 1, max: 1 } }).reason).toBe(
+      "host_api_unsupported",
+    );
+    // Cobertura: usar uma porta sem declarar a permissão dela esconde de quem aceita a
+    // extensão exatamente o que a tela existe para mostrar.
+    const semCobertura = structuredClone(manifest);
+    semCobertura.contributions.crm_cards[0]!.action.capability = "inbox.open";
+    expect(checkCompatibility(semCobertura).reason).toBe("permission_unsupported");
+    // E com a permissão declarada, a mesma porta passa.
+    expect(
+      checkCompatibility({ ...semCobertura, permissions: ["navigation.inbox"] }).compatible,
+    ).toBe(true);
     expect(checkCompatibility({ ...manifest, permissions: ["tasks.write"] } as never).reason).toBe(
       "permission_unsupported",
     );
@@ -421,7 +436,8 @@ describe("catálogo e artefato", () => {
       "extension_invalid_package",
     );
     await expectCode(
-      () => validateArtifact(bytes, entryFor(bytes, { host_api: { min: 1, max: 2 } })),
+      // Precisa DIVERGIR do manifesto (que declara {1,2}) para provar o espelhamento.
+      () => validateArtifact(bytes, entryFor(bytes, { host_api: { min: 1, max: 3 } })),
       "extension_invalid_package",
     );
   });

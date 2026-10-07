@@ -4,6 +4,7 @@ import { useAuth } from "@/hooks/auth/AuthProvider";
 import { destinosDaInterface } from "@/lib/navigation/interface";
 
 import { useAgentInbox } from "@/hooks/ai/useAgentInbox";
+import { useSonsDaCentral } from "@/hooks/notifications/useSonsDaCentral";
 import { useT } from "@/hooks/i18n/useT";
 import { Bell } from "@/lib/ui/icons";
 
@@ -26,6 +27,10 @@ export function AlertsBell() {
 function VisibleAlertsBell() {
   const t = useT();
   const { data } = useAgentInbox("open");
+  // O som da organização para a etapa que avisa e o pedido de pessoa — sobre
+  // os itens já carregados (nem toda página precisa estar em memória para o
+  // som detectar o que já chegou).
+  useSonsDaCentral(data?.pages.flatMap((p) => p.data.items));
   // open_count é uma contagem separada (não paginada) — igual em toda página,
   // então a primeira já basta pro sino não precisar de mais nenhuma request.
   const count = data?.pages[0]?.data.open_count ?? 0;

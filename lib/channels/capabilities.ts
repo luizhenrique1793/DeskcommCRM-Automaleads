@@ -39,6 +39,7 @@ export const CHANNEL_CAPABILITIES: Record<ProviderDeMensagem, ChannelCapabilitie
     // Sem endpoint de botão nativo no repo — nada chama, capability seria
     // código morto do outro lado (invariante 2). Fica `false` até implementar.
     canSendButtons: false,
+    alteraMensagemEnviada: true,
   },
   // Hetero-restrição: não me banem, mas a Meta me proíbe e me cobra.
   meta_cloud: {
@@ -61,6 +62,7 @@ export const CHANNEL_CAPABILITIES: Record<ProviderDeMensagem, ChannelCapabilitie
     // Botões nativos de mensagem interativa da Cloud API existem (List/Reply),
     // mas nenhum é "copiar código" — o conceito não existe para este canal.
     canSendButtons: false,
+    alteraMensagemEnviada: false,
   },
   // Mesma hetero-restrição do canal oficial, por baixo: é um BSP: a WABA é da
   // Meta, os templates são aprovados pela Meta e a janela de 24h é da Meta. O
@@ -85,6 +87,21 @@ export const CHANNEL_CAPABILITIES: Record<ProviderDeMensagem, ChannelCapabilitie
   //
   // O detalhe que engana: mandar um template NÃO abre a janela. Só o cliente
   // abre, respondendo. Quem ler o 200 como "enviado" acha que funciona.
+  zernio_social: {
+    freeformOutsideWindow: false,
+    requiresTemplates: false,
+    canManageTemplates: false,
+    banRisk: false,
+    minIntervalMs: 1000,
+    voiceNote: "server-convert",
+    groups: "none",
+    costPerMessage: true,
+    // Por baixo é a mesma Graph API do meta_cloud — mesmo motivo.
+    canSaveContact: false,
+    canShowTyping: false,
+    canSendButtons: false,
+    alteraMensagemEnviada: false,
+  },
   zernio: {
     freeformOutsideWindow: false,
     requiresTemplates: true,
@@ -101,6 +118,7 @@ export const CHANNEL_CAPABILITIES: Record<ProviderDeMensagem, ChannelCapabilitie
     canShowTyping: false,
     // Mesmo motivo do meta_cloud — por baixo é a mesma Graph API.
     canSendButtons: false,
+    alteraMensagemEnviada: false,
   },
   // Auto-restrição, como o WAHA: QR não oficial, o WhatsApp bane por abuso —
   // e por isso NÃO herda cegamente os valores dele (ver módulo `uazapi/`).
@@ -135,6 +153,33 @@ export const CHANNEL_CAPABILITIES: Record<ProviderDeMensagem, ChannelCapabilitie
     // UAZAPI avisa que pode ser descontinuado sem aviso — por isso o código
     // PIX sempre continua indo em texto puro também (regra dura já existente).
     canSendButtons: true,
+    // Sem `editMessage`/`revokeMessage` no adapter — nada chama, capability
+    // seria código morto do outro lado (invariante 2). `false` até implementar.
+    alteraMensagemEnviada: false,
+  },
+  // Parceiro homologado pela Meta que espelha a Cloud API (recorte do #1130):
+  // a WABA, a janela de 24h e o custo são da Meta. O parceiro muda o TRANSPORTE
+  // (host, token), não o que o WhatsApp permite — então o perfil é o do canal
+  // oficial.
+  //
+  // `canManageTemplates: true`: os modelos são os da Cloud API e o parceiro
+  // expõe os mesmos endpoints de catálogo; a tela cria e sincroniza por lá.
+  // `requiresTemplates: true` porque a regra da Meta é real: fora da janela de
+  // 24h, só modelo aprovado passa.
+  datafy: {
+    freeformOutsideWindow: false,
+    requiresTemplates: true,
+    canManageTemplates: true,
+    banRisk: false,
+    minIntervalMs: 6000,
+    voiceNote: "opus-only",
+    groups: "limited",
+    costPerMessage: true,
+    // Mesmo motivo do meta_cloud — por baixo é a mesma Graph API.
+    canSaveContact: false,
+    canShowTyping: false,
+    canSendButtons: false,
+    alteraMensagemEnviada: false,
   },
 };
 
@@ -156,8 +201,11 @@ export const DEFAULT_CHANNEL_PROVIDER: ChannelProvider = "waha";
  */
 export const CHANNEL_PROVIDER_WAHA: ChannelProvider = "waha";
 export const CHANNEL_PROVIDER_META: ChannelProvider = "meta_cloud";
+export const CHANNEL_PROVIDER_SOCIAL: ChannelProvider = "zernio_social";
 export const CHANNEL_PROVIDER_ZERNIO: ChannelProvider = "zernio";
 export const CHANNEL_PROVIDER_UAZAPI: ChannelProvider = "uazapi";
+/** Parceiro que espelha a Cloud API — canal opcional da instalação, desligado por padrão. */
+export const CHANNEL_PROVIDER_DATAFY: ChannelProvider = "datafy";
 /** Chamada de voz WhatsApp (spec 18). Não transporta mensagem — ver abaixo. */
 export const CHANNEL_PROVIDER_WACALLS: ChannelProvider = "wacalls";
 
@@ -180,7 +228,9 @@ export const PROVIDERS_DE_MENSAGEM = [
   "waha",
   "meta_cloud",
   "zernio",
+  "zernio_social",
   "uazapi",
+  "datafy",
 ] as const satisfies readonly ProviderDeMensagem[];
 
 /**

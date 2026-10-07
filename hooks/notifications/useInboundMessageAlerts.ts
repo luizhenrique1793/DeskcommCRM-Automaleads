@@ -10,7 +10,6 @@ import { avatarUrlServivel } from "@/lib/notifications/avatar_url";
 import { entregarAviso } from "@/lib/notifications/deliver";
 import { shouldNotifyInbound } from "@/lib/notifications/policy";
 import { syncPushSubscription } from "@/lib/notifications/push_client";
-import { createClient } from "@/lib/supabase/browser";
 
 function tabFocused(): boolean {
   if (typeof document === "undefined") return false;
@@ -38,15 +37,51 @@ function previewFromMessage(row: { type?: unknown; body?: unknown }): string {
   return body || "Nova mensagem";
 }
 
-async function contactNotifyBits(contactId: string): Promise<{ title: string; icon?: string }> {
-  const supabase = createClient();
-  const { data } = await supabase
-    .from("contacts")
-    .select("display_name, name")
-    .eq("id", contactId)
-    .maybeSingle();
-  const row = data as { display_name?: string | null; name?: string | null } | null;
-  const title = nomeDoContato(row) ?? "Nova mensagem";
+/**
+ * ⚠️ POR QUE ESTA LEITURA PASSA PELA ROTA, E NÃO PELO SUPABASE DO BROWSER.
+ *
+ * Este bloco JÁ FOI um `createClient().from("contacts").select(...)`, e era o
+ * defeito da issue #376: o client do browser não enxerga a sessão (o cookie é
+ * httpOnly — o mecanismo inteiro está em `lib/supabase/browser.ts`), então o
+ * select saía como `anon`, e a RLS de `contacts` filtra por
+ * `organization_id`/membro da organização. Anônimo não é membro de nada: a
+ * resposta é ZERO LINHAS, sem erro e sem exceção. Como o código só lia `data`,
+ * `nomeDoContato(null)` devolvia `null` em silêncio e TODO aviso de mensagem
+ * caía no literal "Nova mensagem" — o nome de quem escreveu nunca aparecia.
+ *
+ * Não é um caso de "faltou checar `error`": não havia erro para checar. Zero
+ * linhas é um resultado legítimo da RLS, indistinguível de "contato sem nome"
+ * para quem lê só o corpo da resposta. A diferença que conserta isto é QUEM
+ * pergunta: a rota `/api/v1/contacts/[id]` autentica no servidor, com a sessão
+ * de verdade, e já é o caminho usado pela busca de avatar logo abaixo — que
+ * sempre funcionou justamente por isso.
+ *
+ * A lição vale para o resto do arquivo: no browser, leitura de dado de
+ * organização não se faz com o client anônimo. Se um dia isto voltar a ser
+ * supabase-js aqui, a regressão é muda.
+ */
+async function contatoDaRota(contactId: string): Promise<Record<string, unknown> | null> {
+  try {
+    const r = await fetch(`/api/v1/contacts/${contactId}`, { credentials: "include" });
+    if (!r.ok) return null;
+    const json = (await r.json()) as { data?: unknown };
+    const dado = json.data;
+    if (!dado || typeof dado !== "object" || Array.isArray(dado)) return null;
+    return dado as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+async function contactNotifyBits(contactId: string): Promise<{
+  title: string;
+  icon?: string;
+  /** Spec 21, caminho 1: pessoal não entrega aviso — a linha já traz a marca. */
+  pessoal: boolean;
+}> {
+  const row = await contatoDaRota(contactId);
+  const pessoal = (row as { is_personal?: boolean } | null)?.is_personal === true;
+  const title = nomeDoContato(row as { display_name?: string | null; name?: string | null } | null) ?? "Nova mensagem";
   let icon: string | undefined;
   try {
     const r = await fetch(`/api/v1/contacts/${contactId}/avatar`, {
@@ -57,7 +92,7 @@ async function contactNotifyBits(contactId: string): Promise<{ title: string; ic
   } catch {
     // sem foto: badge da marca
   }
-  return { title, icon };
+  return { title, icon, pessoal };
 }
 
 async function contactIdFromRow(
@@ -66,14 +101,17 @@ async function contactIdFromRow(
 ): Promise<string | null> {
   if (typeof row.contact_id === "string") return row.contact_id;
   if (!conversationId) return null;
-  const supabase = createClient();
-  const { data } = await supabase
-    .from("conversations")
-    .select("contact_id")
-    .eq("id", conversationId)
-    .maybeSingle();
-  const c = data as { contact_id?: string | null } | null;
-  return typeof c?.contact_id === "string" ? c.contact_id : null;
+  // Mesmo motivo de `contatoDaRota`: pelo client do browser este select voltava
+  // vazio SEM erro, e a mensagem ficava sem nome. A rota autentica no servidor.
+  try {
+    const r = await fetch(`/api/v1/conversations/${conversationId}`, { credentials: "include" });
+    if (!r.ok) return null;
+    const json = (await r.json()) as { data?: { contact_id?: string | null } | null };
+    const c = json.data;
+    return typeof c?.contact_id === "string" ? c.contact_id : null;
+  } catch {
+    return null;
+  }
 }
 
 export function useInboundMessageAlerts(): void {
@@ -93,7 +131,7 @@ export function useInboundMessageAlerts(): void {
       !shouldNotifyInbound({
         direction,
         conversationId,
-        openConversationId: getOpenConversationId(),
+        openConversationId: getOpenConversationId(conversationId),
         tabFocused: tabFocused(),
         tipo: (payload as { tipo?: unknown }).tipo,
       })
@@ -104,7 +142,10 @@ export function useInboundMessageAlerts(): void {
       const contactId = await contactIdFromRow(row, conversationId);
       const bits = contactId
         ? await contactNotifyBits(contactId)
-        : { title: "Nova mensagem" as const, icon: undefined };
+        : { title: "Nova mensagem" as const, icon: undefined, pessoal: false };
+      // Pessoal não avisa (spec 21, caminho 1): nem toast, nem push de tela —
+      // o choke é aqui, antes do `entregarAviso`; `emit`/`sounds` não mudam.
+      if (bits.pessoal) return;
       entregarAviso({
         category: "message",
         kind: "message_inbound",

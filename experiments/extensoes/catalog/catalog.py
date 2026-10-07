@@ -30,6 +30,34 @@ class CatalogError(Exception):
     pass
 
 
+# Espelho de `lib/extensions/capacidades.ts` (ADR-0003). Este processo é isolado de propósito
+# — SQLite próprio, sem o banco do CRM —, então não dá para importar o TypeScript daqui. O par
+# é vigiado por `tests/unit/catalogo-de-ensaio-espelha-o-vocabulario.test.ts`, que reprova
+# quando as duas listas divergem: sem ele, a bancada volta a publicar pacote que o host recusa,
+# e o sintoma aparece só no E2E, como "instalação falhou" sem causa visível.
+PERMISSOES = [
+    "navigation.tasks",
+    "navigation.inbox",
+    "navigation.kanban",
+    "navigation.contacts",
+    "navigation.agenda",
+    "navigation.radar",
+    "theme.apply",
+    # O consentimento para um tema de extensão pintar o produto (ADR-0003, #1095).
+    # A ordem espelha `EXTENSION_PERMISSIONS` em `lib/extensions/capacidades.ts` —
+    # `tests/unit/catalogo-de-ensaio-espelha-o-vocabulario.test.ts` compara as duas.
+]
+CAPACIDADES = [
+    "tasks.open",
+    "inbox.open",
+    "kanban.open",
+    "contacts.open",
+    "agenda.open",
+    "radar.open",
+]
+HOST_API_ATUAL = 2
+
+
 def fail(message: str) -> NoReturn:
     raise CatalogError(message)
 
@@ -137,7 +165,14 @@ def validate_manifest(value: Any) -> dict[str, Any]:
     maximum = positive_integer(host_api["max"], "host_api.max")
     if minimum > maximum:
         fail("faixa host_api invertida")
-    if manifest["permissions"] != ["navigation.tasks"] or manifest["dependencies"] != []:
+    permissoes = manifest["permissions"]
+    if (
+        not isinstance(permissoes, list)
+        or not permissoes
+        or len(set(map(str, permissoes))) != len(permissoes)
+        or any(p not in PERMISSOES for p in permissoes)
+        or manifest["dependencies"] != []
+    ):
         fail("permissões ou dependências não suportadas")
     if manifest["data"] != {"mode": "none"}:
         fail("modo de dados não suportado")
@@ -177,7 +212,7 @@ def validate_manifest(value: Any) -> dict[str, Any]:
             localized(block["body"], 2000, "block.body")
         action = exact_keys(card["action"], {"label", "capability"}, "action")
         localized(action["label"], 100, "action.label")
-        if action["capability"] != "tasks.open":
+        if action["capability"] not in CAPACIDADES:
             fail("capacidade não suportada")
     return manifest
 
@@ -253,7 +288,7 @@ def command_make_example(args: argparse.Namespace) -> None:
         "name": "tarefas-praticas",
         "version": "1.0.0",
         "license": "MIT",
-        "host_api": {"min": 1, "max": 1},
+        "host_api": {"min": 1, "max": HOST_API_ATUAL},
         "permissions": ["navigation.tasks"],
         "dependencies": [],
         "data": {"mode": "none"},

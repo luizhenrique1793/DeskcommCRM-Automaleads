@@ -23,6 +23,15 @@ export const REFERENCIAS_DE_AVISO = {
   channel_session: { tabela: "channel_sessions", papel: "admin", rotulo: "Revisar conexão", href: () => "/app/connections", ativo: true },
   ai_knowledge_source: { tabela: "ai_knowledge_sources", papel: "manager", rotulo: "Abrir base de conhecimento", href: () => "/app/ai/knowledge/sources" },
   agent_case: { tabela: "agent_cases", papel: "agent", rotulo: "Abrir atendimento", href: (id: string) => `/app/ai/cases?caso=${id}` },
+  proposal: { tabela: "crm_proposals", papel: "agent", rotulo: "Abrir proposta", href: (id: string) => `/app/proposals/${id}` },
+  // O PONTEIRO do fluxo, não a inscrição: o aviso de `followup_sem_agente` é
+  // sobre um fluxo que não tem inscrição nenhuma — é exatamente essa a queixa.
+  // `manager` é a mesma régua da aba Fluxos (`canWrite` em FlowsList).
+  followup_flow: { tabela: "followup_flow_pointers", papel: "manager", rotulo: "Abrir o fluxo", href: (id: string) => `/app/ai/followups/${id}` },
+  // A credencial do provedor que ficou sem saldo (`lib/agent-engine/queue/espera-de-saldo.ts`).
+  // O remédio é recarregar na conta do provedor, fora do CRM; a tela de
+  // credenciais é onde se confere QUAL chave é, e onde se troca por outra.
+  ai_provider_credential: { tabela: "ai_provider_credentials", papel: "admin", rotulo: "Revisar credencial", href: () => "/app/ai/credentials" },
 } satisfies Record<string, Alvo>;
 
 export type InboxRefKind = keyof typeof REFERENCIAS_DE_AVISO | "organization" | "ai_budget" | "job_queue" | "cron_jobs";
@@ -36,6 +45,12 @@ export const POLITICAS_DE_AVISO = {
   // O caso parado.  traz só  porque o aviso SEMPRE nasce com
   // o id do caso — nunca é genérico.
   case_stale: { refs: ["agent_case"], orientacao: "Abra o atendimento e diga o que fazer: concluir, pedir informação ao cliente ou passar para uma pessoa." },
+  // Aponta para o FLUXO, e não para a tela de agentes onde mora o conserto, por
+  // uma razão só: a organização pode ter vários agentes, e nenhum deles é "o"
+  // agente deste fluxo — é justamente isso que falta. O botão leva a quem o
+  // aviso é sobre; o passo que conserta está escrito no corpo, com as três
+  // telas na ordem.
+  followup_sem_agente: { refs: ["followup_flow"], orientacao: "Abra o agente que atende esse número, ligue este fluxo em «follow-ups que arma» e publique a versão." },
   appointment_outcome_required:{refs:["appointment"],orientacao:"Abra o compromisso e confirme a presença."},
   appointment_recovery_review:{refs:["appointment"],orientacao:"Confira o motivo e escolha o próximo passo no compromisso."},
   routing_unassigned: { refs: ["conversation"], orientacao: "Confira os responsáveis em Configurações → Atendimento." },
@@ -44,7 +59,11 @@ export const POLITICAS_DE_AVISO = {
   event_dead: { refs: [], orientacao: "Peça a quem administra para conferir o processamento descrito neste aviso." },
   budget_exceeded: { refs: ["ai_budget"], orientacao: "Peça ao gestor para revisar o limite e o uso de IA." },
   budget_warning: { refs: ["ai_budget"], orientacao: "Peça ao gestor para revisar o limite e o uso de IA." },
-  handoff: { refs: ["contact", "conversation"], orientacao: "Confira o atendimento descrito e combine quem assume o próximo passo." },
+  // `conversation` primeiro porque é o que o produtor grava hoje (o corpo do
+  // aviso ficou CURTO e o contexto foi para dentro da conversa, onde a RLS o
+  // protege). `contact` continua na lista por causa dos itens de clone antigo,
+  // gravados antes da troca — tirá-lo faria aqueles avisos perderem o destino.
+  handoff: { refs: ["conversation", "contact"], orientacao: "Abra a conversa: o cartão no fim do fio diz por que a IA passou, o que ela já tentou e se o cliente foi avisado." },
   promotion_review: { refs: [], orientacao: "Na evolução do assistente, confira as propostas disponíveis. Este aviso não identifica uma proposta específica.", geral: EVOLUCAO },
   judge_unaligned: { refs: [], orientacao: "Na evolução do assistente, confira a avaliação de qualidade. Este aviso não identifica uma avaliação específica.", geral: EVOLUCAO },
   followup_dead: { refs: ["followup_enrollment"], orientacao: "Peça ao gestor para revisar o acompanhamento que parou." },
@@ -57,6 +76,13 @@ export const POLITICAS_DE_AVISO = {
   midia_nao_lida: { refs: [], orientacao: "Peça ao gestor para revisar o provedor e as credenciais de leitura de fotos e áudios.", geral: { papel: "manager", href: "/app/ai/providers", rotulo: "Revisar provedores de IA" } },
   channel_template_review: { refs: [], orientacao: "Confira os modelos na conexão WhatsApp via Parceiro. Este aviso não identifica um modelo específico.", geral: { papel: "admin", href: "/app/connections?aba=parceiro&sub=templates", rotulo: "Revisar modelos do canal" } },
   channel_number_alert: { refs: ["channel_session"], orientacao: "Peça a quem administra para revisar a situação do número nas conexões.", geral: CONEXOES },
+  // Sem `geral`, ao contrário do vizinho acima: o `canal-mudo-watcher` SEMPRE
+  // nasce apontando para a conexão que ficou muda (`ref_kind: channel_session`),
+  // nunca genérico — quem emite sem referência é uma ponte de canal que este
+  // aviso não tem. Um contexto geral aqui seria caminho que nunca executa.
+  // A orientação evita "revisar a conexão": nada caiu, e o conserto é um clique
+  // de autorização em Conexões — dizer "revisar" mandaria procurar um defeito.
+  canal_mudo_sem_numero: { refs: ["channel_session"], orientacao: "Peça a quem administra para autorizar os números de teste em Conexões ou abrir o canal ao público." },
   promise_unfulfilled: { refs: ["conversation"], orientacao: "Confira o compromisso descrito e defina quem fica responsável." },
   contact_proposal_expired: { refs: ["organization"], orientacao: "A sugestão venceu. Se a informação ainda for relevante, confirme com o cliente antes de editar sua ficha." },
   conhecimento_nao_indexado: { refs: ["ai_knowledge_source"], orientacao: "Peça ao gestor para conferir o material e o motivo da falha na base de conhecimento." },
@@ -70,7 +96,48 @@ export const POLITICAS_DE_AVISO = {
   // cai em "sem destino" com a orientação abaixo: o telefone está no corpo do
   // aviso, escrito pelo worker.
   voice_call_missed: { refs: ["contact"], orientacao: "Retorne a ligação quando puder — quem ligou não foi atendido." },
-  other: { refs: ["lead", "channel_session", "appointment", "ai_agent"], orientacao: "Confira a situação descrita neste aviso com a pessoa responsável." },
+  proposal_expired_notice: {
+    refs: ["proposal"],
+    orientacao: "A validade passou sem decisão do cliente. Confirme se ainda vale a pena manter a oferta ou revise o preço.",
+  },
+  proposal_acceptance_rate_drop: {
+    refs: ["organization"],
+    orientacao: "A proporção de propostas aceitas caiu de forma sustentada — revise preço, prazo ou o texto padrão.",
+  },
+  proposal_promised_not_created: {
+    refs: ["lead"],
+    orientacao: "Uma promessa de proposta venceu sem que a proposta tenha sido criada. Abra o negócio e monte o rascunho.",
+  },
+  // Leva AO CASO (`REFERENCIAS_DE_AVISO.agent_case` já aponta para
+  // `/app/ai/cases?caso=<id>`), e não a uma tela genérica de conexões: o que
+  // está pendente é o ATENDIMENTO, e quem abre o aviso precisa cair nele. A
+  // conferência da conexão é o segundo passo, e vai na orientação.
+  aviso_de_caso_nao_entregue: { refs: ["agent_case"], orientacao: "O aviso deste atendimento não saiu no WhatsApp. Abra o atendimento — ele continua esperando — e confira a conexão de avisos em Configurações." },
+  // O Jev percebeu o pedido NA conversa (`lib/ai/decisao/pedidos.ts`): o botão
+  // leva a ela, onde está o que o cliente escreveu — a Central não o repete.
+  jev_pedido_de_humano: { refs: ["conversation"], orientacao: "Abra a conversa e decida se alguém da equipe assume o atendimento." },
+  jev_parar_de_receber: { refs: ["conversation"], orientacao: "Abra a conversa e confira se o cliente quer mesmo parar de receber mensagens." },
+  // Mesmo par de `message_send_stuck`, para a proposta — o cron devolve a
+  // rascunho sozinho, sem reenviar; quem lê decide se envia de novo.
+  proposta_travada: { refs: ["proposal"], orientacao: "Confira a proposta antes de decidir se precisa enviar novamente." },
+  proposta_pronta_para_revisao: {
+    refs: ["proposal"],
+    orientacao: "A IA rascunhou esta proposta — confirme o modelo sugerido (ou escolha outro) e confira se todos os itens têm preço antes de enviar.",
+  },
+  // A revisão depois da reativação (`fn_reativar_organizacao`). Nasce SEM
+  // referência: o aviso é sobre N conversas, não sobre uma, e com
+  // `ref_kind='organization'` o resolvedor não chegaria ao Inbox. O Inbox não
+  // tem parâmetro de aba na URL (`app/app/inbox/page.tsx` só lê `id` e
+  // `rascunho`), por isso o botão leva ao Inbox e a orientação nomeia as abas.
+  // As DUAS: numa empresa com IA, a conversa sem dono e sem silêncio é
+  // classificada como `automatico` (comando-da-conversa.ts) e só cai na Fila
+  // quando a empresa não tem atendimento automático.
+  org_reativada: {
+    refs: [],
+    orientacao: "A IA não respondeu nem vai responder sozinha às conversas que chegaram durante a suspensão. Abra o Inbox e procure-as nas abas Fila e Automático.",
+    geral: { papel: "agent", href: "/app/inbox", rotulo: "Abrir o Inbox" },
+  },
+  other: { refs: ["lead", "channel_session", "appointment", "ai_agent", "ai_provider_credential", "agent_case"], orientacao: "Confira a situação descrita neste aviso com a pessoa responsável." },
 } satisfies Record<InboxKind, Politica>;
 
 /**
@@ -83,7 +150,14 @@ export const POLITICAS_DE_AVISO = {
  */
 const ROTULO_POR_KIND: Record<string, string> = {
   message_send_stuck: "Abrir uma conversa afetada",
+  proposta_travada: "Abrir proposta",
   voice_call_missed: "Ligar de volta",
+  // "Abrir o fluxo" convida a olhar; o aviso pede CONFERIR qual fluxo está
+  // parado antes de ir ligá-lo no agente.
+  followup_sem_agente: "Ver o fluxo parado",
+  // O aviso é sobre o que o cliente escreveu ali: a ação é ler e decidir.
+  jev_pedido_de_humano: "Abrir a conversa",
+  jev_parar_de_receber: "Abrir a conversa",
 };
 
 const SEM_DESTINO: DestinoDoAviso = { estado: "sem_destino", orientacao: "Este aviso não tem um contexto que possa ser aberto nesta versão." };

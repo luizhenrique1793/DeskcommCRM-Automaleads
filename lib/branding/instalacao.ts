@@ -53,8 +53,10 @@
  *
  * ── Sem `event_log` ──────────────────────────────────────────────────────────
  *
- * Confirmado lendo `lib/event-log/register-handlers.ts`: os 12 handlers
- * registrados cobrem IA, RAG, LGPD, automações, follow-up e mídia. Nenhum
+ * Confirmado lendo `lib/event-log/register-handlers.ts`: os handlers
+ * registrados cobrem IA, RAG, LGPD, automações, follow-up, mídia e o aviso de
+ * caso ao suporte — para reconferir sem acreditar nesta linha,
+ * `grep -c 'registerHandler(' lib/event-log/register-handlers.ts`. Nenhum
  * cobriria um tipo `platform_branding.*`, e o drain deixa evento sem handler
  * INTOCADO — a linha nasceria `pending` para sempre em todo clone. Evento sem
  * consumer é o anti-pattern nº 3 do CLAUDE.md. O registro desta mutação é
@@ -100,7 +102,7 @@ export type SementeDoAmbiente = {
  * 0155; tratá-la diferente agora criaria duas regras para o mesmo caso.
  */
 const COLUNAS =
-  "app_name, logo_url, logo_path, accent_hex, show_powered_by, seeded_from_env, fallback_at, fallback_reason";
+  "app_name, logo_url, logo_path, logo_dark_path, favicon_path, accent_hex, show_powered_by, seeded_from_env, fallback_at, fallback_reason";
 
 /**
  * Códigos de recusa — os que significam "a cor configurada NÃO pintou".

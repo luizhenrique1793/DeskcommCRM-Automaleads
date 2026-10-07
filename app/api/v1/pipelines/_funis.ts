@@ -95,34 +95,53 @@ export async function lerDependencias(
   };
 }
 
-/** O que a tela recebe de volta: os funis vivos, na ordem da lista. */
+/** Um funil como a tela o desenha — a MESMA forma para o vivo e para o arquivado. */
+export interface FunilDoCorpo {
+  id: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  position: number;
+  is_default: boolean;
+  is_client_pipeline: boolean;
+}
+
+function paraATela(f: FunilEditavel): FunilDoCorpo {
+  return {
+    id: f.id,
+    name: f.name,
+    slug: f.slug,
+    description: f.description ?? null,
+    position: f.position,
+    is_default: f.is_default,
+    // `?? false` e não `!` — um clone que ainda não aplicou a 0262 devolve
+    // `undefined` aqui, e a tela precisa de um booleano para decidir se
+    // mostra o badge. Ausente é "não é o funil de clientes", que é a
+    // verdade nesse banco.
+    is_client_pipeline: f.is_client_pipeline ?? false,
+  };
+}
+
+/**
+ * O que a tela recebe de volta: os vivos na ordem da lista, e os arquivados À
+ * PARTE.
+ *
+ * ⚠️ SÃO DUAS LISTAS, E MISTURÁ-LAS SERIA REGRESSÃO. `pipelines` alimenta os
+ * seletores de funil do produto inteiro (importar planilha, destino de webhook,
+ * ação de automação) — funil arquivado ali é destino que não existe mais, e foi
+ * exatamente isso que os PRs #941 e #944 tiraram de outras telas. Até a #979 o
+ * arquivado simplesmente não saía daqui, e o efeito era o oposto e igualmente
+ * ruim: quem arquivou não tinha como ver, desarquivar nem excluir o que
+ * arquivou. Separar atende as duas — a lista de trabalho continua só com os
+ * vivos, e quem quer o arquivo pede o arquivo.
+ */
 export function corpo(funis: FunilEditavel[]): {
-  pipelines: Array<{
-    id: string;
-    name: string;
-    slug: string;
-    description: string | null;
-    position: number;
-    is_default: boolean;
-    is_client_pipeline: boolean;
-  }>;
+  pipelines: FunilDoCorpo[];
+  arquivados: FunilDoCorpo[];
 } {
   return {
-    pipelines: funis
-      .filter((f) => !f.is_archived)
-      .map((f) => ({
-        id: f.id,
-        name: f.name,
-        slug: f.slug,
-        description: f.description ?? null,
-        position: f.position,
-        is_default: f.is_default,
-        // `?? false` e não `!` — um clone que ainda não aplicou a 0262 devolve
-        // `undefined` aqui, e a tela precisa de um booleano para decidir se
-        // mostra o badge. Ausente é "não é o funil de clientes", que é a
-        // verdade nesse banco.
-        is_client_pipeline: f.is_client_pipeline ?? false,
-      })),
+    pipelines: funis.filter((f) => !f.is_archived).map(paraATela),
+    arquivados: funis.filter((f) => f.is_archived).map(paraATela),
   };
 }
 

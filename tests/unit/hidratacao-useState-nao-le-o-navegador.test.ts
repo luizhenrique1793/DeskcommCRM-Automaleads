@@ -273,6 +273,11 @@ describe("o inicializador de useState não lê o navegador", () => {
     expect(fontes.has("lib/notifications/prefs.ts")).toBe(true);
   });
 
+  // 60s, não os 15s default: a varredura é de TODO `app|components|lib|hooks`
+  // (>1000 arquivos, controle positivo acima) com parser TS por arquivo. O
+  // repositório cresceu (merge com o upstream, 2026-10) e passou a estourar o
+  // teto default — teto maior, não corte de arquivo: a varredura precisa
+  // continuar olhando tudo, não uma amostra.
   it("nenhum arquivo de `app|components|lib|hooks` tem inicializador que lê o navegador", () => {
     const violacoes: string[] = [];
     for (const [rel, fonte] of fontes) {
@@ -287,7 +292,7 @@ describe("o inicializador de useState não lê o navegador", () => {
         "o servidor mandou. Use `useSyncExternalStore` com um " +
         "`getServerSnapshot` determinístico — ver `lib/theme.tsx`.",
     ).toEqual([]);
-  });
+  }, 60_000);
 
   it("CONTROLE POSITIVO: a sonda reprova o padrão do defeito, inclusive através de um import", () => {
     // `lerPrefs()` mora em outro módulo e só lá dentro toca `window`. Se a

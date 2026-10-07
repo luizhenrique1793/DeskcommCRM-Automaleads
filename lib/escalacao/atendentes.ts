@@ -14,12 +14,13 @@
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { estaPresente } from "@/lib/atendimento/presenca";
 import { ROLE_RANK, type Role } from "@/lib/auth/types";
 import { isAttendantEligible, OPEN_LOAD_STATUSES } from "@/lib/routing/eligibility";
 import { availabilityScheduleSchema } from "@/lib/schemas/routing";
 
 const COLUNAS_DISPONIBILIDADE =
-  "user_id, is_available, capacity, schedule, updated_at";
+  "user_id, is_available, capacity, schedule, updated_at, last_heartbeat_at";
 
 export interface AtendenteDoRoster {
   userId: string;
@@ -31,6 +32,16 @@ export interface AtendenteDoRoster {
   atualizadoEm: string | null;
   /** Conversas abertas atribuídas — mesma contagem que o worker de roteamento usa. */
   cargaAtual: number;
+  /** Carimbo do último sinal de presença; null = nunca abriu com a tela logada. */
+  ultimoSinalEm: string | null;
+  /**
+   * Tem sinal de presença válido agora (prazo em lib/atendimento/presenca.ts).
+   *
+   * É INFORMAÇÃO, não permissão: `podeAssumirAgora` não a consulta, e nenhum
+   * leitor pode usá-la para tirar alguém da fila. Presença que vira gate é a
+   * chave de plantão se desligando sozinha outra vez — o defeito do #720.
+   */
+  presente: boolean;
 }
 
 /**
@@ -39,10 +50,15 @@ export interface AtendenteDoRoster {
  * Service role e filtro `organization_id` explícito por doutrina: a RLS de
  * `user_organizations` deixa manager ver só a própria linha, então listar a
  * equipe pelo client do usuário devolveria uma linha só.
+ *
+ * `agora` é PARÂMETRO, não `new Date()` escondido: a presença do roster é
+ * derivada na leitura, e um relógio implícito aqui faria o mesmo roster dizer
+ * coisas diferentes em dois leitores do mesmo instante (o teste é o terceiro).
  */
 export async function carregarRosterDeAtendimento(
   admin: SupabaseClient,
   organizationId: string,
+  agora: Date,
 ): Promise<AtendenteDoRoster[]> {
   const { data: members, error: mErr } = await admin
     .from("user_organizations")
@@ -70,6 +86,7 @@ export async function carregarRosterDeAtendimento(
     capacity: number;
     schedule: unknown;
     updated_at: string | null;
+    last_heartbeat_at: string | null;
   };
   const porUsuario = new Map(
     ((availData ?? []) as LinhaDisponibilidade[]).map((a) => [a.user_id, a] as const),
@@ -102,6 +119,11 @@ export async function carregarRosterDeAtendimento(
       agenda: a?.schedule ?? { timezone: "America/Sao_Paulo", windows: [] },
       atualizadoEm: a?.updated_at ?? null,
       cargaAtual: cargaPorUsuario.get(m.user_id) ?? 0,
+      // Quem nunca emitiu sinal tem `last_heartbeat_at` null, e o roster diz
+      // `presente: false` — "não sei quando foi a última vez", que a tela mostra
+      // diferente de "o sinal venceu". As duas coisas são ausência de presença.
+      ultimoSinalEm: a?.last_heartbeat_at ?? null,
+      presente: estaPresente(a?.last_heartbeat_at ?? null, agora),
     };
   });
 }

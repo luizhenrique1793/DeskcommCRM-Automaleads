@@ -87,6 +87,213 @@ export const RETENCAO_CAPTACAO_DIAS_PADRAO = 365;
  */
 export const RETENCAO_CAPTACAO_DIAS_PISO = 30;
 
+/**
+ * 365 dias para a CONVERSA DO CASO (`agent_case_chat_messages`, migration 0281).
+ *
+ * Um ano fiscal de deliberação. Depois disso, "por que decidimos assim" é
+ * respondido pelos EVENTOS do caso — que são o registro da decisão —, não pela
+ * conversa que a precedeu. Guardar a deliberação para sempre seria manter
+ * indefinidamente texto sobre uma pessoa identificável cuja utilidade acabou.
+ */
+export const RETENCAO_CONVERSA_DO_CASO_DIAS_PADRAO = 365;
+/**
+ * Piso da conversa do caso: 90 dias, o MESMO da auditoria e pela mesma razão.
+ *
+ * O knob nunca vira apagador de deliberação recente — a pergunta "quem decidiu
+ * o quê, e com base em quê" ainda se faz três meses depois. O piso mora DENTRO
+ * de `fn_expurgar_conversa_do_caso_vencida` (`greatest(...)` no corpo), o que o
+ * faz valer para qualquer chamador, inclusive um `psql` na mão; a cópia aqui
+ * serve para o operador ver no log que o valor dele foi elevado, em vez de
+ * descobrir pela ausência de efeito.
+ */
+export const RETENCAO_CONVERSA_DO_CASO_DIAS_PISO = 90;
+
+/**
+ * 1825 dias (5 anos) para a PASSAGEM para uma pessoa
+ * (`passagens_de_atendimento`, migration 0291).
+ *
+ * O mesmo horizonte da auditoria, e pela mesma razão: a passagem é rastro de
+ * ATENDIMENTO — quem assumiu a conversa de quem, quando, por quê e quanto tempo
+ * a pessoa esperou. É a linha que responde a uma reclamação de dois anos atrás,
+ * e é de onde sai a medida de repetição que diz se o briefing serviu para
+ * alguma coisa.
+ */
+export const RETENCAO_PASSAGEM_DIAS_PADRAO = 1825;
+/**
+ * Piso da passagem: 90 dias, o mesmo da auditoria.
+ *
+ * O knob nunca vira apagador de rastro recente. O piso mora DENTRO de
+ * `fn_expurgar_passagens_vencidas` (`greatest(...)` no corpo), o que o faz valer
+ * para qualquer chamador, inclusive um `psql` na mão; a cópia aqui serve para o
+ * operador ver no log que o valor dele foi elevado, em vez de descobrir pela
+ * ausência de efeito.
+ *
+ * ⚠️ O piso NÃO é a única proteção desta tabela, e a outra é mais forte: a
+ * função só apaga linha com `reconhecido_em is not null`. Passagem aberta é
+ * demanda viva — alguém do outro lado está esperando e ninguém assumiu — e
+ * apagá-la por idade seria o expurgo virando esquecedor de pendência.
+ */
+export const RETENCAO_PASSAGEM_DIAS_PISO = 90;
+
+/**
+ * 180 dias para o REGISTRO DE ENTREGA do aviso de caso
+ * (`entregas_de_aviso_de_caso`, migration 0292).
+ *
+ * Bem mais curto que a passagem e que a auditoria, e o motivo é a pergunta: a
+ * única que esta tabela responde — "o aviso daquele caso saiu?" — é de semanas,
+ * não de anos. Depois de seis meses o caso já foi resolvido ou abandonado, e o
+ * que sobrou dele está nos EVENTOS do caso, que são o registro da decisão.
+ *
+ * A linha não guarda texto nenhum (só `corpo_hash`), então o que se poda aqui é
+ * volume de operação, não relato de pessoa.
+ */
+export const RETENCAO_AVISO_DE_CASO_DIAS_PADRAO = 180;
+/**
+ * Piso do aviso: 30 dias — o mais baixo dos pisos com dono no SQL, e de
+ * propósito.
+ *
+ * Os 90 dias da auditoria existem para o knob não virar apagador de RASTRO
+ * LEGAL. Aqui o rastro é operacional, e o que o piso protege é outra coisa: o
+ * incidente que ainda está sendo apurado. "Por que a equipe não foi avisada na
+ * semana passada?" é uma pergunta de dias, não de trimestres — e um mês é o
+ * mínimo em que ela ainda tem chance de ser feita.
+ *
+ * O piso mora DENTRO de `fn_expurgar_avisos_de_caso_vencidos`
+ * (`greatest(...)` no corpo), o que o faz valer para qualquer chamador,
+ * inclusive um `psql` na mão; a cópia aqui serve para o operador ver no log que
+ * o valor dele foi elevado, em vez de descobrir pela ausência de efeito.
+ */
+export const RETENCAO_AVISO_DE_CASO_DIAS_PISO = 30;
+
+/**
+ * 365 dias para os CANDIDATOS da prospecção nativa (`prospecting_candidates`,
+ * migration 0369; expurgo na 0408, issue #1313).
+ *
+ * Guarda nome, telefone, endereço e identificador de lugar — a pessoa que mais
+ * cedo ou mais tarde vai ser abordada, e que em muitos casos nunca falou com a
+ * empresa. Um ano é a decisão do dono do projeto (24/09/2026, PR #1577),
+ * alinhado ao horizonte da conversa do caso e da captação: depois disso o
+ * funil responde por EVENTOS, não por raspagem parada.
+ *
+ * Quem APLICA é `fn_expurgar_prospeccao_vencida` (migration 0408), chamada em
+ * lotes pelo cron `data-retention` — e o piso mora DENTRO do corpo da função,
+ * `greatest(...)`, como as sete irmãs: só assim ele vale para qualquer
+ * chamador, inclusive um `psql` na mão.
+ *
+ * Duas guardas que a função impõe e esta declaração não pode expressar:
+ * - `status not in ('queued','sending')` — trabalho vivo nunca entra no
+ *   expurgo, em nenhuma idade;
+ * - `suppression_salt is null` — os tokens de supressão (`suppression_salt`,
+ *   `suppression_place`, `suppression_phone`) de quem exerceu opt-out/exclusão
+ *   NUNCA são expurgados: é o tombstone que faz o trigger
+ *   `prospecting_refuse_erased` barrar a reimportação futura da mesma pessoa.
+ *   Expurgá-lo reabriria a porta que a anonimização (0370) fechou.
+ */
+export const RETENCAO_PROSPECCAO_DIAS_PADRAO = 365;
+export const RETENCAO_PROSPECCAO_DIAS_PISO = 90;
+
+/**
+ * 90 dias para as OBSERVAÇÕES DO JEV (`jev_observacoes`, migration 0421).
+ *
+ * A linha não guarda texto de cliente — só os rótulos do Jev e do mecanismo de
+ * hoje e se concordaram. Ela existe para uma pergunta só: "posso deixar o Jev
+ * decidir esta tarefa?", respondida pela concordância recente. Três meses é
+ * folga sobre a janela que o cartão mostra.
+ *
+ * Quem aplica é `fn_expurgar_observacoes_do_jev` (0421), em lotes pelo cron
+ * `data-retention`, com o piso no CORPO da função, como as irmãs.
+ */
+export const RETENCAO_OBSERVACOES_DO_JEV_DIAS_PADRAO = 90;
+/**
+ * Piso de 30 dias: a janela da concordância no cartão
+ * (`app/api/v1/ai/jev/route.ts`). Abaixo dela o cartão continuaria dizendo
+ * "nos últimos 30 dias" contando menos do que isso.
+ */
+export const RETENCAO_OBSERVACOES_DO_JEV_DIAS_PISO = 30;
+
+/**
+ * 30 dias para o RASCUNHO SUGERIDO POR INTEGRAÇÃO já vencido
+ * (`conversation_drafts`, migration 0419 / issue #1611; expurgo pedido na #1686).
+ *
+ * O relógio é `expires_at`, NUNCA `created_at` — a mesma decisão do espelho da
+ * agenda, e pela mesma razão: a linha só responde enquanto a janela dela está
+ * aberta. Depois do vencimento o link `?rascunho=` não abre, `consumirRascunho`
+ * recusa (`lib/inbox/rascunho-sugerido.ts`) e o texto é proposta que NINGUÉM
+ * enviou. Trinta dias é o prazo de apurar "o link chegou, por que não abriu?";
+ * depois disso o que houve de operação está na trilha
+ * (`conversation.draft_created` / `conversation.draft_used`), que responde sem
+ * guardar o texto da pessoa de novo.
+ *
+ * Quem aplica é o cron `data-retention` (a décima poda), em lotes, com este piso
+ * aplicado NO TYPESCRIPT: a poda é um DELETE do admin client
+ * (`app/api/v1/cron/data-retention/route.ts`), não uma `security definer` — não
+ * há função onde enfiar o piso, e é a MESMA exceção declarada para a captação
+ * acima. Por isso a cerca `tests/unit/retencao-todo-piso-tem-dono.test.ts` a
+ * lista em `SEM_FUNCAO_NO_SQL`, com esta razão escrita aqui.
+ */
+export const RETENCAO_RASCUNHO_DIAS_PADRAO = 30;
+/**
+ * Piso de 7 dias CONTADOS DO VENCIMENTO — nunca do `created_at`.
+ *
+ * Sete dias é a janela em que "o link do rascunho não abriu" ainda é pergunta
+ * viva (o texto vale 24 h por padrão, `JANELA_PADRAO_HORAS`). Abaixo disso o
+ * knob viraria apagador de rastro de INCIDENTE; acima, nada se protegeria: a
+ * linha não tem leitor depois do vencimento, e apagá-la cedo ou tarde não muda
+ * o que a trilha de auditoria responde.
+ */
+export const RETENCAO_RASCUNHO_DIAS_PISO = 7;
+
+/**
+ * 90 dias para os CANDIDATOS AO GOLDEN SET (`golden_candidates`, migration 0428).
+ *
+ * A linha não guarda texto de cliente — só o rótulo do near-miss de skill ou da
+ * divergência classificador×modelo e os ponteiros do lead e do job. Ela existe
+ * para uma pergunta só ("este probe merece curadoria?"), respondida nos
+ * primeiros meses; depois disso o rótulo não muda a curadoria de ninguém, e a
+ * issue que criou a tabela (#1695) é justamente sobre dado de titular parado
+ * fora de qualquer prazo.
+ *
+ * Quem aplica é `fn_expurgar_candidatos_do_golden` (0428), em lotes pelo cron
+ * `data-retention`, com o piso no CORPO da função, como as irmãs.
+ */
+export const RETENCAO_CANDIDATOS_GOLDEN_DIAS_PADRAO = 90;
+/**
+ * Piso de 30 dias: a janela em que um near-miss ainda é curável. Abaixo dela a
+ * poda viraria apagador de rastro recente para quem acabou de ligar o knob.
+ */
+export const RETENCAO_CANDIDATOS_GOLDEN_DIAS_PISO = 30;
+
+/**
+ * 365 dias para a MÍDIA de mensagem (`messages.media_storage_path` / bucket
+ * `whatsapp-media`, migration 0432).
+ *
+ * É o padrão do formulário da organização (`organizations.media_retention_days`,
+ * migration 0432/#1731). A MÍDIA que a empresa promete guardar não é tratada
+ * como a auditoria (1825 dias): é o ATTACHMENT do canal, reconstruível pelo
+ * provedor enquanto ele a tiver — o que a política segura é o custo e a
+ * finalidade, não o histórico legal.
+ *
+ * Quem APLICA é `fn_enfileirar_midia_vencida` (0432 + 0557), chamada em lotes
+ * pelo cron `media-retention` — e o piso mora DENTRO do corpo da função
+ * (`greatest(...)`), valendo para qualquer chamador, inclusive um `psql` na mão.
+ *
+ * ⚠️ MÍDIA TEM INTERRUPTOR (migration 0557, issue #1534): a função só enfileira
+ * mídia vencida de organização com `media_retention_enforced = true`, que é o
+ * PADRÃO — a limpeza roda desde a 0432 e quem já existia continua com ela
+ * (doc 92, opção A). Esta dupla de constantes descreve o PADRÃO e o PISO; quem
+ * decide se VALE para uma organização é o interruptor, não estes números.
+ */
+export const RETENCAO_MIDIA_DIAS_PADRAO = 365;
+/**
+ * Piso de 30 dias para a MÍDIA: o mesmo piso que o formulário do tenant.
+ *
+ * Valor menor gravado direto no banco encontra o `greatest(..., 30)` no corpo
+ * da função e vira 30 — a régua do formulário é também a do banco, como as
+ * irmãs. Não pode ficar abaixo disso: o aceite do #1534 diz explicitamente que
+ * o piso vale mesmo com valor menor no banco.
+ */
+export const RETENCAO_MIDIA_DIAS_PISO = 30;
+
 export interface RetencaoInterpretada {
   /** Dias a pedir ao banco. Nunca abaixo do piso, nunca `NaN`. */
   readonly dias: number;

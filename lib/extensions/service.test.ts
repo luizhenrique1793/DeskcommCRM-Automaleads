@@ -123,7 +123,7 @@ function artifact(name: string, version = "1.0.0"): Row {
     name,
     version,
     license: "MIT",
-    host_api: { min: 1, max: 1 },
+    host_api: { min: 1, max: 2 },
     permissions: ["navigation.tasks"],
     dependencies: [],
     data: { mode: "none" },

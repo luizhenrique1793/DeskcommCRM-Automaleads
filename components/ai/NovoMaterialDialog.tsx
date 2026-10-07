@@ -127,7 +127,7 @@ export function NovoMaterialDialog({ aberto, onFechar, onCriado, podeIndexar }: 
       toast.success(
         podeIndexar
           ? t("Material cadastrado. Estou preparando — em instantes o agente já sabe.")
-          : t("Material cadastrado. Ele fica esperando a chave da OpenAI para ser preparado."),
+          : t("Material cadastrado. Ele fica esperando uma chave de embedding para ser preparado."),
       );
       limpar();
       onCriado();
@@ -207,13 +207,13 @@ export function NovoMaterialDialog({ aberto, onFechar, onCriado, podeIndexar }: 
                 data-testid="material-arquivo"
                 ref={inputArquivo}
                 type="file"
-                accept=".pdf,.md,.txt"
+                accept=".pdf,.md,.txt,.csv"
                 onChange={(e) => setArquivo(e.target.files?.[0] ?? null)}
                 disabled={enviando}
               />
               <p className="text-xs text-text-muted">
                 {t(
-                  "PDF, Markdown ou texto, até 20 MB. Um PDF só de imagens escaneadas não tem letra nenhuma para ler — envie uma versão com texto selecionável.",
+                  "PDF, Markdown, CSV ou texto, até 20 MB. Um PDF só de imagens escaneadas não tem letra nenhuma para ler — envie uma versão com texto selecionável. Planilha Excel? Salve como CSV primeiro.",
                 )}
               </p>
             </div>
@@ -245,7 +245,7 @@ export function NovoMaterialDialog({ aberto, onFechar, onCriado, podeIndexar }: 
           {!podeIndexar ? (
             <p className="text-xs text-warning-fg" data-testid="material-aviso-sem-chave">
               {t(
-                "Sem uma chave da OpenAI, o material fica guardado e esperando — o agente só passa a conhecê-lo depois que a chave for cadastrada.",
+                "Sem uma chave de embedding, o material fica guardado e esperando — o agente só passa a conhecê-lo depois que a chave for cadastrada.",
               )}
             </p>
           ) : null}

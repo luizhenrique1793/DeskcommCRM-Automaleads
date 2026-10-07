@@ -5,13 +5,31 @@ import { useLocaleDeData } from "@/hooks/i18n/useLocaleDeData";
 import { useT } from "@/hooks/i18n/useT";
 import { useState } from "react";
 import { format } from "date-fns";
-import { ShieldCheck, PencilSimple } from "@/lib/ui/icons";
+import { ShieldCheck, PencilSimple, LockOpen } from "@/lib/ui/icons";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card } from "@/components/ui/card";
+import { ChipDeEtiqueta } from "@/components/tags/ChipDeEtiqueta";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useContact } from "@/hooks/contacts/useContact";
+import { useUnblockContact } from "@/hooks/contacts/useUnblockContact";
+import {
+  useMarkPersonalContact,
+  useUnmarkPersonalContact,
+} from "@/hooks/contacts/usePersonalContact";
+import { useHierarquiaDoAnuncio } from "@/hooks/contacts/useHierarquiaDoAnuncio";
 import { useAuth } from "@/hooks/auth/AuthProvider";
 import { useDefaultPipeline } from "@/hooks/pipelines/useDefaultPipeline";
 import { camposDoFunil } from "@/lib/leads/campos-do-funil";
@@ -20,13 +38,33 @@ import { TimelineView } from "@/components/contacts/TimelineView";
 import { EditContactDialog } from "@/components/contacts/EditContactDialog";
 import { AnonymizeDialog } from "@/components/contacts/AnonymizeDialog";
 import { PropostasDeDado } from "@/components/contacts/PropostasDeDado";
+import { RoteirosDoContato } from "@/components/contacts/RoteirosDoContato";
 import { ConversaNoDossie } from "@/components/kanban/ConversaNoDossie";
 import { rotuloDoContato } from "@/lib/contacts/rotulo-do-contato";
+import { origemDoContato } from "@/lib/leads/origem-do-contato";
 import { phoneForDisplay } from "@/lib/channels/phone-variants";
 import { DialButton } from "@/components/voice/DialButton";
 
 interface Props {
   contactId: string;
+}
+
+/**
+ * Um nível da origem, ou nada.
+ *
+ * Escondido quando não há valor, em vez de mostrar "—": quatro travessões
+ * seguidos leem como cadastro quebrado, e não como "este contato não veio de
+ * campanha". O rótulo chega já traduzido porque `t()` com argumento não literal
+ * escapa do guardião de espanhol.
+ */
+function NivelDaOrigem({ rotulo, valor }: { rotulo: string; valor: string | null }) {
+  if (!valor) return null;
+  return (
+    <div>
+      <dt className="text-xs uppercase text-muted-foreground">{rotulo}</dt>
+      <dd className="mt-1 break-words">{valor}</dd>
+    </div>
+  );
 }
 
 export function ContactDetailClient({ contactId }: Props) {
@@ -40,6 +78,31 @@ export function ContactDetailClient({ contactId }: Props) {
   const pipelineQuery = useDefaultPipeline(Boolean(activeOrg));
   const [editOpen, setEditOpen] = useState(false);
   const [anonOpen, setAnonOpen] = useState(false);
+  // Desfazer o descadastro é o override da regra W-02 — só admin, e auditado.
+  // O hook fica ANTES dos early returns: chamá-lo depois mudaria a ordem dos
+  // hooks entre renderizações e o React reprova.
+  const desbloquear = useUnblockContact(contactId);
+  // Marcar/desmarcar pessoal (spec 21, etapa 15): os hooks ficam aqui pelo
+  // mesmo motivo do `desbloquear` acima.
+  const marcarPessoal = useMarkPersonalContact(contactId);
+  const desmarcarPessoal = useUnmarkPersonalContact(contactId);
+
+  /*
+    Pede o nome da campanha SÓ quando há um anúncio e ainda não há nome.
+
+    Quem chegou pelo site já trouxe os nomes na URL, e quem já foi resolvido uma
+    vez tem `campaign_name` no metadata — nos dois casos, perguntar à plataforma
+    gastaria cota para receber o que já está na tela. Cota é o recurso escasso
+    desta conta, não latência.
+
+    Derivado de `q.data` e não de `contact` porque hook não pode ficar depois de
+    um `return` condicional — e os dois `if` de carregamento vêm logo abaixo.
+  */
+  const metadataDoContato = (q.data?.data.source_metadata ?? {}) as Record<string, unknown>;
+  const temAnuncio =
+    typeof metadataDoContato.ad_id === "string" && metadataDoContato.ad_id.trim() !== "";
+  const jaTemNome = typeof metadataDoContato.campaign_name === "string";
+  const hierarquia = useHierarquiaDoAnuncio(contactId, temAnuncio && !jaTemNome);
 
   if (q.isLoading) {
     return (
@@ -61,11 +124,32 @@ export function ContactDetailClient({ contactId }: Props) {
   const contact = q.data.data;
   const isAdmin =
     (user.is_platform_admin && !user.support) || (activeOrg && ROLE_RANK[activeOrg.role] >= ROLE_RANK.admin);
+  // Gerente e dono marcam/desmarcam pessoal (spec 21, decisão 1, D3) — e este
+  // gate fica LADO A LADO com o `isAdmin` do desbloquear, cada um com seu
+  // motivo: desfazer descadastro reabre um canal que o cliente fechou (só
+  // admin, LGPD); pessoal é decisão operacional (gerente pode).
+  const podeMarcarPessoal =
+    (user.is_platform_admin && !user.support) ||
+    (activeOrg && ROLE_RANK[activeOrg.role] >= ROLE_RANK.manager);
 
   // Uma decisão, um lugar (lib/contacts/rotulo-do-contato.ts). Esta tela era
   // uma das DUAS que ignoravam o telefone: contato com número e sem nome
   // aparecia como "Sem nome" aqui e com o número no inbox.
   const displayName = rotuloDoContato(contact, t);
+
+  // Os quatro níveis que quem opera tráfego lê. O jsonb já os recebia dos dois
+  // caminhos de entrada — site e clique-para-WhatsApp — e nenhuma tela o abria.
+  //
+  // O que a plataforma respondeu entra COMO SE fosse metadata, e não como um
+  // segundo caminho na tela: as três chaves resolvidas (`campaign_name`,
+  // `adset_name`, `ad_name`) são exatamente as que `origemDoContato` já lê, no
+  // degrau abaixo da UTM. Uma regra de precedência só, e ela já estava escrita.
+  const origem = origemDoContato(
+    hierarquia.data
+      ? { ...(contact.source_metadata ?? {}), ...hierarquia.data }
+      : contact.source_metadata,
+    contact.source,
+  );
 
   return (
     <div className="space-y-4 p-6">
@@ -97,16 +181,100 @@ export function ContactDetailClient({ contactId }: Props) {
           </div>
           <div className="mt-2 flex flex-wrap gap-1">
             {contact.tags.map((t) => (
-              <Badge key={t} variant="neutral">
-                {t}
-              </Badge>
+              <ChipDeEtiqueta key={t} tag={t} />
             ))}
             {contact.is_blocked && <Badge variant="warning">{t("Bloqueado")}</Badge>}
+            {/* Selo lido da COLUNA, nunca da etiqueta (critério 5): editar
+                etiquetas não apaga o selo — mesma regra do "Bloqueado" acima. */}
+            {contact.is_personal && <Badge variant="secondary">{t("Pessoal")}</Badge>}
             {contact.is_anonymized && <Badge variant="destructive">{t("Anonimizado")}</Badge>}
           </div>
         </div>
         {!contact.is_anonymized && user.support?.access_mode !== "support_readonly" && (
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
+            {/* O CAMINHO DE VOLTA do descadastro. Sem ele, o contato que pediu
+                para sair — ou que caiu num falso positivo — ficava preso para
+                sempre: `before-send` recusa todo envio, o funil não cria lead,
+                o follow-up não retoma. A regra W-02 previu o override
+                ("Tenant admin pode desbloquear manualmente; ação auditada") e o
+                produto não tinha porta nenhuma para exercê-lo.
+
+                Só ADMIN, como a regra nomeia: desfazer um pedido de descadastro
+                não é editar cadastro, é reabrir um canal que o cliente fechou —
+                e quem clica responde pela decisão. */}
+            {/* Confirmação antes do clique: nenhum caminho do produto bloqueia
+                de novo à mão (o único escritor de is_blocked=true é o STOP do
+                próprio cliente, em lib/channels/pos-entrada.ts), então um clique
+                errado ao lado do "Editar" reabriria um canal que só o cliente
+                consegue fechar outra vez. */}
+            {contact.is_blocked && isAdmin && (
+              <AlertDialog>
+                <AlertDialogTrigger asChild>
+                  <Button variant="outline" disabled={desbloquear.isPending} className="shrink-0">
+                    <LockOpen size={16} weight="bold" aria-hidden />
+                    <span>{t("Desbloquear")}</span>
+                  </Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>{t("Desbloquear este contato?")}</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      {t("Este contato pediu para não receber mais mensagens. Desbloquear volta a permitir campanhas, follow-ups e respostas da IA para ele, e a ação fica registrada na auditoria em seu nome.")}
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>{t("Cancelar")}</AlertDialogCancel>
+                    <AlertDialogAction onClick={() => desbloquear.mutate()}>
+                      {t("Desbloquear")}
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+            )}
+            {/* PESSOAL (spec 21, etapa 15): gerente marca e desmarca; sem
+                exceção de envio — quem é pessoal não recebe por nenhum caminho.
+                Marcar confirma (esconde da operação); desmarcar é direto. */}
+            {!contact.is_personal && podeMarcarPessoal && (
+              <AlertDialog>
+                <AlertDialogTrigger asChild>
+                  <Button
+                    variant="outline"
+                    disabled={marcarPessoal.isPending}
+                    className="shrink-0"
+                    data-testid="marcar-pessoal"
+                  >
+                    <span>{t("Marcar como pessoal")}</span>
+                  </Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>{t("Marcar este contato como pessoal?")}</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      {t("O contato sai da operação: conversas fecham, IA, follow-ups, campanha e envios param. O histórico continua no banco e volta à vista ao desmarcar; follow-ups e campanhas cancelados não voltam.")}
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>{t("Cancelar")}</AlertDialogCancel>
+                    <AlertDialogAction onClick={() => marcarPessoal.mutate()}>
+                      {t("Marcar como pessoal")}
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+            )}
+            {contact.is_personal && podeMarcarPessoal && (
+              <Button
+                variant="outline"
+                disabled={desmarcarPessoal.isPending}
+                className="shrink-0"
+                data-testid="desmarcar-pessoal"
+                onClick={() => desmarcarPessoal.mutate()}
+              >
+                <span>
+                  {desmarcarPessoal.isPending ? t("Desmarcando...") : t("Desmarcar pessoal")}
+                </span>
+              </Button>
+            )}
             <DialButton contactId={contactId} hasPhone={!!contact.phone_number} />
             <Button variant="outline" onClick={() => setEditOpen(true)} className="shrink-0">
               <PencilSimple size={16} weight="bold" aria-hidden />
@@ -145,7 +313,7 @@ export function ContactDetailClient({ contactId }: Props) {
                 <dd className="mt-1">{contact.name ?? "—"}</dd>
               </div>
               <div>
-                <dt className="text-xs uppercase text-muted-foreground">Display name</dt>
+                <dt className="text-xs uppercase text-muted-foreground">{t("Nome")} · WhatsApp</dt>
                 <dd className="mt-1">{contact.display_name ?? "—"}</dd>
               </div>
               <div>
@@ -158,10 +326,47 @@ export function ContactDetailClient({ contactId }: Props) {
                   {contact.phone_number ? phoneForDisplay(contact.phone_number) : "—"}
                 </dd>
               </div>
+              {/*
+                A data gravada pelo "Editar contato" (e pela proposta aprovada),
+                enxergada aqui — é ela que o cron `contact-birthdays` lê para
+                emitir `contact.birthday`. A string vira `dd/MM/yyyy` PELOS
+                PEDAÇOS: `new Date("1990-09-14")` nasce à meia-noite em UTC, e
+                `format` no fuso da tela (UTC-3) devolveria 13/09 — o
+                aniversário de ontem para quem olha.
+              */}
+              <div>
+                <dt className="text-xs uppercase text-muted-foreground">
+                  {t("Data de nascimento")}
+                </dt>
+                <dd className="mt-1">
+                  {contact.birthdate ? contact.birthdate.split("-").reverse().join("/") : "—"}
+                </dd>
+              </div>
+              {/*
+                A origem sai do `source_metadata` quando ele tem algo melhor a
+                dizer, e cai na coluna `source` quando não tem. Antes esta linha
+                lia só a coluna, e a resposta era `site` para quem chegou pelo
+                link do site, ou o nome da plataforma para quem clicou num
+                anúncio — mesmo com o `utm_source` da campanha gravado ao lado.
+              */}
               <div>
                 <dt className="text-xs uppercase text-muted-foreground">{t("Origem")}</dt>
-                <dd className="mt-1">{contact.source}</dd>
+                <dd className="mt-1">{origem.origem}</dd>
               </div>
+              <NivelDaOrigem rotulo={t("Campanha")} valor={origem.campanha} />
+              <NivelDaOrigem rotulo={t("Conjunto")} valor={origem.conjunto} />
+              <NivelDaOrigem rotulo={t("Anúncio")} valor={origem.anuncio} />
+              <NivelDaOrigem rotulo={t("Posicionamento")} valor={origem.posicionamento} />
+              {origem.semPosicionamentoDeAnuncio && (
+                <div>
+                  <dt className="text-xs uppercase text-muted-foreground">
+                    {t("Posicionamento")}
+                  </dt>
+                  <dd className="mt-1 text-sm text-muted-foreground">
+                    {t("A plataforma não informa o posicionamento de cada clique em anúncio.")}
+                  </dd>
+                </div>
+              )}
               <div>
                 <dt className="text-xs uppercase text-muted-foreground">{t("Última atividade")}</dt>
                 <dd className="mt-1">
@@ -202,14 +407,15 @@ export function ContactDetailClient({ contactId }: Props) {
                   {contact.tags.length === 0
                     ? "—"
                     : contact.tags.map((t) => (
-                        <Badge key={t} variant="neutral">
-                          {t}
-                        </Badge>
+                        <ChipDeEtiqueta key={t} tag={t} />
                       ))}
                 </dd>
               </div>
             </dl>
           </Card>
+          <div className="mt-4">
+            <RoteirosDoContato contactId={contactId} />
+          </div>
         </TabsContent>
 
         <TabsContent value="timeline" className="mt-4">

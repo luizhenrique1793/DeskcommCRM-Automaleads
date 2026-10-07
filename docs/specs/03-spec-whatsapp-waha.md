@@ -594,7 +594,9 @@ create policy "messages_agent_insert_own_conversation"
 | `conversations` | `(organization_id, last_message_at desc nulls last)` | Inbox listing |
 | `conversations` | `(organization_id, last_inbound_at desc) where status='open' and assigned_to is null` | Fila de não-atribuídas |
 | `channel_sessions` | `(last_health_check_at) where status='WORKING'` | Cron `sync-sessions` |
-| `webhook_events_log` | `(status, received_at) where status in ('received','error')` | Cron `process-pending-webhooks` |
+| `webhook_events_log` | `(status, received_at) where status in ('received','error')` | Cron `webhook-replay` (o `process-pending-webhooks` desta spec) |
+
+> ⚠️ **`error` deixou de significar só "falhou, tente de novo" (issue #290).** Desde que a recusa de contrato passou a ser arquivada, uma linha `error` pode ser um corpo que **nunca** vai passar: o formato do fio mudou. O cron que reprocessa existe com outro nome — `app/api/v1/cron/webhook-replay` — e distingue os casos pelo começo do `error_message`: só relê linhas `transitoria:` (banco indisponível na ingestão, gravadas por `lib/waha/desfecho-do-webhook.ts`); `contrato_violado:` e `handler:` nunca voltam para a fila.
 
 ---
 
@@ -1054,7 +1056,9 @@ export async function POST(
       error_message: err instanceof Error ? err.message : String(err),
       attempts: 1,
     }).eq("id", logRow!.id);
-    // 200 mesmo em erro: cron `process-pending-webhooks` re-processa
+    // ⚠️ Esboço original. O código real (`lib/waha/desfecho-do-webhook.ts`)
+    // devolve 503 + Retry-After quando a falha é TRANSITÓRIA (o WAHA reentrega),
+    // e 200 só quando tentar de novo não adianta. O cron é `webhook-replay`.
   }
 
   return new Response(null, { status: 200 });
@@ -1682,7 +1686,7 @@ Pra distinguir múltiplos celulares vinculados, fora do escopo MVP (WAHA não ex
 
 ## 10. Crons
 
-A cadência vigente não mora neste documento: ela vive em duas fontes espelhadas — `docker/scheduler/entrypoint.sh` (o serviço `scheduler` do compose, que é o caminho self-host) e `vercel.ts` na raiz (para quem hospeda a própria instalação na Vercel). `tests/unit/cron-routes-scheduled.test.ts` confere as duas uma contra a outra e contra o diretório `app/api/v1/cron/`, e reprova divergência. Para ver a lista de hoje:
+A cadência vigente não mora neste documento: ela vive em `docker/scheduler/entrypoint.sh` — o crontab do serviço `scheduler` do compose, que é quem bate as rotas no self-host e é a única lista de agendamento sob gate. `tests/unit/cron-routes-scheduled.test.ts` confere essa lista contra o diretório `app/api/v1/cron/` nas duas direções: reprova rota de cron sem agendamento e agendamento apontando para rota que não existe. Para ver a lista de hoje:
 
 ```bash
 grep -oE 'api/v1/cron/[a-z0-9-]+' docker/scheduler/entrypoint.sh | sort -u
@@ -1774,6 +1778,8 @@ export async function GET(req: NextRequest) {
 ```
 
 ### 10.3 `process-pending-webhooks`
+
+> **Implementado como `app/api/v1/cron/webhook-replay`**, e diferente deste esboço em três pontos: relê só `status='error'` com `error_message` começando por `transitoria:` (nunca `received`, que é o evento ainda em voo, nem recusa de contrato); desiste em 20 tentativas (não 3), porque a rodada é por minuto e o banco pode ficar fora por um reinício inteiro; e ao desistir abre aviso `event_dead` na Central com o título `MENSAGEM_QUE_NAO_ENTROU` (`lib/event-log/aviso-de-evento-morto.ts`). O esboço abaixo fica como registro do desenho.
 
 ```ts
 export async function GET(req: NextRequest) {
@@ -2048,3 +2054,21 @@ select indexname from pg_indexes where schemaname = 'public'
 ## Confirmação
 
 Spec 03 escrita em `/Users/rafaelmelgaco/DeskcommCRM/docs/specs/03-spec-whatsapp-waha.md`. Contém: schema SQL completo das 5 tabelas (channel_sessions + warmup, conversations, messages, webhook_events_log) com RLS e indexes; wrapper TypeScript do WAHA com classes de erro; handlers completos de criação de sessão, webhook receiver com HMAC-SHA512 timing-safe, send pipeline com optimistic UI e pg_boss; rate limiter Redis (1msg/1.2s + jitter), spinning de copy DSL, daily limit, janela horária, detector STOP, warm-up; 3 crons; 7 edge cases tratados; hospedagem Railway → Hostgator; 14 testes de integração mapeados; 9 migrations ordenadas. Todas as regras W-01 a W-12, T-07 e AT-07 estão materializadas em código. Pronto pra crítica e Epics.
+
+## Conexão por código de pareamento (extensão da sessão existente)
+
+CONFIRMADO no código: `PairingOptions` é compartilhado por Conexões e onboarding.
+`POST /api/v1/channel-sessions/{id}/pairing-code` recebe `{phone_number}` e exige
+admin, prova MFA quando aplicável e suporte com permissão de escrita. O canal é
+resolvido por ID + organização autenticada. Arquivados e canais sem sessão são
+recusados. A camada `lib/channels/pairing-code.ts` consulta o estado remoto e só
+chama `POST /api/{session}/auth/request-code` em `SCAN_QR_CODE`; nunca faz logout
+ou restart. Usa credencial de servidor, timeout, validação da resposta e no-store.
+
+Proteção escolhida: uma tentativa por canal em janela de 30 segundos, com o
+contador Redis existente (fallback por processo). Telefone e código não são
+gravados nem incluídos na auditoria. `channel.pairing_code_requested` aparece
+na auditoria administrativa. O polling já existente confirma `WORKING`; erro
+oferece nova tentativa ou QR. Pareamento real exige a confirmação no celular.
+
+Fonte do contrato: https://waha.devlike.pro/docs/how-to/sessions/#get-pairing-code

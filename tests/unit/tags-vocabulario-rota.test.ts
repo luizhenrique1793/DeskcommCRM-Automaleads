@@ -66,3 +66,57 @@ describe("vocabularioDeTagsSchema — o que a rota recusa antes de tocar o banco
     expect(vocabularioDeTagsSchema.safeParse({ acao: "excluir", tag: "x".repeat(60) }).success).toBe(true);
   });
 });
+
+describe("vocabularioDeTagsSchema — a cor (issue #1271, fatia S6)", () => {
+  /** O que o schema devolve depois de normalizar. */
+  const normalizado = (entrada: unknown) => vocabularioDeTagsSchema.parse(entrada) as {
+    cor?: string | null;
+  };
+
+  it("definir_cor sem o campo `cor` é cor_obrigatoria", () => {
+    // Ausente ≠ nulo: nulo é "limpe a cor". Sem o campo não dá para distinguir
+    // "limpe" de "esqueci de mandar", e a operação reportaria alteração à toa.
+    expect(recusa({ acao: "definir_cor", tag: "vip" })).toBe("cor_obrigatoria");
+  });
+
+  it("definir_cor com `cor: null` PASSA — é o pedido de tirar a cor", () => {
+    expect(vocabularioDeTagsSchema.safeParse({ acao: "definir_cor", tag: "vip", cor: null }).success).toBe(true);
+  });
+
+  it("a cor entra normalizada: `#ABC`, sem cerquilha e com espaço viram `#aabbcc`", () => {
+    for (const bruto of ["#AABBCC", "aabbcc", " #aabbcc "]) {
+      expect(normalizado({ acao: "definir_cor", tag: "vip", cor: bruto }).cor).toBe("#aabbcc");
+    }
+    // Forma curta também: a leitura precisa tolerar o que já estiver gravado à
+    // mão em `settings.tags`, e é a MESMA função que normaliza os dois lados.
+    expect(normalizado({ acao: "definir_cor", tag: "vip", cor: "#f0a" }).cor).toBe("#ff00aa");
+  });
+
+  it("cor malformada é cor_invalida — nome, 5 dígitos, caractere fora de hex", () => {
+    for (const ruim of ["verde", "#12345", "#zzzzzz", "rgb(0,0,0)", "#0091ff;"]) {
+      expect(recusa({ acao: "definir_cor", tag: "vip", cor: ruim }), ruim).toBe("cor_invalida");
+    }
+  });
+
+  it("definir_cor não renomeia: destino junto é destino_invalido_para_acao", () => {
+    // Aceitar um destino aqui faria a tela prometer duas coisas e a função fazer
+    // uma — e o nome entraria no vocabulário pela porta da cor.
+    expect(recusa({ acao: "definir_cor", tag: "vip", destino: "VIP", cor: "#0091ff" })).toBe(
+      "destino_invalido_para_acao",
+    );
+  });
+
+  it("as ações que falam de NOME recusam cor junto (cor_invalida_para_acao)", () => {
+    // Ignorar em silêncio deixaria a tela acreditar que mandou cor na renomeação.
+    for (const acao of ["renomear", "juntar", "excluir"]) {
+      expect(
+        recusa({ acao, tag: "vip", destino: acao === "excluir" ? undefined : "VIP", cor: "#0091ff" }),
+        acao,
+      ).toBe("cor_invalida_para_acao");
+    }
+  });
+
+  it("a ação nova não abriu a porta para as ações inexistentes", () => {
+    expect(recusa({ acao: "definir_corzinha", tag: "vip", cor: "#0091ff" })).toBe("acao_invalida");
+  });
+});

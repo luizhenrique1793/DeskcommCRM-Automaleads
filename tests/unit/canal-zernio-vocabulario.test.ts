@@ -37,6 +37,7 @@ describe("capabilities do canal intermediado", () => {
       canSaveContact: false,
       canShowTyping: false,
       canSendButtons: false,
+      alteraMensagemEnviada: false,
     });
   });
 
@@ -66,9 +67,9 @@ describe("capabilities do canal intermediado", () => {
 
 describe("identificador da sessão", () => {
   it("resolve pelo id do INTERMEDIÁRIO, não pelo da Meta", () => {
-    expect(
-      resolveSessionRef({ provider: ZERNIO as "zernio", zernio_account_id: "acc_123" }),
-    ).toBe("acc_123");
+    expect(resolveSessionRef({ provider: ZERNIO as "zernio", zernio_account_id: "acc_123" })).toBe(
+      "acc_123",
+    );
   });
 
   it("a coluna entra no select — sem ela o ref volta indefinido em runtime", () => {
@@ -77,9 +78,7 @@ describe("identificador da sessão", () => {
 
   it("cada canal resolve pela SUA coluna — nenhum cai na do outro", () => {
     expect(resolveSessionRef({ provider: "waha", waha_session_name: "s1" })).toBe("s1");
-    expect(
-      resolveSessionRef({ provider: "meta_cloud", meta_phone_number_id: "pn1" }),
-    ).toBe("pn1");
+    expect(resolveSessionRef({ provider: "meta_cloud", meta_phone_number_id: "pn1" })).toBe("pn1");
   });
 });
 
@@ -126,21 +125,23 @@ describe("o envelope carrega a thread do provider", () => {
     expect(convSelect, "falta a coluna no select da conversa").toContain(
       "provider_conversation_id",
     );
-    // QUATRO desde que o cartão de contato passou a sair pelo canal: texto,
-    // mídia, modelo e contato. O número é conferido, e não `>= 1`, justamente
-    // para obrigar quem acrescenta um call site novo a DECIDIR se ele também
-    // carrega a thread — foi assim que este caso pegou a rama de modelo, que a
-    // princípio não precisaria dela mas precisa quando o provider reaproveita a
-    // conversa existente, e foi assim que ele pegou a de contato agora.
+    // CINCO desde que o envio por media_url (documento/imagem externa — achado
+    // ao investigar o PDF de proposta que saía sem anexo) ganhou call site
+    // próprio: texto, mídia (storage-first), modelo, contato e media_url. O
+    // número é conferido, e não `>= 1`, justamente para obrigar quem acrescenta
+    // um call site novo a DECIDIR se ele também carrega a thread — foi assim
+    // que este caso pegou a rama de modelo, que a princípio não precisaria
+    // dela mas precisa quando o provider reaproveita a conversa existente, e
+    // foi assim que ele pegou a de contato e agora a de media_url.
     //
-    // A resposta para o cartão de contato é a mesma das outras três: o canal
-    // oficial endereça por thread própria, e um cartão enviado sem ela abriria
-    // conversa nova em vez de continuar a que está aberta.
+    // A resposta é a mesma das outras: o canal oficial endereça por thread
+    // própria, e um envio sem ela abriria conversa nova em vez de continuar a
+    // que está aberta.
     const passagens = [...fonte.matchAll(/providerConversationId:\s*c\.provider_conversation_id/g)];
     expect(
       passagens.length,
-      "todos os call sites (texto, mídia, modelo e contato) precisam passar",
-    ).toBe(4);
+      "todos os call sites (texto, mídia, modelo, contato e media_url) precisam passar",
+    ).toBe(5);
   });
 });
 
@@ -154,7 +155,9 @@ describe("banco e TypeScript falam o mesmo vocabulário", () => {
   });
 
   it("o CHECK de ref exige a coluna do canal novo", () => {
-    expect(baseline).toMatch(/provider = 'zernio'\s+and zernio_account_id\s+is not null/);
+    expect(baseline).toMatch(
+      /provider (?:= 'zernio'|in \('zernio', 'zernio_social'\))\s+and zernio_account_id\s+is not null/,
+    );
   });
 
   it("os CHECKs são RECRIADOS, não protegidos por duplicate_object", () => {
@@ -167,7 +170,7 @@ describe("banco e TypeScript falam o mesmo vocabulário", () => {
 
   it("a coluna nasce antes do CHECK que a referencia", () => {
     const col = baseline.indexOf("add column if not exists zernio_account_id");
-    const check = baseline.indexOf("provider = 'zernio'");
+    const check = baseline.search(/provider (?:= 'zernio'|in \('zernio', 'zernio_social'\))/);
     expect(col).toBeGreaterThan(-1);
     expect(col).toBeLessThan(check);
   });

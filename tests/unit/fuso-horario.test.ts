@@ -25,8 +25,9 @@ import { describe, expect, it } from "vitest";
  * A LISTA impede o erro de digitação, que é a origem. A CHECAGEM defende a API,
  * que aceita qualquer cliente e não passa pela tela.
  */
+import { DICIONARIO } from "@/lib/i18n/dicionario";
 import { availabilityScheduleSchema } from "@/lib/schemas/routing";
-import { FUSOS_OFERECIDOS, fusoValido } from "@/lib/tempo/fusos";
+import { FUSOS_OFERECIDOS, FUSO_PADRAO, fusoValido } from "@/lib/tempo/fusos";
 
 describe("a checagem do fuso", () => {
   it("aceita o que o runtime sabe usar", () => {
@@ -104,5 +105,43 @@ describe("as telas OFERECEM em vez de pedir para digitar", () => {
   it("e a agenda do atendente", () => {
     const fonte = readFileSync("app/app/team/_components/AttendantsClient.tsx", "utf8");
     expect(fonte).toMatch(/FUSOS_OFERECIDOS\.map/);
+  });
+});
+
+describe("os fusos OFERECIDOS — a lista, não o padrão", () => {
+  /**
+   * ⚠️ MESMO MOTIVO DO CASO DE MOEDA: acrescentar Luanda à lista não
+   * quebrava teste nenhum. Medido tirando a linha de volta:
+   * `fuso-horario.test.ts` seguia 11/11 e o `tsc` saía zerado. Sem este
+   * caso, a oferta some numa refatoração e ninguém percebe.
+   */
+  it("oferece Luanda, e a tela da empresa também", () => {
+    expect(FUSOS_OFERECIDOS.map((f) => f.codigo)).toContain("Africa/Luanda");
+    // A tela da empresa não escreve mais a lista à mão: ela é `FUSOS_OFERECIDOS`.
+    const formulario = readFileSync("app/app/settings/tenant/_form.tsx", "utf8");
+    expect(formulario).toContain("FUSOS_OFERECIDOS.map(");
+  });
+
+  // As telas da empresa e do perfil tinham listas escritas à mão — e Lisboa
+  // faltava nas três fontes enquanto o assistente de boas-vindas já a
+  // oferecia. Hoje as duas leem `FUSOS_OFERECIDOS`; a regra de uma lista só
+  // mora em `tests/unit/fusos-uma-lista-so.test.ts`.
+  it("oferece Lisboa, e as telas da empresa e do perfil leem a mesma lista", () => {
+    expect(FUSOS_OFERECIDOS.map((f) => f.codigo)).toContain("Europe/Lisbon");
+    for (const arquivo of ["app/app/settings/tenant/_form.tsx", "app/app/settings/profile/_form.tsx"]) {
+      expect(readFileSync(arquivo, "utf8"), arquivo).toContain("FUSOS_OFERECIDOS.map(");
+    }
+  });
+
+  // O painel anti-banimento passa o rótulo por `t(f.rotulo)` — chave dinâmica,
+  // que a varredura de `t("...")` literal não enxerga. Luanda entrou sem
+  // tradução e ninguém viu; este caso reprova o próximo rótulo sem entrada.
+  it("todo rótulo oferecido tem entrada no dicionário", () => {
+    const semEntrada = FUSOS_OFERECIDOS.filter((f) => !DICIONARIO[f.rotulo]?.es).map((f) => f.rotulo);
+    expect(semEntrada).toEqual([]);
+  });
+
+  it("e o padrão de quem não escolheu segue sendo São Paulo", () => {
+    expect(FUSO_PADRAO).toBe("America/Sao_Paulo");
   });
 });

@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import type { BranchableNode } from './graph-schema';
 import {
   NODE_TYPES,
   waitConfigSchema,
@@ -6,6 +7,8 @@ import {
   matchReplyConfigSchema,
   actionConfigSchema,
   conditionConfigSchema,
+  collectConfigSchema,
+  skillConfigSchema,
   endConfigSchema,
   flowNodeSchema,
   flowEdgeSchema,
@@ -32,7 +35,13 @@ describe('graph-schema', () => {
         'ai_classify',
         'match_reply',
         'repeat',
+        'collect',
+        'skill',
         'action',
+        'internal_task',
+        // #2065 — dois tipos de ação que não falam com o cliente.
+        'move_lead',
+        'edit_lead_tag',
         'end',
       ]);
     });
@@ -475,6 +484,149 @@ describe('graph-schema', () => {
         extra_key: 'should reject',
       });
       expect(result.success).toBe(false);
+    });
+
+    describe('ao_finalizar (ação ao concluir o fluxo de atendimento)', () => {
+      it('é opcional — grafos antigos continuam válidos', () => {
+        const result = endConfigSchema.safeParse({ outcome: 'converted' });
+        expect(result.success).toBe(true);
+        if (result.success) expect(result.data.ao_finalizar).toBeUndefined();
+      });
+
+      it('aceita skill com nome', () => {
+        const result = endConfigSchema.safeParse({
+          outcome: 'converted',
+          ao_finalizar: { tipo: 'skill', skill_name: 'fechamento-pagamento' },
+        });
+        expect(result.success).toBe(true);
+      });
+
+      it('aceita ia com orientação', () => {
+        const result = endConfigSchema.safeParse({
+          outcome: 'exhausted',
+          ao_finalizar: { tipo: 'ia', prompt: 'retome o assunto da troca' },
+        });
+        expect(result.success).toBe(true);
+      });
+
+      it('recusa skill sem nome', () => {
+        const result = endConfigSchema.safeParse({
+          outcome: 'converted',
+          ao_finalizar: { tipo: 'skill' },
+        });
+        expect(result.success).toBe(false);
+      });
+
+      it('aceita encadear o próximo fluxo (id do pointer)', () => {
+        const result = endConfigSchema.safeParse({
+          outcome: 'converted',
+          ao_finalizar: { tipo: 'proximo_fluxo', fluxo: 'a5a3f7c2-0000-4000-8000-000000000000' },
+        });
+        expect(result.success).toBe(true);
+      });
+
+      it('recusa proximo_fluxo sem o id do fluxo', () => {
+        const result = endConfigSchema.safeParse({
+          outcome: 'converted',
+          ao_finalizar: { tipo: 'proximo_fluxo' },
+        });
+        expect(result.success).toBe(false);
+      });
+    });
+  });
+
+  describe('collectConfigSchema (pergunta do fluxo de atendimento)', () => {
+    it('aceita uma pergunta mínima e aplica os defaults', () => {
+      const result = collectConfigSchema.safeParse({ key: 'cidade', label: 'Cidade' });
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.type).toBe('text');
+        expect(result.data.required).toBe(true);
+        expect(result.data.permite_correcao).toBe(true);
+      }
+    });
+
+    it('recusa chave com maiúscula (o CHECK do banco é minúsculo)', () => {
+      const result = collectConfigSchema.safeParse({ key: 'Cidade', label: 'Cidade' });
+      expect(result.success).toBe(false);
+    });
+
+    it('tipo select exige opções', () => {
+      expect(collectConfigSchema.safeParse({ key: 'cor', label: 'Cor', type: 'select' }).success).toBe(false);
+      expect(
+        collectConfigSchema.safeParse({ key: 'cor', label: 'Cor', type: 'select', options: ['Azul'] }).success,
+      ).toBe(true);
+    });
+  });
+
+  describe('skillConfigSchema', () => {
+    it('aceita o nome de uma skill', () => {
+      expect(skillConfigSchema.safeParse({ skill_name: 'catalogo-apresentacao' }).success).toBe(true);
+    });
+
+    it('recusa nome vazio', () => {
+      expect(skillConfigSchema.safeParse({ skill_name: '' }).success).toBe(false);
+    });
+  });
+
+  describe('flowGraphSchema integridade (superRefine do original)', () => {
+    const no = (id: string, type: 'trigger' | 'end') => ({
+      id,
+      type,
+      label: id,
+      position: { x: 0, y: 0 },
+      config: type === 'end' ? { outcome: 'converted' } : {},
+    });
+
+    it('recusa aresta apontando para nó inexistente', () => {
+      const r = flowGraphSchema.safeParse({
+        nodes: [no('t', 'trigger'), no('e', 'end')],
+        edges: [{ id: 'a', source: 't', target: 'fantasma', condition: { type: 'always' } }],
+      });
+      expect(r.success).toBe(false);
+    });
+
+    it('recusa id de nó repetido', () => {
+      const r = flowGraphSchema.safeParse({
+        nodes: [no('t', 'trigger'), no('t', 'end')],
+        edges: [],
+      });
+      expect(r.success).toBe(false);
+    });
+
+    it('aceita um grafo íntegro', () => {
+      const r = flowGraphSchema.safeParse({
+        nodes: [no('t', 'trigger'), no('e', 'end')],
+        edges: [{ id: 'a', source: 't', target: 'e', condition: { type: 'always' } }],
+      });
+      expect(r.success).toBe(true);
+    });
+  });
+
+  describe('flowGraphSchema.settings (configurações do fluxo)', () => {    const grafoMinimo = (settings?: unknown) => ({
+      nodes: [
+        { id: 't', type: 'trigger', label: 'Início', position: { x: 0, y: 0 }, config: {} },
+        { id: 'e', type: 'end', label: 'Fim', position: { x: 0, y: 0 }, config: { outcome: 'converted' } },
+      ],
+      edges: [],
+      ...(settings === undefined ? {} : { settings }),
+    });
+
+    it('é opcional — grafo antigo continua válido', () => {
+      const r = flowGraphSchema.safeParse(grafoMinimo());
+      expect(r.success).toBe(true);
+      if (r.success) expect(r.data.settings).toBeUndefined();
+    });
+
+    it('aplica o default de tentativas', () => {
+      const r = flowGraphSchema.safeParse(grafoMinimo({}));
+      expect(r.success).toBe(true);
+      if (r.success) expect(r.data.settings?.max_tentativas_pergunta).toBe(3);
+    });
+
+    it('recusa tentativas fora da faixa', () => {
+      expect(flowGraphSchema.safeParse(grafoMinimo({ max_tentativas_pergunta: 0 })).success).toBe(false);
+      expect(flowGraphSchema.safeParse(grafoMinimo({ max_tentativas_pergunta: 11 })).success).toBe(false);
     });
   });
 
@@ -1167,7 +1319,7 @@ describe('graph-schema', () => {
           kind: 'match',
           condition: { type: 'class_match', value: 'no_reply' },
         },
-        { id: FALLBACK_BRANCH_ID, label: 'Sempre', check: null, kind: 'fallback', condition: { type: 'always' } },
+        { id: FALLBACK_BRANCH_ID, label: 'Outros casos', check: null, kind: 'fallback', condition: { type: 'always' } },
       ]);
     });
 
@@ -1188,7 +1340,7 @@ describe('graph-schema', () => {
           kind: 'match',
           condition: { type: 'cond_result', value: false },
         },
-        { id: FALLBACK_BRANCH_ID, label: 'Sempre', check: null, kind: 'fallback', condition: { type: 'always' } },
+        { id: FALLBACK_BRANCH_ID, label: 'Outros casos', check: null, kind: 'fallback', condition: { type: 'always' } },
       ]);
     });
 
@@ -1200,6 +1352,38 @@ describe('graph-schema', () => {
         expect(branchId, `edge ${edge.id} lost its branch`).not.toBeNull();
         expect(conditionForBranch(byId.get(edge.source)!, branchId!)).toStrictEqual(edge.condition);
       }
+    });
+
+    it('a saída de escape se chama "Outros casos" em TODO nó que tem outras saídas', () => {
+      // "Sempre" ali afirmava que o lead sai por essa aresta além das outras. O
+      // motor só a usa quando nenhuma outra serve (`selectEdge`), e nunca manda
+      // por duas. Em nó de saída única "Sempre" continua verdade — é o caso de
+      // baixo. No modo uma-saída-por-regra o nome é "Nenhuma delas".
+      const ramificados: BranchableNode[] = [
+        { type: 'condition', config: { combinator: 'and', checks: [{ field: 'tag', op: 'eq', value: 'vip' }] } },
+        { type: 'ai_classify', config: { classes: ['Interessado'], grace_timeout_ms: 900_000, target: 'last_reply' } },
+        {
+          type: 'match_reply',
+          config: { branches: [{ id: 'br_sim', label: 'Sim', op: 'eq', pattern: 'sim' }], grace_timeout_ms: 900_000 },
+        },
+        { type: 'repeat', config: { max_count: 12 } },
+      ];
+      for (const node of ramificados) {
+        const branches = nodeBranches(node);
+        expect(branches.length, `${node.type} devia ter mais de uma saída`).toBeGreaterThan(1);
+        const escape = branches.find((b) => b.kind === 'fallback')!;
+        expect(escape.label, `escape do ${node.type}`).toBe('Outros casos');
+      }
+
+      const porRegra = nodeBranches({
+        type: 'condition',
+        config: {
+          combinator: 'and',
+          branching: 'per_check',
+          checks: [{ id: 'regra-1', field: 'tag', op: 'eq', value: 'vip' }],
+        },
+      });
+      expect(porRegra.find((b) => b.kind === 'fallback')!.label).toBe('Nenhuma delas');
     });
 
     it('leaves a node with a single output with exactly one branch: the fallback', () => {

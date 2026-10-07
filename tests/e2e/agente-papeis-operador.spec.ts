@@ -21,7 +21,7 @@
  */
 import { execFileSync } from "node:child_process";
 
-import { test, expect, type Browser, type Page } from "@playwright/test";
+import { test, expect, type Browser, type Page } from "./helpers/test";
 
 import { loginComoAdmin, lerCreds, type CredsE2E } from "./helpers/login-admin";
 
@@ -140,16 +140,49 @@ test.describe("A aba do papel que organiza o sistema", () => {
     const itens = painel.locator('[data-testid^="item-conferencia-"]');
     await expect(itens).toHaveCount([...CONFERENCIAS_DE_SAIDA, CONFERENCIA_DE_ENTRADA].length);
 
-    // EXATAMENTE DOIS interruptores — um por camada que custa dinheiro. Este caso
-    // já afirmou ZERO, e a mudança é deliberada: enquanto o motor lia só o `.env`,
-    // um controle aqui seria a tela gravando o que o código ignora. Depois que a
-    // 0142 criou a escolha por organização e os três pontos de consumo passaram a
-    // lê-la, o interruptor deixou de ser decorativo.
+    // Um interruptor de CONFERÊNCIA por item que tem ESCOLHA na lista — e só
+    // esses. O número também é DERIVADO: era o literal `2` (as duas camadas que
+    // consultam modelo e custam por mensagem), e o #2321 (@hampikamayuq) trouxe
+    // a terceira escolha legítima, a afirmação clínica, que não custa nada e vem
+    // DESLIGADA — ligar acrescenta proteção, não tira. O literal reprovou no
+    // e2e, noutro job, como o `12` dos itens já tinha reprovado (#420).
     //
-    // As outras nove seguem sem controle, e é isso que a contagem exata guarda:
-    // um switch a mais aqui é alguém oferecendo desligar o que protege o número
-    // do cliente.
-    await expect(painel.locator('[role="switch"]')).toHaveCount(2);
+    // A guarda que o literal fazia continua, agora na lista: um item com
+    // `escolha: null` é o que "não se desliga", e a tela não pode desenhar
+    // interruptor nele. E as camadas PAGAS seguem sendo exatamente as que se
+    // declaram `consultaModelo` — quem quiser oferecer desligar uma proteção
+    // fixa tem de mudar a lista, à vista, em vez de só o número daqui.
+    const comEscolha = [...CONFERENCIAS_DE_SAIDA, CONFERENCIA_DE_ENTRADA].filter((c) => c.escolha !== null);
+    expect(
+      comEscolha.filter((c) => c.escolha?.consultaModelo).length,
+      "as camadas pagas (que consultam modelo) continuam sendo duas",
+    ).toBe(2);
+    await expect(painel.locator('[data-testid^="conferencia-"][role="switch"]')).toHaveCount(comEscolha.length);
+
+    // E a contagem TOTAL continua cercada, por categoria em vez de por número.
+    // Ancorar só nas conferências abriria a porta que este caso existe para
+    // fechar: um interruptor solto no painel, de categoria nenhuma, passaria
+    // despercebido. Então todo `role="switch"` do painel tem de ser OU uma
+    // conferência OU morar num cartão que se declara — e cartão novo entra aqui,
+    // conscientemente, em vez de o número virar 3 sem ninguém olhar.
+    //
+    // O `ajustes-de-estilo` é troca determinística de pontuação, sem chamada de
+    // modelo: não é camada paga, e por isso não entra na contagem acima.
+    const CARTOES_DECLARADOS = ["ajustes-de-estilo"];
+    const soltos = await painel.evaluate(
+      (el, cartoes) =>
+        Array.from(el.querySelectorAll('[role="switch"]'))
+          // O rótulo é do PRÓPRIO interruptor, nunca de um ancestral: a primeira
+          // versão desta linha perguntava pelo `closest`, e aí um interruptor
+          // embrulhado num cartão `conferencia-*` sem carregar o rótulo escapava
+          // das DUAS asserções — nem contava como conferência, nem aparecia como
+          // solto. Medido em bancada antes de entrar.
+          .filter((s) => !s.getAttribute("data-testid")?.startsWith("conferencia-"))
+          .filter((s) => !cartoes.some((c) => s.closest(`[data-testid="${c}"]`)))
+          .map((s) => s.getAttribute("data-testid") ?? s.outerHTML.slice(0, 80)),
+      CARTOES_DECLARADOS,
+    );
+    expect(soltos, "interruptor no painel de segurança sem categoria declarada").toEqual([]);
   });
 
   test("desligado, a tela diz o que CONTINUA acontecendo — não só o que para", async () => {

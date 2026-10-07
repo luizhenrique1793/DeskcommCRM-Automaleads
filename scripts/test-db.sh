@@ -13,6 +13,29 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# ⛔ O `vitest` TEM DE EXISTIR, e a conferência vem ANTES de subir o container.
+#
+# Medido em 2026-09-20: rodar `bash scripts/test-db.sh <arquivo>` (em vez de
+# `pnpm test:db <arquivo>`) sai com **exit 127** e um log que parece sucesso — o
+# container sobe, o baseline aplica em install E update, a saída enche de ✓, e a
+# única linha vermelha é `vitest: comando não encontrado`, perdida no meio.
+# Quem olha o rodapé não acha `Tests N failed` porque a suíte NUNCA RODOU: o
+# instrumento faltou, e a ausência dele se parece com "rodou e passou".
+#
+# É a mesma classe de "instrumento quebrado devolve zero". O `pnpm` põe
+# `node_modules/.bin` no PATH; um `bash` direto não. A guarda não conserta o
+# caminho de propósito — ela RECUSA, dizendo qual comando usar, porque adivinhar
+# o gerenciador de pacotes de quem chamou seria outro palpite.
+#
+# Antes do container: a recusa custa milissegundos em vez de um ciclo inteiro de
+# subida e teardown.
+if ! command -v vitest >/dev/null 2>&1; then
+  echo "ERRO: \`vitest\` não está no PATH — a suíte de invariantes não rodaria." >&2
+  echo "      Use \`pnpm test:db\` (ele põe node_modules/.bin no PATH)." >&2
+  echo "      Você chamou: $0 $*" >&2
+  exit 1
+fi
 BASELINE="$ROOT/supabase/baseline.sql"
 # A PORTA: quem PEDE escolhe; quem não pede deixa o Docker escolher.
 #
@@ -446,6 +469,15 @@ echo "    ✓ molde de aplicação única: $TEMPLATE_UMA_APLICACAO"
 echo "==> modo UPDATE: re-aplicando baseline.sql COM ON_ERROR_STOP=1 (idempotência de verdade)"
 aplicar_baseline
 echo "    ✓ update ok (zero erro na re-aplicação)"
+
+# A conferência de isolamento do KIT, contra o banco que acabou de receber o
+# baseline — a do update.sh deste checkout, a da última release publicada (é a que
+# roda do disco de quem atualiza) e a da v1.63.0, última sem filtro por tabela.
+# Por que essas três: cabeçalho de scripts/conferir-isolamento-do-kit.sh. Sem
+# este passo o #1578 passou pelos cinco checks e travou toda atualização da
+# v1.61.0 à v1.63.0 (issue #1909).
+echo "==> conferência de isolamento do update.sh (checkout, última release, v1.63.0)"
+bash "$ROOT/scripts/conferir-isolamento-do-kit.sh" "$CONTAINER" "$TEMPLATE"
 
 echo "==> banco \`postgres\` a partir do molde (o setupFile o recria a cada arquivo)"
 # Criar aqui, ALÉM do reset por arquivo, tem dois motivos medidos:

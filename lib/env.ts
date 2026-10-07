@@ -69,11 +69,36 @@ const schema = z.object({
   NEXT_PUBLIC_SUPABASE_URL: requiredAlways("NEXT_PUBLIC_SUPABASE_URL").url(),
   NEXT_PUBLIC_SUPABASE_ANON_KEY: requiredAlways("NEXT_PUBLIC_SUPABASE_ANON_KEY"),
   SUPABASE_SERVICE_ROLE_KEY: requiredAlways("SUPABASE_SERVICE_ROLE_KEY"),
+  /**
+   * Endereço do Supabase PARA O SERVIDOR, e só para ele (issue #1082).
+   *
+   * Numa instalação com o Supabase na mesma rede (Kong/self-host, `http://kong:8000`),
+   * o caminho curto existe e não precisa sair para a internet — mas colocá-lo na
+   * `NEXT_PUBLIC_*` o publicaria para o navegador. Esta variável é a bifurcação:
+   * preenchida, o servidor fala com o endereço interno; vazia, vale a pública, e
+   * é o que toda instalação existente já faz.
+   *
+   * `z.string()` cru, NUNCA `.url()` e NUNCA `required()`, pelo motivo escrito ao
+   * lado de `APP_ACCENT_HEX` e `SIGNUP_MODE` mais abaixo: `lib/env.ts` lança na
+   * IMPORTAÇÃO do módulo, que no Next é a primeira requisição, e o healthcheck do
+   * contêiner é probe TCP — um `.url()` aqui transformaria um `.env` com espaço
+   * sobrando no derrubador do produto inteiro, com o Docker mostrando `healthy` e
+   * 100% das requisições em 500. Quem interpreta (recusa o que não é endereço,
+   * tira barra final e avisa) é `urlDoSupabaseNoServidor`, em
+   * `lib/supabase/url-do-servidor.ts`.
+   */
+  SUPABASE_SERVER_URL: z.string().optional().default(""),
 
   // Cron / interno
   INTERNAL_SECRET: required("INTERNAL_SECRET"),
   /** Optional dedicated secret for cron endpoints (S-06.07 onwards). */
   INTERNAL_CRON_SECRET: z.string().optional().default(""),
+  /**
+   * Segredo do DONO DA INSTALAÇÃO para `POST /api/v1/tenants/provision` (um
+   * sistema externo cria organizações). Vazio por padrão = a rota não existe
+   * (404); com menos de 32 caracteres também fica desligada.
+   */
+  TENANT_PROVISIONING_SECRET: z.string().optional().default(""),
 
   // Laboratório local de extensões: origem HTTP exata em 127.0.0.1. O cliente
   // recusa a exceção se a URL do app não for loopback. Vazio mantém HTTPS público.
@@ -129,10 +154,13 @@ const schema = z.object({
   // instaláveis (import/install) usam `pg` cru (mesmo pool do agent-engine).
   SUPABASE_DB_URL: required("SUPABASE_DB_URL"),
   /**
-   * A conexão de DDL do KIT (install.sh/update.sh/backup.sh), não do app —
-   * declarada aqui só porque o `docker-compose.prod.yml` entrega o `.env`
-   * inteiro ao app e ao worker (`env_file`), e uma chave que chega ao processo
-   * merece estar no contrato em vez de ser um desconhecido tolerado.
+   * A conexão de DDL do KIT (install.sh/update.sh/backup.sh), não do app.
+   * O `docker-compose.prod.yml` entrega o `.env` inteiro ao app, ao worker e
+   * ao voice-agent (`env_file`), e desde o #1680 sobrescreve esta chave com
+   * vazio no `environment:` deles — no processo ela chega vazia. A declaração
+   * fica porque quem roda fora desse compose (dev local, `next start` à mão)
+   * ainda a recebe do `.env`, e uma chave que chega ao processo merece estar no
+   * contrato em vez de ser um desconhecido tolerado.
    *
    * NENHUM código de app pode lê-la: ela é o DONO do banco quando a instalação
    * é num Supabase próprio, e `SUPABASE_DB_URL` é a role menor de propósito
@@ -149,10 +177,12 @@ const schema = z.object({
   // declarava aqui, então nunca teve como verificar nada.
   WAHA_HMAC_SECRET: z.string().optional().default(""),
   // "true" exige assinatura válida em todo webhook do WAHA. Fica desligado por
-  // padrão porque o WAHA Core não assina (medido: 2026.7.2 CORE manda os
-  // eventos sem header mesmo com WHATSAPP_HOOK_HMAC configurado), e exigir
-  // derrubaria a ingestão de mensagens. Ligue se usa WAHA Plus ou um proxy que
-  // assine — aí a verificação passa a ser obrigatória.
+  // padrão porque sem a variável certa o WAHA não assina (medido: 2026.7.2
+  // mandava os eventos sem header porque o compose entregava WHATSAPP_HOOK_HMAC,
+  // nome que não existe na doc dele — o certo é WHATSAPP_HOOK_HMAC_KEY), e exigir
+  // derrubaria a ingestão de mensagens. Ligue quando o WAHA estiver assinando
+  // (WHATSAPP_HOOK_HMAC_KEY no compose) ou houver um proxy que assine — aí a
+  // verificação passa a ser obrigatória.
   WAHA_WEBHOOK_REQUIRE_SIGNATURE: z.string().optional().default("false"),
 
   // ─── Chamada de voz WhatsApp (WaCalls, spec 18) ───
@@ -169,6 +199,13 @@ const schema = z.object({
   // server-to-server não tem cookie. URL sem token dá um cliente que constrói e
   // devolve 401 em toda chamada — por isso `getWacallsClient()` exige os dois.
   WACALLS_API_TOKEN: z.string().optional().default(""),
+
+  // ─── Canal Datafy (recorte do #1130) — OPCIONAL, DESLIGADO POR PADRÃO ───
+  //
+  // Só `true` liga (decisão do dono, doc 54). Vazio = a instalação não oferece o
+  // canal: sem aba em Conexões, rota de conexão 404, webhook recusado. Quem lê
+  // é `canalGraphParceiroLigado()` em `lib/channels/graph-parceiro/credentials.ts`.
+  DATAFY_ENABLED: z.string().optional().default(""),
 
   // Upstash Redis
   UPSTASH_REDIS_REST_URL: required("UPSTASH_REDIS_REST_URL"),
@@ -193,6 +230,10 @@ const schema = z.object({
   VERCEL_AI_GATEWAY_URL: z.string().optional().default(""),
   ANTHROPIC_API_KEY: z.string().optional().default(""),
   OPENAI_API_KEY: z.string().optional().default(""),
+  // Esforço de raciocínio dos modelos da OpenAI (o*, gpt-5*, gpt-6*). `z.string()`
+  // e NUNCA `z.enum` (motivo mais abaixo, em AGENT_DISPATCH_CONSUMER): quem valida
+  // a grafia é o boot do worker, em `lib/agent-engine/env.ts`.
+  OPENAI_REASONING_EFFORT: z.string().optional().default(""),
   // Transcrição de áudio num serviço COMPATÍVEL com o da OpenAI (Groq, um
   // Whisper próprio): a chave vale só para `/audio/transcriptions` — a conversa
   // com o cliente e a leitura de imagem continuam no provedor do ponto.
@@ -202,6 +243,25 @@ const schema = z.object({
   TRANSCRIPTION_API_KEY: z.string().optional().default(""),
   TRANSCRIPTION_BASE_URL: z.string().optional().default(""),
   TRANSCRIPTION_MODEL: z.string().optional().default(""),
+  // Idiomas esperados no áudio, ISO-639-1 separados por vírgula ("es" ou
+  // "pt,es"). Vazio = o serviço detecta sozinho. Vale com a chave acima E com a
+  // da OpenAI da organização — assim como `TRANSCRIPTION_MODEL`. Leitura
+  // tolerante em `idiomasDaTranscricao` (grafia errada não derruba o worker).
+  TRANSCRIPTION_LANGUAGES: z.string().optional().default(""),
+  // Endereço da API do Jev (TypeSafe AI). Vazio é ausente: vale
+  // https://api.typesafe.ai. Existe para o dublê do e2e — a CHAVE nunca vem
+  // daqui, é por organização (BYOK). Quem lê é `baseDaApiDoJev()`, em
+  // lib/ai/decisao/cliente.ts.
+  JEV_API_BASE_URL: z.string().optional().default(""),
+  // Destinos internos que o DONO DA INSTALAÇÃO autoriza (decisão 22-d, #1004):
+  // IPv4 e faixas CIDR IPv4 que a saída pode alcançar mesmo sendo rede interna,
+  // e só para destinos que a própria INSTALAÇÃO configura (nunca o endereço que
+  // uma organização escolhe). O BANCO ESTÁ ACIMA DISTO: a lista vive em
+  // `platform_settings.internal_destinations`, editada em
+  // `/admin/destinos-internos`; esta variável é só o PISO, que vale enquanto a
+  // tela nunca foi usada. Vazio é ausente: sem ela, nada passa. Quem lê é
+  // `lib/automation/destinos-internos-autorizados.ts`.
+  IA_DESTINOS_INTERNOS_PERMITIDOS: z.string().optional().default(""),
 
   // Fusão (Fase 4): DONO ÚNICO dos eventos ai_agent.dispatch_requested.
   // 'engine' (default) = o worker agent-engine é o único consumidor (o cron
@@ -230,6 +290,19 @@ const schema = z.object({
    * Mesmo raciocínio de APP_ACCENT_HEX, algumas linhas abaixo.
    */
   AI_BUDGET_ENFORCEMENT: z.string().optional().default("on"),
+
+  // As duas chaves do MOTOR que também são comportamento da INSTALAÇÃO (issue
+  // #1034): o modo do portão de disclosure do atendimento e a camada semântica
+  // de promessa. Existem em `lib/agent-engine/env.ts` (é lá que o worker as
+  // lê); entram aqui para a tela de admin poder mostrar o PISO que o `.env`
+  // desta instalação declara, em vez de supor o default do produto.
+  //
+  // `z.string()` cru e NUNCA `z.enum`, pelo mesmo motivo da linha acima: um
+  // `z.enum` que lança no import derruba o processo, e derrubar o processo é o
+  // oposto do que um kill switch faz. Quem normaliza é o leitor de cada um:
+  // `pisoDaInstalacao()`, em lib/instalacao/comportamento-servidor.ts.
+  DISCLOSURE_MODE: z.string().optional(),
+  PROMISE_SEMANTIC_ENABLED: z.string().optional(),
 
   // `EVENT_LOG_WORKER_ENABLED` viveu aqui até 2026-08-25 e NUNCA teve leitor: o
   // campo era declarado, documentado no `.env.example` com `false` e lido por
@@ -273,6 +346,26 @@ const schema = z.object({
   RESEND_FROM_EMAIL: z.string().optional().default(""),
 
   /**
+   * SMTP — o SEGUNDO transporte de e-mail, ao lado da Resend, nunca no lugar
+   * dela. Quem já roda com Resend não mexe em nada; quem instala numa VPS e não
+   * quer criar conta em serviço externo preenche estas sete e o envio sai pelo
+   * servidor dele. Qual dos dois atende cada envio é decidido em
+   * `lib/email/roteador.ts` — SMTP quando há SMTP, Resend quando não há.
+   *
+   * O banco (`platform_smtp_settings`, pela tela /admin/email) PREVALECE sobre
+   * estas variáveis; elas existem para provisionar uma VPS sem abrir interface,
+   * e são o piso de rollback. Todas `optional().default()`: `.env` antigo não
+   * quebra ao atualizar.
+   */
+  SMTP_HOST: z.string().optional().default(""),
+  SMTP_PORT: z.coerce.number().int().min(1).max(65535).optional().default(587),
+  SMTP_SECURITY: z.enum(["starttls", "tls", "none"]).optional().default("starttls"),
+  SMTP_USERNAME: z.string().optional().default(""),
+  SMTP_PASSWORD: z.string().optional().default(""),
+  SMTP_FROM_EMAIL: z.string().optional().default(""),
+  SMTP_FROM_NAME: z.string().optional().default(""),
+
+  /**
    * E-mail de suporte que a instalação mostra ao CLIENTE FINAL (tela de conta
    * suspensa, tela de cobrança).
    *
@@ -303,6 +396,60 @@ const schema = z.object({
    */
   JOB_QUEUE_RETENTION_DAYS: z.string().optional().default(""),
   AUDIT_LOG_RETENTION_DAYS: z.string().optional().default(""),
+  /**
+   * Conversa da equipe com a IA sobre um caso (migration 0281). `z.string()`
+   * pela MESMA razão das duas acima: `lib/env.ts` lança na primeira requisição
+   * e o healthcheck é TCP — um `z.coerce.number()` aqui transformaria
+   * `CASE_CHAT_RETENTION_DAYS=noventa` no derrubador do produto inteiro, com o
+   * contêiner marcado `healthy`. Quem interpreta é `lib/retencao/politica.ts`,
+   * onde lixo resolve para o lado seguro e o operador vê o aviso no log.
+   */
+  CASE_CHAT_RETENTION_DAYS: z.string().optional().default(""),
+  /**
+   * Passagem do atendimento para uma pessoa (migration 0291). `z.string()` pela
+   * MESMA razão das três acima — quem interpreta é `lib/retencao/politica.ts`,
+   * onde lixo resolve para o lado seguro e o operador vê o aviso no log, em vez
+   * de o contêiner ficar `healthy` respondendo 500 a tudo.
+   */
+  PASSAGEM_RETENTION_DAYS: z.string().optional().default(""),
+  /**
+   * Registro de entrega do aviso de caso no WhatsApp da equipe (migration
+   * 0292). `z.string()` pela MESMA razão das quatro acima — quem interpreta é
+   * `lib/retencao/politica.ts`, onde lixo resolve para o lado seguro e o
+   * operador vê o aviso no log, em vez de o contêiner ficar `healthy`
+   * respondendo 500 a tudo.
+   */
+  CASE_ALERT_RETENTION_DAYS: z.string().optional().default(""),
+  /**
+   * Candidato da prospecção nativa vencido (migration 0408, issue #1313).
+   * `z.string()` pela MESMA razão das cinco acima — quem interpreta é
+   * `lib/retencao/politica.ts`, onde lixo resolve para o lado seguro e o
+   * operador vê o aviso no log, em vez de o contêiner ficar `healthy`
+   * respondendo 500 a tudo. Padrão 365, piso 90, decisão do dono (PR #1577).
+   */
+  PROSPECCAO_RETENTION_DAYS: z.string().optional().default(""),
+  /**
+   * Observações do Jev (migration 0421): o par Jev × mecanismo de hoje que o
+   * cartão compara, sem texto de cliente. `z.string()` pela MESMA razão das
+   * irmãs acima — quem interpreta é `lib/retencao/politica.ts`. Padrão 90, piso
+   * 30 (a janela da concordância).
+   */
+  JEV_OBSERVACOES_RETENTION_DAYS: z.string().optional().default(""),
+  /**
+   * Rascunho sugerido por integração JÁ VENCIDO (`conversation_drafts`,
+   * migration 0419, issue #1686). `z.string()` pela MESMA razão das irmãs
+   * acima — quem interpreta é `lib/retencao/politica.ts`, onde lixo resolve
+   * para o lado seguro. Padrão 30, piso 7, contados do `expires_at` (a linha
+   * só responde enquanto a janela dela está aberta).
+   */
+  DRAFT_RETENTION_DAYS: z.string().optional().default(""),
+  /**
+   * Candidatos ao golden set (migration 0428, issue #1695): rótulo de near-miss
+   * e de divergência, sem texto de cliente. `z.string()` pela MESMA razão das
+   * irmãs acima — quem interpreta é `lib/retencao/politica.ts`. Padrão 90, piso
+   * 30 (a janela em que um near-miss ainda é curável).
+   */
+  GOLDEN_CANDIDATES_RETENTION_DAYS: z.string().optional().default(""),
 
   // LGPD export (S-08.04)
   LGPD_SIGNING_KEY: z.string().optional().default(""),
@@ -320,6 +467,18 @@ const schema = z.object({
   // app inteiro no dia em que alguém escrever `TRUE`.
   GOOGLE_CALENDAR_CLIENT_ID: z.string().optional().default(""),
   GOOGLE_CALENDAR_CLIENT_SECRET: z.string().optional().default(""),
+
+  // Google Ads — credencial da INSTALAÇÃO, não da organização (migration 0307).
+  // O developer token pertence a quem construiu o software, não à conta de
+  // anúncios de cada cliente: uma instalação usa o MESMO token pra reportar
+  // conversão em contas diferentes, cada uma com seu próprio refresh token
+  // (esse sim por organização, em ad_platform_connections). Sem tela de
+  // configuração ainda — env-only, como o app OAuth do Google era antes da 0201 —
+  // porque só a instalação PRECISA desta credencial existir; cada organização só
+  // precisa AUTORIZAR (OAuth), nunca ver nem digitar o developer token.
+  GOOGLE_ADS_DEVELOPER_TOKEN: z.string().optional().default(""),
+  GOOGLE_ADS_OAUTH_CLIENT_ID: z.string().optional().default(""),
+  GOOGLE_ADS_OAUTH_CLIENT_SECRET: z.string().optional().default(""),
 
   // Nuvemshop — opcional (template genérico open-source). Só exigidas quando
   // NUVEMSHOP_ENABLED=true; o runtime já degrada via getConfig()==null.
@@ -346,6 +505,26 @@ const schema = z.object({
     .string()
     .url()
     .default("http://localhost:3000"),
+  /**
+   * URL pública opcional para os webhooks da Meta (WhatsApp Cloud API / canais oficiais).
+   * Quando definida, é usada no lugar de NEXT_PUBLIC_APP_URL para compor a URL de callback
+   * dos webhooks da Meta (#1426), permitindo isolar a interface interna/VPN da URL pública.
+   */
+  META_WEBHOOK_BASE_URL: z.string().optional().default(""),
+  /**
+   * Base (host) da Graph API do canal oficial, e a do eixo de anúncio (#817).
+   *
+   * `optional().default("")` e NÃO validada como URL aqui, por dois motivos
+   * medidos. Primeiro: o valor recusável é o que fecha a fenda, e a validação
+   * deste arquivo acontece no IMPORT do Next — um `z.string().url()` reprovaria
+   * TODAS as telas, com o contêner `healthy` e nada dizendo o porquê, exatamente
+   * o modo de falha que `diasDeRetencao` (lá em cima) registra e evita. Segundo:
+   * a decisão é do MANTENEDOR, não do boot — quem escreve no `.env` de uma VPS
+   * pode trocar o binário, então o que importa é que o erro de digitação não
+   * derrube o envio, e é o que `graph-base.ts` faz (host real + aviso no log).
+   */
+  META_GRAPH_BASE_URL: z.string().optional().default(""),
+  META_ADS_GRAPH_BASE_URL: z.string().optional().default(""),
 
   // Marca da instalação (white-label) — ver lib/branding.ts.
   // Sem prefixo NEXT_PUBLIC_ de propósito: essas seriam queimadas no bundle
@@ -368,8 +547,9 @@ const schema = z.object({
   APP_ACCENT_HEX: z.string().optional().default(""),
 
   /**
-   * Com o que a instalação NASCE quanto a cadastro: `aberto` (padrão) ou
-   * `so_convite`. Vazio = `aberto`, que é como o produto sempre funcionou.
+   * Com o que a instalação NASCE quanto a cadastro: `aberto` (padrão),
+   * `com_aprovacao` ou `so_convite`. Vazio = `aberto`, que é como o produto
+   * sempre funcionou.
    *
    * O BANCO ESTÁ ACIMA DISTO. Havendo linha em `platform_settings` — o que
    * acontece assim que alguém usa a tela em `/admin/cadastro` —, é ela que
@@ -422,28 +602,40 @@ export const env = parsed.data;
 if (env.NODE_ENV === "production") {
   const vercelCron = process.env.CRON_SECRET?.trim();
   if (vercelCron) {
-    // ponytail: Vercel Cron só manda Bearer CRON_SECRET. Sem copiar, o Pro
-    // agenda e a rota responde 403. Teto: se os dois segredos precisarem ser
-    // distintos, as rotas passam a aceitar os dois numa lista — INTERNAL_SECRET
-    // continua valendo como fallback nas rotas.
+    // Agendador externo que injeta `CRON_SECRET` (é o nome de mercado) chama as
+    // rotas com `Bearer $CRON_SECRET`, e `lib/auth/cron-auth.ts` só confere o
+    // Bearer contra INTERNAL_CRON_SECRET e INTERNAL_SECRET — sem esta cópia, quem
+    // agenda por esse caminho leva 401/403 em toda rodada. O caminho oficial do
+    // produto não passa por aqui: o `crond` do serviço `scheduler` manda
+    // `Bearer $INTERNAL_SECRET` (`docker/scheduler/entrypoint.sh`). A cópia é
+    // vigiada por `tests/unit/cron-routes-scheduled.test.ts`.
     env.INTERNAL_CRON_SECRET = vercelCron;
   }
 }
 
-// Soft warning for env-gated AI keys (worker degrades gracefully but operators
-// should know when the bot is silent for config reasons).
-// `OPENROUTER_API_KEY` entra na condição porque `isAiGatewayConfigured()`
-// (lib/ai/gateway.ts) e `resolveLanguageModel` a tratam como configuração
-// VÁLIDA. Sem ela aqui, a instalação que escolhe OpenRouter — a primeira opção
-// que o `install.sh` oferece — gritava no primeiro boot que a IA ia ficar muda,
-// e ela não ia. O operador ia atrás de um problema que não existe, ou pior:
-// cadastrava uma chave da Anthropic que não precisava, só para calar o aviso.
-// O texto era verdadeiro enquanto a Anthropic era a única chave que o
-// instalador pedia; o menu novo o tornou falso.
-if (!env.AI_GATEWAY_API_KEY && !env.ANTHROPIC_API_KEY && !env.OPENROUTER_API_KEY) {
+// Este processo só conhece as chaves do AMBIENTE. As credenciais cadastradas em
+// IA › Credenciais moram no banco e são resolvidas mais tarde, no contexto da
+// organização; por isso ausência aqui nunca pode virar diagnóstico de "IA muda".
+// `OPENROUTER_API_KEY` entra na condição porque `resolveLanguageModel`
+// (lib/ai/gateway.ts) a trata como configuração válida no ambiente, assim como
+// gateway e Anthropic.
+// `OPENAI_API_KEY` entra pelo mesmo motivo, com a diferença que o aviso não
+// precisa esconder: ela atende os pontos do provedor que a ORGANIZAÇÃO escolheu
+// (é o último degrau de `resolverModeloDoPonto`, lib/ai/gateway-binding.ts).
+// Sem esta linha, uma instalação que responde pelo OpenAI lia no boot que
+// "nenhuma chave de IA" estava configurada — issue #1181.
+if (
+  !env.AI_GATEWAY_API_KEY &&
+  !env.ANTHROPIC_API_KEY &&
+  !env.OPENROUTER_API_KEY &&
+  !env.OPENAI_API_KEY
+) {
   console.warn(
-    "[env] Nenhuma chave de IA configurada (AI_GATEWAY_API_KEY, ANTHROPIC_API_KEY ou OPENROUTER_API_KEY) — " +
-      "o agente vai pular toda resposta com reason='ai_gateway_key_missing'.",
+    "[env] Nenhuma chave de IA configurada no ambiente " +
+      "(AI_GATEWAY_API_KEY, ANTHROPIC_API_KEY, OPENROUTER_API_KEY ou OPENAI_API_KEY). " +
+      "Isto não prova que o agente está sem credencial: cada organização pode ter uma chave " +
+      "cadastrada em IA › Credenciais. A falta real só é conhecida quando a resolução completa " +
+      "do turno não encontra chave em nenhum degrau.",
   );
 }
 // Este aviso ANUNCIAVA UM DESFECHO que o boot não tem como saber, e a correção

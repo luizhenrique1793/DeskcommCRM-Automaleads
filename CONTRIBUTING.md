@@ -1,5 +1,7 @@
 # Contributing — DeskcommCRM
 
+🇧🇷 Português · [🇺🇸 English](CONTRIBUTING.en.md)
+
 ## Antes de começar
 
 0. Abra o repositório no seu assistente de código (Claude Code, Codex, Cursor, OpenCode ou
@@ -57,6 +59,7 @@ Ao finalizar um epic:
    **O que o CI reprova sozinho** — rode antes de abrir o PR e não terá surpresa:
 
    ```bash
+   pnpm cercas    # ~30 s: as guardas estruturais (baseline, MANIFEST, docs, workflows, espanhol do i18n, fragmentos de .changes/) — o que mais reprova PR
    pnpm typecheck && pnpm lint && pnpm lint:channels && pnpm test:unit && pnpm test:shell && pnpm build
    pnpm test:db   # precisa de Docker; sobe um Postgres limpo e aplica o baseline
    ```
@@ -72,7 +75,7 @@ Ao finalizar um epic:
      está como aviso, então ele passa verde; a conferência é humana
    - Env vars novas em `.env.example` **e** `lib/env.ts`, com default que não quebre instalação nova
    - Mudança de schema saiu como **tripla**: arquivo em `supabase/migrations/`, apêndice idempotente
-     no `supabase/baseline.sql` e linha no `MANIFEST.md`. O kit self-host aplica **só o baseline** —
+     no `supabase/baseline.sql` e uma linha `-- manifest: <o quê e por quê>` no cabeçalho do próprio `.sql` (não no `MANIFEST.md`, que é histórico). O kit self-host aplica **só o baseline** —
      migration que não chega lá não chega em quem instalou numa VPS. Nenhum job de CI confere isso
    - **Se você tocou `Dockerfile*`, `docker-compose*.yml` ou `hostgator-setup-kit/`:** a mudança
      alcança quem **já** instalou. Lei em [`docs/doctrine/packaging.md`](docs/doctrine/packaging.md).
@@ -95,7 +98,15 @@ Ao finalizar um epic:
    self-hoster instala, roda em PR e **bloqueia** desde 2026-08-13.
 
    Verde no `e2e` **não** é "jornada provada": ele mesmo imprime, no resumo, quais specs não
-   cobriu — e a que fica de fora é justamente `vps-fresh-onboarding`, a instalação do zero.
+   cobriu. Quais são, leia do próprio workflow em vez de desta linha — ela já disse que a de
+   fora era `vps-fresh-onboarding`, a instalação do zero, e desde o PR #983 essa roda no CI:
+
+   ```bash
+   git show origin/main:.github/workflows/e2e.yml | grep -A4 'FORA_DO_CI:'
+   ```
+
+   E mesmo a jornada que TEM gate continua devendo a prova pela tela quando você mexe nela
+   (DoD 12): gate prova que não regrediu, não que a experiência ficou boa.
 
    > Esta lista dizia "três obrigatórios" e chamava o `e2e` de não-bloqueante. Estava
    > desatualizada nos dois pontos, e quem a usasse como régua mediria contra a régua errada.

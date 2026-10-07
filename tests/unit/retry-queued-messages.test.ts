@@ -103,6 +103,7 @@ function fila(over: Partial<Record<string, unknown>> = {}) {
     media_mime: null,
     media_storage_path: null,
     metadata: {},
+    organizations: { status: "active" },
     ...over,
   };
 }
@@ -193,8 +194,16 @@ describe("retry-queued-messages", () => {
     const busca = chamadas.find((c) => c.tabela === "messages" && c.op === "select");
     expect(busca?.filtros["eq:direction"]).toBe("outbound");
     expect(busca?.filtros["eq:status"]).toBe("queued");
-    expect(busca?.filtros["in:sent_via"]).toEqual(["user", "system"]);
+    expect(busca?.filtros["in:sent_via"]).toEqual(["user", "system", "automation"]);
     expect(busca?.filtros["neq:type"]).toBe("template");
+    expect(busca?.filtros["eq:organizations.status"]).toBe("active");
+  });
+
+  it("org parada não é repescada, mesmo presa em queued", async () => {
+    const { client } = clientDuble([fila({ organizations: { status: "suspended" } })]);
+    const r = await retryQueuedMessages(client as never, AGORA, "req-1");
+    expect(sendMock).not.toHaveBeenCalled();
+    expect(r.sent).toBe(0);
   });
 
   it("nada na fila ⇒ não escreve nada", async () => {

@@ -1,4 +1,4 @@
--- 0275 — forward-fix: a 0268 (agent_typing_indicator) recriou
+-- 0275 — forward-fix: a 0567 (agent_typing_indicator, ex-0268) recriou
 -- fn_ai_agent_version_content_immutable() a partir de uma cópia anterior à
 -- 0181 (o_acervo_e_da_organizacao) e perdeu o `knowledge_source_ids` na lista
 -- de colunas que a versão PUBLICADA não pode mudar sem virar rascunho novo —
@@ -6,7 +6,7 @@
 -- reaberto aqui pela mesma classe de erro (create or replace sem carregar
 -- todos os checks anteriores). Achado por
 -- tests/invariants/rag-acervo-da-organizacao.test.ts ("versão PUBLICADA não
--- muda de acervo sem virar versão nova"), vermelho depois do merge da 0268.
+-- muda de acervo sem virar versão nova"), vermelho depois do merge da 0567 (ex-0268).
 --
 -- create or replace, sem DDL novo e sem backfill: só recompõe o corpo da
 -- função com a coluna que faltava.

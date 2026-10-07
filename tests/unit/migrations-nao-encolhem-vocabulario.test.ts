@@ -65,6 +65,33 @@ const DIR_MIGRATIONS = path.join(process.cwd(), "supabase", "migrations");
  * dado existente faz o `update.sh` de um clone quebrar no meio.
  */
 const REMOCOES_DELIBERADAS: Record<string, { valores: string[]; porque: string }> = {
+  "20260922164700_0387_canal_datafy.sql::webhook_events_log_provider_check": {
+    valores: ["uazapi"],
+    porque:
+      "Mesma classe dos dois casos abaixo (branches represadas se encontrando), mas via " +
+      "MERGE de fork: NÃO existe no upstream sozinho — a 0387 é 100% upstream e nunca viu " +
+      "`uazapi`. A 0565/0566 (ex-0266/0267, Automaleads) somaram `uazapi` a esta constraint " +
+      "em 13/08, com timestamp ANTERIOR ao da 0387 (22/09) — então na cadeia combinada do " +
+      "merge, a 0387 'reconstrói e perde' um valor que só existe no OUTRO lado da história. " +
+      "A forward-fix é a 0568 (`reconciliacao_provider_uazapi_pos_merge`), que reafirma a " +
+      "união das três constraints afetadas (`channel_sessions_provider_check`, " +
+      "`channel_sessions_provider_ref_check` e esta). O estado FINAL da cadeia tem o valor " +
+      "de volta — gate `tests/unit/check-do-baseline-nao-diverge-da-cadeia.test.ts`.",
+  },
+  "20260918231000_0312_aviso_de_followup_sem_agente.sql::agent_inbox_items_kind_check": {
+    valores: ["aviso_de_caso_nao_entregue"],
+    porque:
+      "NÃO é remoção de propósito, e NÃO existe na `main`: é o ENCONTRO de duas " +
+      "branches represadas. A 0292 (casos vivos) acrescentou `aviso_de_caso_nao_entregue` " +
+      "e ficou parada; a 0312 reconstruiu a constraint a partir do estado que ENXERGAVA, " +
+      "sem o valor da outra. Nenhum dos dois lados errou — na `main` sozinha a 0312 não " +
+      "remove nada, porque a 0292 não está lá, e por isso este gate é verde lá. O buraco " +
+      "só existe na árvore em que as duas se encontram. A forward-fix é a 0326 " +
+      "(`reconciliacao_das_branches_represadas`), que reafirma a UNIÃO medida: os 28 " +
+      "valores da 0312 mais o da 0292. O estado FINAL da cadeia tem o valor de volta, " +
+      "então nenhum clone fica sem ele. Mesma forma da 0062→0065 acima, 58 dias depois — " +
+      "e a lição nova é que represar branch longa reproduz a classe sem ninguém errar.",
+  },
   "20260722160000_0062_conversation_snooze.sql::agent_inbox_items_kind_check": {
     valores: ["followup_dead"],
     porque:

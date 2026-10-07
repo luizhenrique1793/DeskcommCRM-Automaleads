@@ -33,6 +33,7 @@ describe("capabilities do gateway próprio", () => {
       canSaveContact: true,
       canShowTyping: true,
       canSendButtons: true,
+      alteraMensagemEnviada: false,
     });
   });
 
@@ -122,13 +123,15 @@ describe("banco e TypeScript falam o mesmo vocabulário", () => {
   });
 
   it("a migration versionada existe junto do apêndice — clone atualiza pelas duas vias", () => {
+    // Renumerada de 0266 para 0565 no merge com upstream/main (2026-10): 0266
+    // colidia com uma migration diferente do upstream.
     const mig = readFileSync(
-      "supabase/migrations/20260813180000_0266_uazapi_channel_provider.sql",
+      "supabase/migrations/20260813180000_0565_uazapi_channel_provider.sql",
       "utf8",
     );
     expect(mig).toContain("uazapi_instance_id");
     expect(readFileSync("supabase/migrations/MANIFEST.md", "utf8")).toContain(
-      "0266_uazapi_channel_provider",
+      "0565_uazapi_channel_provider",
     );
   });
 });

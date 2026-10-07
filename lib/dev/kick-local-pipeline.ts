@@ -11,6 +11,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { drainEventLog } from "@/lib/event-log/drain";
+import { comOrigemDeRequest } from "@/lib/event-log/origem-do-dreno";
 import { ensureHandlersRegistered } from "@/lib/event-log/register-handlers";
 import { idsDoContatoEGemeos } from "@/lib/channels/contato-por-telefone";
 import { aplicarTextoNosFollowups } from "@/lib/followup/aplicar-inbound";
@@ -132,18 +133,22 @@ export async function acelerarPipelineDeEventos(
 ): Promise<void> {
   try {
     if (inbound) {
-      try {
-        await aplicarTextoNosFollowups(admin, inbound);
-      } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
-        logger.warn("[dev.pipeline] aplicar texto do inbound falhou", { error: detail });
-      }
+      // Mesma ordem do handler de event_log: acordar a espera QUE JÁ EXISTIA,
+      // depois aplicar o texto. Aplicar primeiro estaciona um wait_started
+      // novo (ALWAYS → menu) e o acordar seguinte acorda essa espera com a
+      // mesma mensagem — o fluxo inteiro dispara de uma vez.
       try {
         await acordarFollowupPorInbound(admin, inbound);
       } catch (err) {
         logger.warn("[dev.pipeline] acordar follow-up falhou", {
           error: err instanceof Error ? err.message : String(err),
         });
+      }
+      try {
+        await aplicarTextoNosFollowups(admin, inbound);
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        logger.warn("[dev.pipeline] aplicar texto do inbound falhou", { error: detail });
       }
       await acelerarDesteContato(admin, {
         organizationId: inbound.organizationId,
@@ -152,7 +157,13 @@ export async function acelerarPipelineDeEventos(
     }
     ensureHandlersRegistered();
     try {
-      const drain = await drainEventLog(admin);
+      // ⚠️ MARCADO COMO "dentro de requisição". Este dreno roda no meio do
+      // webhook de mensagem, e o webhook do WhatsApp tem timeout e REENTREGA:
+      // um handler que fale com um terceiro pela rede aqui pode transformar uma
+      // mensagem entregue numa mensagem reentregue — e a reentrega dispara o
+      // agente de novo. Quem precisa dessa informação a lê por `origemDoDreno()`
+      // e se adia; quem não precisa não muda uma linha.
+      const drain = await comOrigemDeRequest(() => drainEventLog(admin));
       logger.info("[dev.pipeline] event-log-drain", { ...drain });
     } catch (err) {
       logger.warn("[dev.pipeline] drain falhou; tick do follow-up segue", {

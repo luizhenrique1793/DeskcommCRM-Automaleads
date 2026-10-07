@@ -5,7 +5,7 @@ import { z } from "zod";
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { loadAuthUser, resolveActiveOrg } from "@/lib/auth/server";
-import { ROLE_RANK } from "@/lib/auth/types";
+import { podeAdministrarEmpresa } from "@/lib/auth/pode-administrar-empresa";
 import { supportWriteError } from "@/lib/impersonate/support";
 import type { McpContext, McpToolDefinition } from "@/lib/mcp/types";
 import {
@@ -53,7 +53,11 @@ export async function testPousadaTool(toolName: string, argsJson: string): Promi
   if (supportWriteError(authUser.support)) return { ok: false, error: "forbidden_role" };
   const activeOrg = await resolveActiveOrg(authUser);
   if (!activeOrg) return { ok: false, error: "forbidden_tenant" };
-  if (!authUser.is_platform_admin && ROLE_RANK[activeOrg.role] < ROLE_RANK.admin) {
+  // Este painel EXECUTA de verdade — inclusive `pousada_gerar_cobranca_pix`,
+  // que move dinheiro. `is_platform_admin` sozinho não basta: um
+  // `support_readonly` também tem a linha em `platform_admins`, e o atalho
+  // antigo deixava esse scope escrever no tenant como se administrasse.
+  if (!podeAdministrarEmpresa(authUser, activeOrg)) {
     return { ok: false, error: "forbidden_role" };
   }
 

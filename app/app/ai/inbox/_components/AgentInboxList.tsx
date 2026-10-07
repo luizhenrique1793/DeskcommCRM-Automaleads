@@ -152,6 +152,11 @@ export function AgentInboxList({ canResolve }: { canResolve: boolean }) {
         </div>
       ) : (
         <>
+          {tab === "open" ? (
+            <p className="-mb-2 text-xs text-muted-foreground">
+              {t("Os mais graves primeiro; entre iguais, os mais recentes.")}
+            </p>
+          ) : null}
           {canResolve ? (
             <label className="flex items-center gap-2 px-1">
               <input

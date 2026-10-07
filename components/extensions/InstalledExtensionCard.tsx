@@ -32,6 +32,7 @@ import {
   type ExtensionConfiguration,
   type ExtensionManifest,
 } from "@/lib/extensions/manifest";
+import { portasLegiveis } from "@/lib/extensions/portas-legiveis";
 import type { InstalledExtensionView } from "@/lib/extensions/view";
 import { BookOpen, CircleNotch, Lightbulb, ListChecks } from "@/lib/ui/icons";
 
@@ -42,12 +43,6 @@ const ICONS: Record<ExtensionManifest["display"]["icon"], typeof ListChecks> = {
   BookOpen,
   Lightbulb,
 };
-
-function permissionCopy(permissions: InstalledExtensionView["permissions"]): string {
-  return permissions.includes("navigation.tasks")
-    ? "Abre Tarefas; não lê seus dados."
-    : "Não recebe acesso aos dados do CRM.";
-}
 
 export function InstalledExtensionCard({
   extension,
@@ -196,7 +191,7 @@ export function InstalledExtensionCard({
         </div>
         <div className="sm:col-span-2">
           <dt className="text-muted-foreground">{t("Permissão")}</dt>
-          <dd className="mt-0.5">{t(permissionCopy(extension.permissions))}</dd>
+          <dd className="mt-0.5">{portasLegiveis(extension.permissions, t)}</dd>
         </div>
       </dl>
 

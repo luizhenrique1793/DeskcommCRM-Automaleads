@@ -220,8 +220,22 @@ describe("o baseline fica no piso de Postgres que dizemos suportar", () => {
     // medindo uma major só, com o CI verde e ninguém avisando.
     const ci = readFileSync(path.join(RAIZ, ".github/workflows/ci.yml"), "utf8");
 
-    // 1. A matriz existe e declara as duas.
-    expect(ci).toMatch(/^\s*pg:\s*\[\s*"15"\s*,\s*"17"\s*\]\s*$/m);
+    // 1. As duas majors existem, e a matriz vem do portão que as escolhe.
+    //    Desde 18/09/2026 a matriz é dinâmica (`invariants-alcance`): o piso só
+    //    roda em PR que o alcança, e SEMPRE fora de pull_request. O que não pode
+    //    mudar é o conjunto: a lista cheia tem as duas, e a reduzida é a major de
+    //    CIMA — reduzir para o piso sozinho é o defeito da #422 de volta.
+    expect(ci).toMatch(/majors=\["15","17"\]/);
+    expect(ci).toMatch(/majors=\["17"\]/);
+    expect(ci, "a forma reduzida não pode ser o piso sozinho (#422)").not.toMatch(/majors=\["15"\]/);
+    expect(ci).toMatch(/^\s*pg:\s*\$\{\{\s*fromJSON\(needs\.invariants-alcance\.outputs\.majors\)\s*\}\}\s*$/m);
+
+    // 1b. E o piso é OBRIGATÓRIO fora de pull_request: é o que garante que toda
+    //     mudança de schema é medida no piso na árvore integrada, mesmo que o PR
+    //     dela tivesse pulado. Sem esta linha, o portão poderia responder `nao`
+    //     na `main` e ninguém mediria o piso nunca mais.
+    expect(ci).toMatch(/EVENTO.*!=.*pull_request/s);
+    expect(ci).toMatch(/\[ "\$PISO" = "sim" \]/);
 
     // 2. A major da matriz CHEGA nos scripts. Sem esta linha as duas pernas
     //    sobem pg15 e a cobertura vira verde medindo a mesma coisa duas vezes.
@@ -237,7 +251,7 @@ describe("o baseline fica no piso de Postgres que dizemos suportar", () => {
     //    protection da `main` exige esse nome exato, e job de matrix se chama
     //    `invariants-majors (15)`: sem a fachada, nenhum PR mergearia.
     expect(ci).toMatch(
-      /^\s{2}invariants:\n\s+if: always\(\)\n\s+needs: \[invariants-majors\]/m,
+      /^\s{2}invariants:\n\s+if: always\(\)\n\s+needs: \[invariants-alcance, invariants-majors\]/m,
     );
   });
 });

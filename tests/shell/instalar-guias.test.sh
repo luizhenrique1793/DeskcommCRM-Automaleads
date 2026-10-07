@@ -32,6 +32,14 @@
 #      nem para a varredura nem para o --remover — e o link feito à mão segue intacto.
 #  21. Uma troca de fonte interrompida no meio não tira do --remover o que ela já ligou.
 set -uo pipefail
+# Isolamento do git: um GIT_DIR herdado (suíte rodada de dentro de um hook ou de um
+# `rebase --exec`) manda por cima de todo `cd`/`git -C` dos repositórios descartáveis
+# abaixo, e init/commit/config caem no repositório de quem roda — foi uma escrita de
+# `user.*` assim que assinou como "Pessoa <alguem@fork.dev>" 829 commits da main a
+# partir de 10/09/2026. Zera o ambiente local do git (o idioma do próprio git) e dá a
+# identidade por ambiente: nenhum teste aqui mede o autor.
+unset $(git rev-parse --local-env-vars)
+export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t.t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t.t
 
 RAIZ="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCRIPT="$RAIZ/scripts/instalar-guias.sh"
@@ -51,7 +59,6 @@ montar_repo() {  # montar_repo <pasta>
   local r="$1" n
   mkdir -p "$r"
   git -C "$r" init -q -b main
-  git -C "$r" config user.email t@t; git -C "$r" config user.name t
   for n in deskcomm-instalar deskcomm-prompt sistema-vivo; do
     mkdir -p "$r/.agents/skills/$n"
     printf -- "---\nname: %s\ndescription: 'guia %s'\n---\n\nversão 1\n" "$n" "$n" > "$r/.agents/skills/$n/SKILL.md"

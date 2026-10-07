@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { readExtensionBody } from "./http";
+import { EXTENSION_CAPABILITIES } from "./capacidades";
 import { configurationSchema } from "./manifest";
 import { parseStrictJson } from "./strict-json";
 
@@ -33,7 +34,15 @@ export const configureRequestSchema = z
   .strict();
 export const openRequestSchema = z
   .object({
-    capability: z.literal("tasks.open"),
+    // O VOCABULÁRIO INTEIRO, não o literal antigo. Este campo ficou para trás quando a ADR-0003
+    // ampliou as capacidades: o manifesto passou a aceitar seis portas, o mapa do host passou a
+    // resolver as seis, e ESTE schema continuou exigindo `tasks.open`. Efeito no produto: uma
+    // extensão com porta nova instalava, aparecia, mas o botão dela NÃO ABRIA NADA — o servidor
+    // recusava o pedido antes de chegar ao resolvedor.
+    //
+    // Nenhum teste de unidade pegou, porque todos exercitavam o manifesto e o mapa; o caminho
+    // HTTP completo só é percorrido pela prova em tela, e foi ela que achou.
+    capability: z.enum(EXTENSION_CAPABILITIES),
     expected_revision: z.number().int().positive(),
     card_id: slug,
   })

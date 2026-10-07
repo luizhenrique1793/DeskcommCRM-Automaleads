@@ -172,7 +172,7 @@ owner: Rafael Melgaço
 - **Tipo**: Hard constraint
 - **Regra**: GIVEN mensagem inbound text; WHEN `ehPedidoDeOptOut(body)` — **palavra ISOLADA** (mensagem inteira = a palavra) **ou** verbo de cessação com **objeto de comunicação** ("parar de me mandar", "sair da lista", "cancelar inscrição"); THEN `contacts.is_blocked=true` + emitir activity `system.contact_blocked_by_stop`.
 - **Por que deixou de ser regex de palavra solta** (2026-08-21): caçar a PALAVRA em qualquer posição bloqueava frase inocente na INGESTÃO, antes do modelo — e o bloqueio some a pessoa da conversa sem ninguém saber, com `blocked_reason='stop_keyword'` parecendo legítimo. Medido num corpus de 79 frases: a regra antiga produzia **12 falsos positivos** de nicho ("tem como parar a dor?", "posso sair antes das 15h?", "preciso sair mais cedo da consulta") e deixava passar **21 de 33 pedidos reais** ("não quero mais receber nada", "me tira da lista", "cancelar inscrição"). A regra nova: 0 falsos positivos, 33 de 33 pedidos.
-- **Onde ela mora, para não envelhecer aqui**: `lib/opt-out/deteccao.ts`. O vocabulário em vigor sai de `grep -n 'PALAVRAS_DE_OPT_OUT' -A20 lib/opt-out/deteccao.ts`; as frases de controle, de `tests/unit/opt-out-deteccao.test.ts`.
+- **Onde ela mora, para não envelhecer aqui**: `lib/opt-out/deteccao.ts`. O vocabulário em vigor sai de `sed -n '/PALAVRAS_DE_OPT_OUT/,/^]/p' lib/opt-out/deteccao.ts | grep -E '^ *"'`; as frases de controle, de `tests/unit/opt-out-deteccao.test.ts`.
 - **Dois níveis, e a diferença importa**: `ehPedidoDeOptOut` (inequívoco) autoriza gravar `is_blocked`, que só uma pessoa desfaz. `ehOptOutProvavel` soma os ambíguos ("me deixa em paz") e é o sinal do runtime — para de responder e escala à Central, **sem** bloquear.
 - **Espanhol é coberto, nos dois níveis** (vocabulário inequívoco no PR #275; camada ambígua e construções com pronome preso — `escribirme`, `mandarme` — no PR #416, de @JowaniOrantes).
 
@@ -265,7 +265,8 @@ owner: Rafael Melgaço
 - **Origem**: Sub-PRD 02 §3.2
 - **Tipo**: Hard constraint
 - **Regra**: GIVEN lead criado; WHEN qualquer endpoint tenta mudar `pipeline_id` da linha; THEN retorna 422 `pipeline_immutable_use_clone`. Pra "mover" entre funis, o caminho é `POST /api/v1/leads/[id]/clone`: cria o negócio no funil destino (etapa aberta informada, ou a primeira) com os dados da origem e encerra a origem como `lost`.
-- **Motivo da perda da origem**: o fechamento passa pelo trigger `fn_validate_lost_reason_required` (baseline.sql), que recusa qualquer `lost_reason` fora do canônico (`CANONICAL_LOST_REASONS`) e de `crm_pipelines.settings.lost_reasons`. `moved_to_pipeline_X` NÃO é aceito — a origem fecharia com `lost_reason_invalid` e o negócio ficaria aberto nos dois funis. A troca usa o motivo informado pelo chamador (`lost_reason`, canônico ou estendido pelo funil) e, sem ele, `other`; o funil de destino vai em `crm_leads.source_metadata.movido_para` (`{lead_id, pipeline_id, stage_id}`), e a origem da cópia em `source_metadata.clonado_de` do clone.
+- **Motivo da perda da origem**: o fechamento passa pelo trigger `fn_validate_lost_reason_required` (baseline.sql), que recusa qualquer `lost_reason` fora do canônico (`CANONICAL_LOST_REASONS`) e de `crm_pipelines.settings.lost_reasons`. `moved_to_pipeline_X` NÃO é aceito — a origem fecharia com `lost_reason_invalid` e o negócio ficaria aberto nos dois funis. A troca usa o motivo informado pelo chamador (`lost_reason`, canônico ou estendido pelo funil) e, sem ele, `moved_to_another_pipeline`: o motivo canônico PRÓPRIO da transferência (migration 0266, `lib/leads/motivo-da-perda.ts`), que `fn_attendant_metrics` EXCLUI da contagem de perdas — trocar de funil não é perder o negócio, e a perda de ninguém engorda com um movimento administrativo. O funil de destino vai em `crm_leads.source_metadata.movido_para` (`{lead_id, pipeline_id, stage_id}`), e a origem da cópia em `source_metadata.clonado_de` do clone.
+- **Automação (issue #992)**: a ação `create_or_move_lead` de uma regra com gatilho de CONTATO, ao encontrar negócio ABERTO do contato em OUTRO funil, TRANSFERE pelo mesmo caminho — clona para o funil da regra e encerra a origem como `lost` com `moved_to_another_pipeline` — em vez de criar um segundo negócio. Negócio aberto no MESMO funil segue sendo movido de etapa (nada é encerrado, nada é criado) e, sem negócio aberto, a ação cria, como antes. Guardado por `tests/unit/automacao-troca-de-funil-transfere-o-negocio.test.ts`.
 - **Estado de origem exigido**: só `status = 'open'` é clonado (422 `lead_not_open`); clonar um negócio `won` reescreveria a origem como `lost`, apagando o desfecho.
 - **Enforcement**: API (interceptor) + DB check constraint.
 - **Exceção**: Nenhuma. Decisão deliberada (mover entre pipelines é semanticamente diferente — clonar deixa explícito).
@@ -470,6 +471,7 @@ owner: Rafael Melgaço
 - **Regra**: GIVEN qualquer ação que consome recurso (mensagem enviada/recebida, chamada LLM, storage usage); WHEN ocorre; THEN entrada em `usage_events` com `tenant_id`, `metric_type`, `quantity`, `cost_cents` (calculado), `recorded_at`.
 - **Enforcement**: Workers de cada subsistema (WhatsApp send/recv, IA invocation, storage upload).
 - **Exceção**: Nenhuma.
+- **Estado**: **não construída.** A tabela `usage_events` não existe (`grep -c usage_events supabase/baseline.sql`). O custo por organização que existe é o de IA, em `llm_calls.cost_cents` (B-02). A cobrança do revendedor ([ADR-0004](../adr/0004-cobranca-do-revendedor.md)) cobra plano fixo, não consumo, e não depende desta regra; para o operador de agentes, a unidade decidida é retainer, não consumo (`docs/doctrine/operacao-de-agentes.md` §0).
 
 ### B-02 — Custo de IA é rateado por tenant
 - **Origem**: Sub-PRD 05 §3.9 + IA-10
@@ -477,6 +479,7 @@ owner: Rafael Melgaço
 - **Regra**: GIVEN invocação LLM via Vercel AI Gateway; WHEN o evento de billing chega do Gateway; THEN o custo é atribuído ao `tenant_id` do agent que originou a chamada.
 - **Enforcement**: Worker de billing IA.
 - **Exceção**: Custos administrativos da plataforma (super-admin testando, suporte) são debitados ao tenant `internal_deskcomm`.
+- **Estado**: cumprida por outro mecanismo. Não há evento de billing vindo do Gateway nem worker de billing: o próprio runtime grava o custo de cada chamada em `llm_calls.cost_cents`, com o `organization_id` de onde ela roda (`lib/agent-engine/edge/llm/run-model-call.ts`, `lib/ai/log-invocation.ts`), em centavos de **dólar**, e `fn_gasto_de_ia_do_mes` é a única soma (vigiada por `tests/unit/orcamento-uma-regua-de-gasto.test.ts`). A exceção não existe: não há tenant `internal_deskcomm` (`grep -rn internal_deskcomm lib app workers supabase/baseline.sql`). É essa soma que o teto de IA do plano do revendedor consome ([ADR-0004](../adr/0004-cobranca-do-revendedor.md)).
 
 ### B-03 — Storage de mídia tem retenção configurável por tenant
 - **Origem**: PRD-Mestre §7.3
@@ -484,6 +487,7 @@ owner: Rafael Melgaço
 - **Regra**: GIVEN mídia em `whatsapp-media` bucket; WHEN `created_at < now() - tenant.media_retention_days` (default 365); THEN cron `prune-old-media` move pra cold storage S3 (ou deleta se `tenant.cold_storage_disabled=true`).
 - **Enforcement**: Cron diário.
 - **Override**: Tenant pode aumentar retenção (paga storage extra) ou diminuir (mín 90d em modo BPO; sem mín em modo SaaS futuro).
+- **Estado**: cumprida desde a migration 0432, **sem camada cold/S3** — o arquivo vencido é removido (a mensagem fica, com «Mídia indisponível»), com piso de 30 dias, o mesmo do formulário. Junto sai o arquivo órfão de conversa apagada. Quem enfileira é `fn_enfileirar_midia_vencida`, chamada pelo cron `media-retention`; quem remove é o `storage-redaction`, pela `storage_redaction_queue`. Para ver o horário em vigor: `grep -n media-retention docker/scheduler/entrypoint.sh`.
 
 ### B-04 — Quota de chamadas API por tenant: 100 RPS no MVP
 - **Origem**: Sub-PRD 01 §4.2
@@ -491,6 +495,7 @@ owner: Rafael Melgaço
 - **Regra**: GIVEN tenant fazendo chamadas via API; WHEN ultrapassa 100 RPS; THEN próxima chamada retorna 429 com `Retry-After` e `X-RateLimit-*` headers.
 - **Enforcement**: Upstash Redis sliding window.
 - **Override**: Cliente enterprise pode contratar plano com RPS maior; ajuste em `tenants.rate_limit_config`.
+- **Estado**: **não cumprida como escrita.** A coluna `organizations.rate_limit_rps` (padrão 100) existe no schema e nada a lê; `tenants.rate_limit_config` não existe; nenhum teto de 100 RPS por organização é aplicado. O teto real da API é de escrita, por token e por organização, numa janela fixa (`grep -n 'TETO_\|JANELA_' lib/mcp/rate-limit.ts`), aplicado rota a rota por quem chama `tetoDeEscritaDoToken` (`lib/api/auth-dual.ts`) ou o contador de `/api/v1/messages`; nem toda rota com Bearer o chama (`grep -rlE 'tetoDeEscritaDoToken|TETO_DE_ESCRITA' app/api`). A cobrança do revendedor ([ADR-0004](../adr/0004-cobranca-do-revendedor.md)) não vende nem limita RPS; o desenho dela prevê remover a coluna sem leitor (`grep -n rate_limit_rps supabase/baseline.sql` diz se ela ainda existe).
 
 ### B-05 — Sync inicial Nuvemshop respeita rate limit do upstream
 - **Origem**: Sub-PRD 06 §3.11

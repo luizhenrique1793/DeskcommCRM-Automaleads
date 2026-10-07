@@ -31,6 +31,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { PROVIDERS_DE_MENSAGEM } from "./capabilities";
+import { ehNomeDeSessaoE2E } from "./sessoes-e2e";
 
 /** Único estado em que mensagem entra e sai. Contrato do CRM (uppercase). */
 export const STATUS_SAUDAVEL = "WORKING";
@@ -180,7 +181,7 @@ export async function listarConexoesCaidas(
 ): Promise<ConexaoCaida[]> {
   const { data } = await admin
     .from("channel_sessions")
-    .select("id, display_name, phone_number, status")
+    .select("id, display_name, phone_number, status, waha_session_name")
     .eq("organization_id", organizationId)
     .is("archived_at", null)
     // A faixa diz "nenhuma mensagem entra nem sai por esta conexão" e leva a
@@ -190,7 +191,14 @@ export async function listarConexoesCaidas(
     .in("provider", [...PROVIDERS_DE_MENSAGEM])
     .in("status", [...STATUS_QUE_AVISAM]);
 
-  return (data ?? []).map((s) => ({
+  return (data ?? [])
+    // A linha de seed do e2e (#1032) é o MESMO caso por outra porta: ninguém a
+    // criou pela tela, ninguém a remove, e o `status` dela é `STOPPED` para
+    // sempre — a faixa anunciaria como conexão de alguém algo que não é
+    // conexão de ninguém, a mesma faixa permanente do parágrafo acima. Quem não
+    // é seed passa por este filtro intacto, inclusive caído.
+    .filter((s) => !ehNomeDeSessaoE2E(s.waha_session_name as string | null))
+    .map((s) => ({
     id: s.id as string,
     apelido: (s.display_name as string | null) ?? (s.phone_number as string | null) ?? "sem nome",
     status: (s.status as string | null) ?? "",
@@ -294,6 +302,98 @@ export async function sincronizarSaudeDaConexao(
   });
   await gravarEpisodio(admin, sessao, episodio);
   return "avisado";
+}
+
+/**
+ * A CONEXÃO FOI REMOVIDA — o aviso dela não pode ficar aberto para sempre.
+ *
+ * ─── O defeito que isto fecha (#1023) ───────────────────────────────────────
+ *
+ * `sincronizarSaudeDaConexao` é o ÚNICO lugar que fecha um episódio, e ela roda
+ * quando a sessão MANDA um status novo (`handleSessionStatus`). Arquivar ou
+ * excluir uma conexão tira o único emissor que existia: o arquivamento a remove
+ * do WAHA e a rota de webhook recusa evento de canal arquivado, por desenho. O
+ * crítico ficava aberto apontando para uma linha que a tela já não carrega —
+ * "Este contexto não está disponível para você" —, um alarme permanente sobre
+ * algo que o próprio operador já resolveu, enquanto a conexão NOVA, com o mesmo
+ * número, aparecia `WORKING` nos dois lados.
+ *
+ * ─── O que este caminho fecha, e o que ele NÃO faz ──────────────────────────
+ *
+ * Fecha os avisos ABERTOS desta sessão (`ref_kind`/`ref_id`), que é a MESMA
+ * chave do caminho de volta — e mais ninguém: fechar por organização apagaria o
+ * alerta de outro canal que segue caído.
+ *
+ * E devolve `escalated_status` a null sem criar a linha de saúde: `upsert` aqui
+ * inventaria episódio para um canal que nunca avisou e, no ramo do delete, a
+ * linha já caiu com a sessão (`channel_session_health.channel_session_id` é
+ * `on delete cascade`) — um insert morreria com violação de FK e derrubaria uma
+ * exclusão que o operador já pediu e que já aconteceu.
+ *
+ * ─── Por que LER antes de escrever ──────────────────────────────────────────
+ *
+ * Não é economia de bytes: é contrato da rota. O teste dela afirma a contagem
+ * EXATA de escritas do arquivamento, e o canal virgem — o caso mais comum de
+ * exclusão — nunca teve aviso nem linha de saúde. Sem nada aberto, nada é
+ * escrito.
+ */
+export async function resolverSaudeDaConexaoRemovida(
+  admin: SupabaseClient,
+  sessao: SessaoParaVigiar,
+): Promise<"resolvido" | "sem_mudanca"> {
+  // O supabase-js não lança em erro do PostgREST: devolve `error`. Engolido,
+  // uma leitura que falhou viraria "nenhum aviso aberto" e a auditoria diria
+  // "sem_mudanca" com o alarme ainda na Central. Lançar é o que faz a rota
+  // registrar "falhou" e logar o motivo. A mensagem leva só a etapa e o código.
+  const { data: abertos, error: erroLeitura } = await admin
+    .from("agent_inbox_items")
+    .select("id")
+    .eq("organization_id", sessao.organization_id)
+    .eq("ref_kind", REF_KIND_SESSAO)
+    .eq("ref_id", sessao.id)
+    .eq("status", "open");
+  if (erroLeitura) throw falhaNaEtapa("ler os avisos abertos", erroLeitura);
+
+  let fechou = false;
+
+  if ((abertos ?? []).length > 0) {
+    // Pelo FILTRO, e não pela lista de ids lida acima: a sessão já não existe,
+    // nada mais pode abrir aviso para ela, e um `in (ids)` deixaria de fora
+    // justamente o item que aparecesse entre a leitura e a escrita.
+    const { error } = await admin
+      .from("agent_inbox_items")
+      .update({ status: "resolved" })
+      .eq("organization_id", sessao.organization_id)
+      .eq("ref_kind", REF_KIND_SESSAO)
+      .eq("ref_id", sessao.id)
+      .eq("status", "open");
+    if (error) throw falhaNaEtapa("resolver os avisos abertos", error);
+    fechou = true;
+  }
+
+  const { data: linha, error: erroSaude } = await admin
+    .from("channel_session_health")
+    .select("escalated_status")
+    .eq("organization_id", sessao.organization_id)
+    .eq("channel_session_id", sessao.id)
+    .maybeSingle();
+  if (erroSaude) throw falhaNaEtapa("ler o episódio de saúde", erroSaude);
+
+  if (((linha?.escalated_status as string | null) ?? null) !== null) {
+    const { error } = await admin
+      .from("channel_session_health")
+      .update({ escalated_status: null, updated_at: new Date().toISOString() })
+      .eq("organization_id", sessao.organization_id)
+      .eq("channel_session_id", sessao.id);
+    if (error) throw falhaNaEtapa("limpar o episódio de saúde", error);
+    fechou = true;
+  }
+
+  return fechou ? "resolvido" : "sem_mudanca";
+}
+
+function falhaNaEtapa(etapa: string, erro: { code?: string }): Error {
+  return new Error(`Falha ao ${etapa} da conexão removida (código ${erro.code ?? "desconhecido"})`);
 }
 
 /**

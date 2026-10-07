@@ -12,7 +12,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 
 import { createClient } from "@supabase/supabase-js";
-import { test, expect, type Page, type TestInfo } from "@playwright/test";
+import { test, expect, type Page, type TestInfo } from "./helpers/test";
 
 import { credenciaisSupabaseDeTeste } from "../../scripts/lib/env-de-teste";
 
@@ -23,7 +23,7 @@ const db = createClient(credentials.url, credentials.serviceRole, {
 const password = `Local-${randomUUID()}!`;
 
 /** Título com dado de gente dentro — é assim que o runtime grava de verdade. */
-const TITULO = (n: number) => `Fernando Rocha ${n} pediu para falar com uma pessoa`;
+const TITULO = (n: number) => `Fulano de Tal ${n} pediu para falar com uma pessoa`;
 const TITULO_VIZINHA = "Aviso da organização vizinha";
 const QUANTOS = 6;
 
@@ -40,7 +40,7 @@ async function login(page: Page) {
   await page.goto("/login");
   await page.getByLabel(/e-?mail/i).fill(usuario.email);
   await page.getByLabel(/senha/i).fill(password);
-  await page.getByRole("button", { name: /entrar/i }).click();
+  await page.getByRole("button", { name: "Entrar", exact: true }).click();
   await page.waitForURL(/\/app(?:\/|$)/, { timeout: 60_000 });
 }
 
@@ -86,7 +86,7 @@ test.beforeAll(async () => {
       kind: "handoff",
       severity: "warn",
       title: TITULO(i),
-      body: `Motivo: contrato. Cliente: Fernando Rocha ${i}.`,
+      body: `Motivo: contrato. Cliente: Fulano de Tal ${i}.`,
       status: "open",
     });
   }

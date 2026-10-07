@@ -144,7 +144,10 @@ function clienteFalso(tabelas: Record<string, Linha[]>): SupabaseClient {
    * Google é `starts_at < p_ate AND ends_at > p_de` — INTERSEÇÃO de intervalos.
    * É a referência contra a qual a leitura da tela é conferida.
    */
-  async function rpc(fn: string, args: { p_org: string; p_owner: string; p_de: string; p_ate: string }) {
+  async function rpc(
+    fn: string,
+    args: { p_org: string; p_owner: string; p_de: string; p_ate: string },
+  ) {
     if (fn === "fn_agenda_ocupacao_google_do_dono") {
       const ocupam = (tabelas.calendar_selected_external_events ?? []).filter(
         (l) =>
@@ -168,7 +171,10 @@ function clienteFalso(tabelas: Record<string, Linha[]>): SupabaseClient {
       const doDono = (tabelas.calendar_connections ?? []).filter(
         (l) => l.organization_id === args.p_org && l.user_id === args.p_owner,
       );
-      return { data: doDono.map((l) => ({ status: l.status, last_sync_at: l.last_sync_at })), error: null };
+      return {
+        data: doDono.map((l) => ({ status: l.status, last_sync_at: l.last_sync_at })),
+        error: null,
+      };
     }
     if (fn === "fn_google_coverage") return { data: false, error: null };
     throw new Error(`[dublê] rpc não prevista: ${fn}`);
@@ -242,17 +248,24 @@ function tabelas(eventosDoGoogle: EventoDoGoogle[]): Record<string, Linha[]> {
 
 describe("a tela mostra — e o motor já recusava — o compromisso que atravessa o limite do recorte", () => {
   it("o compromisso de 23:30 até 00:30 aparece na tela do dia seguinte, fatiado no recorte", async () => {
-    const leitura = await lerOcupacaoExterna(clienteFalso(tabelas([{ id: "ev-1", ...EVENTO_QUE_ATRAVESSA }])), {
-      organizationId: ORG,
-      de: RECORTE.de,
-      ate: RECORTE.ate,
-    });
+    const leitura = await lerOcupacaoExterna(
+      clienteFalso(tabelas([{ id: "ev-1", ...EVENTO_QUE_ATRAVESSA }])),
+      { organizationId: ORG, de: RECORTE.de, ate: RECORTE.ate },
+      [DONO],
+    );
 
     expect(leitura.erro).toBeNull();
     // Antes do conserto esta lista vinha VAZIA: o compromisso começa antes do
     // recorte, e a consulta perguntava só pelo começo.
+    // O `id` agora é sintetizado (`dono:início:fim`): a função devolve OCUPAÇÃO,
+    // não o evento — quem desenha só precisa de uma chave estável por dono.
     expect(leitura.blocos).toEqual([
-      { id: "ev-1", donoId: DONO, iniciaEm: FATIA.de, terminaEm: FATIA.ate },
+      {
+        id: `${DONO}:${FATIA.de}:${FATIA.ate}`,
+        donoId: DONO,
+        iniciaEm: FATIA.de,
+        terminaEm: FATIA.ate,
+      },
     ]);
   });
 
@@ -283,7 +296,11 @@ describe("a tela mostra — e o motor já recusava — o compromisso que atraves
       clienteFalso(
         tabelas([
           // Termina EXATAMENTE no começo do recorte (22:30–00:00 locais de 16/09).
-          { id: "ev-antes", starts_at: "2026-09-16T01:30:00.000Z", ends_at: "2026-09-16T03:00:00.000Z" },
+          {
+            id: "ev-antes",
+            starts_at: "2026-09-16T01:30:00.000Z",
+            ends_at: "2026-09-16T03:00:00.000Z",
+          },
           // Atravessa o limite, mas é "livre" no Google.
           {
             id: "ev-transparente",
@@ -301,6 +318,7 @@ describe("a tela mostra — e o motor já recusava — o compromisso que atraves
         ]),
       ),
       { organizationId: ORG, de: RECORTE.de, ate: RECORTE.ate },
+      [DONO],
     );
 
     expect(leitura.blocos).toEqual([]);
@@ -325,6 +343,7 @@ describe("a tela mostra — e o motor já recusava — o compromisso que atraves
         ]),
       ),
       { organizationId: ORG, de: RECORTE.de, ate: RECORTE.ate },
+      [DONO],
     );
 
     expect(leitura.erro).toBeNull();
@@ -347,12 +366,13 @@ describe("a tela mostra — e o motor já recusava — o compromisso que atraves
         ]),
       ),
       { organizationId: ORG, de: RECORTE.de, ate: RECORTE.ate },
+      [DONO],
     );
 
     expect(leitura.erro).toBeNull();
     expect(leitura.blocos).toEqual([
       {
-        id: "ev-dentro",
+        id: `${DONO}:2026-09-16T15:00:00.000Z:2026-09-16T16:00:00.000Z`,
         donoId: DONO,
         iniciaEm: "2026-09-16T15:00:00.000Z",
         terminaEm: "2026-09-16T16:00:00.000Z",

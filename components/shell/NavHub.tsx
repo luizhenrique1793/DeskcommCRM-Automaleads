@@ -1,8 +1,12 @@
+import type { ModuloOpcional } from "@/lib/instalacao/modulos";
+import type { CapacidadeDaOrganizacao } from "@/lib/organizacao/capacidades";
 import type { InterfaceSettings } from "@/lib/navigation/interface";
 import Link from "next/link";
 
 import { Card } from "@/components/ui/card";
 import type { Role } from "@/lib/auth/types";
+import { permissaoDaCapacidade } from "@/lib/extensions/capacidades";
+import { portasLegiveis } from "@/lib/extensions/portas-legiveis";
 import { localize, type ExtensionManifest } from "@/lib/extensions/manifest";
 import type { ExtensionGuideView } from "@/lib/extensions/view";
 import { traduzir } from "@/lib/i18n/dicionario";
@@ -12,6 +16,14 @@ import { BookOpen, Lightbulb, ListChecks, Warning } from "@/lib/ui/icons";
 
 interface NavHubProps {
   interfaceSettings?: InterfaceSettings;
+  /**
+   * Módulos opcionais ligados na instalação. OBRIGATÓRIO: quando era opcional,
+   * ausente queria dizer "não filtra", e o hub de IA mostrava a porta de um
+   * módulo desligado — o clique dava 404 (revisão do #1573, B1).
+   */
+  modulosLigados: readonly ModuloOpcional[];
+  /** Capacidades que a organização ligou. Ausente = o hub não filtra por capacidade. */
+  capacidadesLigadas?: readonly CapacidadeDaOrganizacao[];
   group: NavGroupId;
   isPlatformAdmin: boolean;
   role: Role | null;
@@ -67,11 +79,13 @@ export function NavHub({
   title,
   subtitle,
   interfaceSettings,
+  modulosLigados,
+  capacidadesLigadas,
   locale = IDIOMA_PADRAO,
   extensionGuides = [],
   extensionsUnavailable = false,
 }: NavHubProps) {
-  const secoes = hubSections(group, isPlatformAdmin, role, interfaceSettings);
+  const secoes = hubSections(group, isPlatformAdmin, role, interfaceSettings, modulosLigados, capacidadesLigadas);
 
   return (
     <div className="flex h-full flex-col gap-8 p-6">
@@ -205,7 +219,10 @@ export function NavHub({
                             </p>
                           ) : null}
                           <p className="mt-2 text-[11px] text-text-subtle">
-                            {traduzir("Abre Tarefas; não lê seus dados.", locale)}
+                            {portasLegiveis(
+                              [permissaoDaCapacidade(contribution.action.capability)],
+                              (texto) => traduzir(texto, locale),
+                            )}
                           </p>
                         </div>
                       </Card>

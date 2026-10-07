@@ -118,6 +118,15 @@ const COPY: Record<string, { variant: Variant; msg?: string }> = {
   // qualquer genérico daqui alcança.
   lost_reason_required: { variant: "warning" },
   lost_reason_invalid: { variant: "warning" },
+
+  // ---- Chaves de IA em uso ----
+  //
+  // Recusa ROTINEIRA, não quebra: a chave está ligada a versões de agente e o
+  // caminho certo é repontar (ou editar para girar). A ROTA manda a frase
+  // específica — quantas versões, quais agentes —, então aqui só se declara o
+  // TOM. Sem `msg` de propósito: a lista de agentes é contexto que nenhuma
+  // frase genérica alcança.
+  credential_in_use: { variant: "warning" },
 };
 
 /**

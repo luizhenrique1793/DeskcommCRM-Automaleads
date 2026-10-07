@@ -2,6 +2,12 @@
 
 Estado em 16/set/2026: instalação, configuração e recuperação **implementadas e provadas em tela** no J25; atualizar, desfazer a última troca e remover **implementados**, com a prova em tela no J26 (o resultado de cada rodada fica no fim do PROG-021). Complementa o PROG-017 e o marco 2 do PROG-018. A autorização de arquitetura e as respostas A/A/A do DEC-004 continuam vigentes. Os relatórios [08](../research/extensoes/08-integracao-bases.md), [09](../research/extensoes/09-integracao-impactos.md) e [10](../research/extensoes/10-integracao-riscos.md) são as três investigações deste recorte.
 
+
+> **Atualizado pela ADR-0003 (18/set/2026).** O perfil declarativo ganhou uma **lista fechada** de
+> portas e permissões, e o metadado de loja passou a viver no catálogo. Onde este documento ainda
+> disser "a capacidade `tasks.open`" no singular, a fonte é `lib/extensions/capacidades.ts` — e o
+> comando que a revela está na doutrina. A migration `0282` levou a mudança ao banco.
+
 ## Jornada e limites
 
 Um pacote publicado **depois do build** acrescenta cards de orientação no hub CRM. A pessoa abre o guia instalado e sua ação leva às Tarefas existentes. O pacote não recebe dados de tarefas, não executa código e não condiciona a disponibilidade de Tarefas à sua ativação. O administrador da instalação admite um catálogo revisado e instala; o administrador da organização ativa e configura; os demais papéis usam o conteúdo dentro do acesso habitual.
@@ -10,7 +16,7 @@ Este incremento entrega instalação inicial, configuração, desativação, rea
 
 ## Contrato do documento
 
-Pacote JSON UTF-8 estrito, sem ZIP, comentários, chaves duplicadas, chaves `__proto__`/`prototype`/`constructor`, HTML, script, SQL, CSS, expressões ou URLs de assets. Texto é renderizado como texto. As estruturas de autoridade são estritas; propriedade desconhecida é erro. O formato e a API do host são separados da versão pública do CRM. Textos localizados precisam de conteúdo legível; NUL e Unicode malformado são recusados antes do banco.
+Pacote JSON UTF-8 estrito, sem ZIP, comentários, chaves duplicadas, chaves `__proto__`/`prototype`/`constructor`, HTML, script, SQL, CSS, expressões ou URLs de assets. Texto é renderizado como texto. A exceção que confirma a regra é o tema (`contributions.theme`, PR #2091): ele não é CSS, é um mapa de tokens de cor — chave de uma lista fechada (`CHAVES_DE_TOKEN_DO_TEMA` em `lib/extensions/tema.ts`) e valor na mesma régua de forma da marca (`#rrggbb`, `rgb()`, `rgba()`, `var(--nome)`) —, e o CSS que o `/app` injeta é montado pelo host a partir desses tokens. Declarar um tema exige a permissão `theme.apply`. As estruturas de autoridade são estritas; propriedade desconhecida é erro. O formato e a API do host são separados da versão pública do CRM. Textos localizados precisam de conteúdo legível; NUL e Unicode malformado são recusados antes do banco.
 
 ```typescript
 type LocalizedText = { "pt-BR": string; es?: string };
@@ -26,7 +32,7 @@ type ExtensionManifest = {
   version: string; // SemVer estável x.y.z, inteiros sem zeros à esquerda
   license: "MIT";
   host_api: { min: number; max: number }; // inteiros positivos; host atual = 1
-  permissions: ["navigation.tasks"];
+  permissions: ExtensionPermission[]; // lista fechada, não vazia, sem repetição — ADR-0003
   dependencies: [];
   data: { mode: "none" };
   display: {
@@ -41,8 +47,14 @@ type ExtensionManifest = {
       id: string; title: LocalizedText; description: LocalizedText;
       icon: "ListChecks" | "BookOpen" | "Lightbulb";
       blocks: Array<{ heading: LocalizedText; body: LocalizedText }>;
-      action: { label: LocalizedText; capability: "tasks.open" };
+      action: { label: LocalizedText; capability: ExtensionCapability }; // ADR-0003
     }>;
+    // opcional; exige a permissão `theme.apply` (PR #2091)
+    theme?: {
+      palette: "sage" | "clay" | "mist" | "plum" | "olive";
+      claro: Partial<Record<ChaveDeTokenDoTema, string>>; // o que muda com o tema também vai no escuro
+      escuro: Partial<Record<ChaveDeTokenDoTema, string>>;
+    };
   };
 };
 type CatalogEntry = Pick<ExtensionManifest,
@@ -83,7 +95,7 @@ O perfil é declarativo e a configuração segue um esquema do host, então não
 
 **Leituras entre organizações.** A leitura de um recibo por quem administra a instalação se limita aos recibos da plataforma e aos da organização ativa. `fn_extensions_installation_counts(p_actor)` confere no banco, como as funções que escrevem, que o ator administra a instalação, e devolve, por instalação, quantas organizações estão com a extensão ativa e quantas foram desligadas pela remoção e ainda não reativaram. É exceção declarada à regra "service role filtra `organization_id`": a leitura atravessa organizações, e por isso devolve só números, nunca ids, e só a quem administra a instalação.
 
-**Recusado por escrito:** auditoria por organização em atualizar e desfazer (nenhuma linha da organização muda; a versão vigente aparece no card e no cabeçalho do guia, e a auditoria da instância registra o ato com a contagem de organizações ativas, exceto quando a resposta se perde e a repetição devolve `applied_now` falso: aí só o recibo registra); histórico de mais de um passo; tratar saída do catálogo como revogação; troca sem precondição; migrar instalação, com seus vínculos, entre origens; versão por organização; remover com preparação da mesma identidade em curso (cancele antes); admin de organização desfazendo ou removendo; aviso ativo às organizações (banner, e-mail). Mudança de permissões entre versões hoje é impossível, porque a admissão força `["navigation.tasks"]`; quando o contrato admitir outra permissão, concluir atualização e desfazer passam a recusar `extension_permissions_changed`.
+**Recusado por escrito:** auditoria por organização em atualizar e desfazer (nenhuma linha da organização muda; a versão vigente aparece no card e no cabeçalho do guia, e a auditoria da instância registra o ato com a contagem de organizações ativas, exceto quando a resposta se perde e a repetição devolve `applied_now` falso: aí só o recibo registra); histórico de mais de um passo; tratar saída do catálogo como revogação; troca sem precondição; migrar instalação, com seus vínculos, entre origens; versão por organização; remover com preparação da mesma identidade em curso (cancele antes); admin de organização desfazendo ou removendo; aviso ativo às organizações (banner, e-mail). Mudança de permissões entre versões **é recusada** desde a ADR-0003 e a migration 0282: concluir atualização e desfazer devolvem `extension_permissions_changed`. (Este parágrafo dizia que a troca era "impossível porque a admissão força `[\"navigation.tasks\"]`" — a premissa venceu quando o contrato passou a admitir a lista fechada, e a recusa que ele prometia foi construída junto.)
 
 ## Confiança e download
 
@@ -103,7 +115,7 @@ Tabelas de framework: `extension_catalogs` (origem/revisão atual/admissão), `e
 
 Tabelas de instância ficam fechadas a anon/authenticated. Vínculos de organização podem ser lidos por membro vigente sob RLS, sem INSERT/UPDATE/DELETE direto. Escritas do framework são RPCs `service_role` apenas, revogadas de PUBLIC e anon/authenticated, com busca de schema fixa. Além do guard HTTP de papel/MFA/suporte, cada RPC revalida no banco o ator e a organização/papel atuais. O ator vem de getUser, a organização do resolvedor canônico; nenhum dos dois é aceito do corpo HTTP.
 
-API de admissão, instalação, atualização, cancelamento de preparação, desfazer e remoção exige plataforma com escopo `full`, ausência de acompanhamento de suporte e sessão com verificação em duas etapas quando a política da plataforma a exige ou quando a pessoa já tem um fator cadastrado. Ativação/configuração exige `requireRole("admin")`, com guarda de suporte para escrita. Neste perfil, configurar exige membership administrativo real e sair do acompanhamento de suporte; não é criada uma autoridade delegada nova por callback. Leitura/uso exige viewer. Concessão `navigation.tasks` só abre a porta já existente; não cria autoridade sobre tarefas e não dá leitura delas ao pacote.
+API de admissão, instalação, atualização, cancelamento de preparação, desfazer e remoção exige plataforma com escopo `full`, ausência de acompanhamento de suporte e sessão com verificação em duas etapas quando a política da plataforma a exige ou quando a pessoa já tem um fator cadastrado. Ativação/configuração exige `requireRole("admin")`, com guarda de suporte para escrita. Neste perfil, configurar exige membership administrativo real e sair do acompanhamento de suporte; não é criada uma autoridade delegada nova por callback. Leitura/uso exige viewer. Cada concessão de `navigation.*` só abre uma porta já existente; não cria autoridade sobre a tela de destino e não dá leitura dela ao pacote.
 
 Configuração e ativação usam revisão esperada, chave idempotente e transação com lock da organização para o teto agregado. Desativar preserva configuração; reativar não a substitui pelos defaults. Repetição da mesma chave só retorna o mesmo recibo se o pedido for idêntico. Conflito de revisão exige recarregar; não sobrescrever uma edição mais nova.
 
@@ -139,7 +151,7 @@ RPCs retornam JSON com registro pós-operação; assinaturas:
 
 O formato dos registros e códigos SQL será publicado pelo implementador de banco antes da integração de APIs. Erros são códigos enumerados, nunca texto do pacote; a frase e o status de cada um moram em `lib/extensions/erros-do-banco.ts`, e um teste exige ali todo código que a migration levanta. Os tipos gerados do Supabase vêm do banco aplicado, sem edição manual.
 
-Portas HTTP sob `/api/v1/extensions`: GET lista; POST `catalogs` admite bytes do arquivo (`application/json`, chave em `Idempotency-Key`); POST `install` pede/retoma instalação, atualização, troca e reinstalação (corpo com `expected_installation_revision`); GET `operations/:id`; POST `operations/:id/cancel`; PUT `:id/configuration`; GET `:id` lê guia ativo; POST `:id/open` resolve `tasks.open` após revisão, estado e existência do `card_id`; POST `:id/revert` e POST `:id/remove`, com `Idempotency-Key` e corpo `{expected_installation_revision}`. Corpos com limite, schema estrito e `ok`/`fail`; leitura `no-store`.
+Portas HTTP sob `/api/v1/extensions`: GET lista; POST `catalogs` admite bytes do arquivo (`application/json`, chave em `Idempotency-Key`); POST `install` pede/retoma instalação, atualização, troca e reinstalação (corpo com `expected_installation_revision`); GET `operations/:id`; POST `operations/:id/cancel`; PUT `:id/configuration`; GET `:id` lê guia ativo; POST `:id/open` resolve a capacidade do cartão por mapa constante do host, após revisão, estado e existência do `card_id`; POST `:id/revert` e POST `:id/remove`, com `Idempotency-Key` e corpo `{expected_installation_revision}`. Corpos com limite, schema estrito e `ok`/`fail`; leitura `no-store`.
 
 Gestão em `/app/extensions`, declarada no catálogo canônico de navegação; uso em `/app/extensions/[id]`. Cards ativos entram por contribuição tipada no NavHub CRM, com links a essa porta genérica. Nenhum href arbitrário vai ao shell. A gestão pode ser vista por membros, mas ações administrativas aparecem apenas a quem pode executá-las.
 
@@ -150,7 +162,7 @@ Validações de parser/rede hostil; banco real para RLS/RBAC, repetição/revis�
 | Pergunta da doutrina | Artefato implementado neste incremento |
 |---|---|
 | Quem alimenta? | `CatalogAdmission` recebe o arquivo revisado; o servidor baixa bytes da origem admitida por `downloadArtifact`. |
-| Quem recebe a saída? | `NavHub`, `ExtensionGuide` e a capacidade fixa `tasks.open`, que abre as Tarefas existentes. |
+| Quem recebe a saída? | `NavHub`, `ExtensionGuide` e a porta nomeada que o cartão pede, resolvida em `lib/extensions/capacidades.ts` para uma tela já existente. |
 | Que registro emite? | `extension_operations` é o recibo transacional; `audit()` emite ações `extension.*` em `api_audit_log`, como registro complementar. |
 | Onde o registro aparece? | `ExtensionOperations` exibe recibos na gestão; a auditoria complementar aparece em `/admin/audit` para a plataforma e em `/app/audit` para a organização, onde a remoção deixa `extension.deactivated_by_removal`. |
 | Por qual porta se chega? | Entrada Extensões no `NAV_CATALOG` de `lib/navigation/catalogo.ts`, grupo Organização › "Sua empresa" (visível a todo membro; ações só para admin); cards ativos também abrem os guias pelo hub CRM. |

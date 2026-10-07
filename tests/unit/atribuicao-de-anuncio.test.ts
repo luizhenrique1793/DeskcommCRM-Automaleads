@@ -17,6 +17,7 @@ describe("extrairAtribuicaoMeta — referral do webhook oficial", () => {
     expect(r).toEqual({
       plataforma: "meta_ads",
       sourceId: "AfE...clid",
+      adId: "120210000000000",
       titulo: "Agende sua consulta",
       corpo: "Clique e fale com a gente",
       sourceUrl: "https://fb.me/anuncio123",
@@ -32,11 +33,29 @@ describe("extrairAtribuicaoMeta — referral do webhook oficial", () => {
     });
     expect(r?.sourceId).toBe("clid-123");
     expect(r?.sourceUrl).toBe("https://fb.me/x");
+    // Sem `sourceId` no payload não há anúncio a guardar — e `null` aqui é
+    // diferente de repetir o clique, que diria "o anúncio é este clique".
+    expect(r?.adId).toBeNull();
   });
 
-  it("cai pra source_id quando não há ctwa_clid", () => {
+  it("deixa sourceId nulo quando não há ctwa_clid, preservando adId", () => {
     const r = extrairAtribuicaoMeta({ source_type: "ad", source_id: "abc" });
-    expect(r?.sourceId).toBe("abc");
+    expect(r?.sourceId).toBeNull();
+    expect(r?.adId).toBe("abc");
+  });
+
+  it("o payload com clique E anúncio guarda OS DOIS", () => {
+    // O caso comum, e o que se perdia: enquanto o id do anúncio era só o degrau
+    // de baixo do `??` do clique, ele sobrevivia apenas dentro de `bruto` — e
+    // ninguém consulta o payload cru para responder de qual anúncio o contato
+    // veio.
+    const r = extrairAtribuicaoMeta({
+      source_type: "ad",
+      source_id: "120210000000000",
+      ctwa_clid: "AfE...clid",
+    });
+    expect(r?.sourceId).toBe("AfE...clid");
+    expect(r?.adId).toBe("120210000000000");
   });
 
   it("rejeita source_type 'post' — orgânico, não anúncio pago", () => {
@@ -55,7 +74,36 @@ describe("extrairAtribuicaoMeta — referral do webhook oficial", () => {
   });
 });
 
-describe("extrairAtribuicaoWaha — externalAdReplyInfo do Baileys", () => {
+describe("extrairAtribuicaoWaha — externalAdReply do WAHA e forma legada", () => {
+  it("extrai externalAdReply na forma recebida pelo WAHA NOWEB", () => {
+    const r = extrairAtribuicaoWaha({
+      extendedTextMessage: {
+        text: "Quero saber mais",
+        contextInfo: {
+          ctwaPayload: "dados-do-clique",
+          externalAdReply: {
+            sourceType: "ad",
+            sourceId: "ad-exemplo",
+            ctwaClid: "clid-exemplo",
+            title: "Serviço de exemplo",
+            body: "Saiba mais",
+            sourceUrl: "https://fb.me/anuncio",
+          },
+        },
+      },
+      messageContextInfo: { deviceListMetadataVersion: 2 },
+    });
+    expect(r).toEqual({
+      plataforma: "meta_ads",
+      sourceId: "clid-exemplo",
+      adId: "ad-exemplo",
+      titulo: "Serviço de exemplo",
+      corpo: "Saiba mais",
+      sourceUrl: "https://fb.me/anuncio",
+      bruto: expect.objectContaining({ sourceType: "ad" }),
+    });
+  });
+
   it("extrai de extendedTextMessage.contextInfo.externalAdReplyInfo", () => {
     const r = extrairAtribuicaoWaha({
       extendedTextMessage: {
@@ -74,6 +122,7 @@ describe("extrairAtribuicaoWaha — externalAdReplyInfo do Baileys", () => {
     expect(r).toEqual({
       plataforma: "meta_ads",
       sourceId: "clid-999",
+      adId: "ad-999",
       titulo: "Agende sua consulta",
       corpo: "Clique e fale com a gente",
       sourceUrl: "https://fb.me/anuncio123",
@@ -87,7 +136,8 @@ describe("extrairAtribuicaoWaha — externalAdReplyInfo do Baileys", () => {
         contextInfo: { externalAdReplyInfo: { sourceId: "ad-1", title: "X" } },
       },
     });
-    expect(r?.sourceId).toBe("ad-1");
+    expect(r?.sourceId).toBeNull();
+    expect(r?.adId).toBe("ad-1");
   });
 
   it("nulo quando é uma mensagem comum, sem contextInfo de anúncio", () => {
@@ -108,6 +158,16 @@ describe("extrairAtribuicaoWaha — externalAdReplyInfo do Baileys", () => {
           text: "oi",
           contextInfo: {
             externalAdReplyInfo: { sourceType: "post", title: "Promo", ctwaClid: "x" },
+          },
+        },
+      }),
+    ).toBeNull();
+
+    expect(
+      extrairAtribuicaoWaha({
+        extendedTextMessage: {
+          contextInfo: {
+            externalAdReply: { sourceType: "post", title: "Publicação", ctwaClid: "x" },
           },
         },
       }),
@@ -137,9 +197,10 @@ describe("estamparAtribuicaoDoContato", () => {
     const rpc = vi.fn().mockResolvedValue({ error: null });
     const admin = { rpc } as never;
 
-    await estamparAtribuicaoDoContato(admin, "contact-1", {
+    await estamparAtribuicaoDoContato(admin, "org-1", "contact-1", {
       plataforma: "meta_ads",
       sourceId: "clid-1",
+      adId: "120210000000000",
       titulo: "Título",
       corpo: "Corpo",
       sourceUrl: "https://fb.me/x",
@@ -149,11 +210,13 @@ describe("estamparAtribuicaoDoContato", () => {
     expect(rpc).toHaveBeenCalledWith(
       "fn_estampar_atribuicao_de_anuncio",
       expect.objectContaining({
+        p_org: "org-1",
         p_contact: "contact-1",
         p_platform: "meta_ads",
         p_metadata: expect.objectContaining({
           ad_platform: "meta_ads",
           ad_source_id: "clid-1",
+          ad_id: "120210000000000",
           ad_title: "Título",
           ad_body: "Corpo",
           ad_source_url: "https://fb.me/x",
@@ -168,9 +231,10 @@ describe("estamparAtribuicaoDoContato", () => {
     const admin = { rpc } as never;
 
     await expect(
-      estamparAtribuicaoDoContato(admin, "contact-1", {
+      estamparAtribuicaoDoContato(admin, "org-1", "contact-1", {
         plataforma: "meta_ads",
         sourceId: null,
+        adId: null,
         titulo: null,
         corpo: null,
         sourceUrl: null,

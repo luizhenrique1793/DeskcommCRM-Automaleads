@@ -23,6 +23,14 @@
 #      e o fallback de "nenhuma tag conhecida + fetch falhou") — casos 8 e 9
 #      isolam cada uma, provado por sabotagem cirúrgica de cada linha.
 set -uo pipefail
+# Isolamento do git: um GIT_DIR herdado (suíte rodada de dentro de um hook ou de um
+# `rebase --exec`) manda por cima de todo `cd`/`git -C` dos repositórios descartáveis
+# abaixo, e init/commit/config caem no repositório de quem roda — foi uma escrita de
+# `user.*` assim que assinou como "Pessoa <alguem@fork.dev>" 829 commits da main a
+# partir de 10/09/2026. Zera o ambiente local do git (o idioma do próprio git) e dá a
+# identidade por ambiente: nenhum teste aqui mede o autor.
+unset $(git rev-parse --local-env-vars)
+export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t.t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t.t
 
 # O namespace das imagens publicadas, lido da FONTE (hostgator-setup-kit/_common.sh)
 # em vez de repetido aqui. Este arquivo tinha o literal em 29 lugares — fixtures e
@@ -57,6 +65,7 @@ trap 'rm -rf "$WORK"' EXIT
 # git de verdade, resolvido ANTES de $WORK/bin entrar no PATH (senão o shim
 # abaixo se acharia a si mesmo e recursaria pra sempre).
 REAL_GIT="$(command -v git)"
+REAL_UNAME="$(command -v uname)"
 
 FAILS=0
 check() {  # check <descrição> <comando de verificação...>
@@ -83,6 +92,12 @@ case " $* " in
   # devolver algo: com PREV_IMAGE vazio o rollback nem seria tentado, e o teste
   # do agente passaria mesmo com o defeito de volta.
   *" images "*) printf 'sha256:deadbeef\n' ;;
+  # Caso 13: o aviso de manutenção de uma atualização anterior ficou de pé
+  # (AVISO_PRESO=1), e a imagem local é a mesma do registro (IMAGEM_EM_DIA=1) —
+  # a combinação que leva o update.sh à saída "nada a atualizar".
+  *" ps "*) [ "${AVISO_PRESO:-0}" = "1" ] && printf 'deskcomm-manutencao\n' ;;
+  *" image inspect "*) [ "${IMAGEM_EM_DIA:-0}" = "1" ] && printf 'x@sha256:aaa\n' ;;
+  *" imagetools inspect "*) [ "${IMAGEM_EM_DIA:-0}" = "1" ] && printf 'Digest: sha256:aaa\n' ;;
   # Aplicação do baseline. Só com BASELINE_ROTEIRO no ambiente (caso 4c): cada
   # chamada imprime a próxima passada do roteiro. Fora dele, sai limpa como antes.
   *" -f /b.sql "*)
@@ -91,6 +106,23 @@ case " $* " in
       printf '%s' "$n" > "$BASELINE_ROTEIRO/n"
       [ -f "$BASELINE_ROTEIRO/passada.$n" ] && cat "$BASELINE_ROTEIRO/passada.$n"
     fi ;;
+  # VPS cuja arquitetura não é a das imagens publicadas (issue 1060): o registro
+  # responde que não tem manifest para ela, então o `pull` não traz nada e o
+  # `up -d` seguinte morre junto. Só vale com ARQ_DIFERENTE=1 — o gatilho do
+  # caso 12; fora dele o dublê é tão transparente quanto sempre foi.
+  *" pull "*)
+    if [ "${ARQ_DIFERENTE:-0}" = "1" ] && [ ! -f "${DOCKER_BUILD_FEITO:-/nao-existe}" ]; then
+      printf 'no matching manifest for linux/arm64/v8 in the manifest list entries\n' >&2
+      exit 1
+    fi ;;
+  *" up "*)
+    if [ "${ARQ_DIFERENTE:-0}" = "1" ] && [ ! -f "${DOCKER_BUILD_FEITO:-/nao-existe}" ]; then
+      exit 1
+    fi ;;
+  # O build local é o que destrava os dois acima: a partir dele as imagens
+  # existem no disco e o `up` sobe, como numa VPS de verdade depois do build.
+  *" build "*)
+    [ -n "${DOCKER_BUILD_FEITO:-}" ] && : > "$DOCKER_BUILD_FEITO" ;;
 esac
 exit 0
 STUB
@@ -140,7 +172,18 @@ if [ "\${FORCE_UNSHALLOW_FAIL:-0}" = "1" ]; then
 fi
 exec "$REAL_GIT" "\$@"
 STUB
-chmod +x "$WORK/bin/docker" "$WORK/bin/crontab" "$WORK/bin/flock" "$WORK/bin/curl" "$WORK/bin/git"
+# `uname -m` responde x86_64. O `_common.sh` recusa, antes de qualquer trabalho,
+# todo `update.sh` que não roda em amd64 — e aqui quem está sob prova é o
+# update.sh, não o processador de quem roda a suíte. Sem o dublê, num Mac Apple
+# Silicon (`arm64`) o script saía na guarda antes de todos os casos (medido: 45
+# provas vermelhas). A recusa de ARM tem prova própria em
+# tests/shell/arquitetura-kit.test.sh; qualquer outro uso de `uname` vai ao real.
+cat > "$WORK/bin/uname" <<STUB
+#!/usr/bin/env bash
+[ "\$*" = "-m" ] && { printf 'x86_64\n'; exit 0; }
+exec "$REAL_UNAME" "\$@"
+STUB
+chmod +x "$WORK/bin/docker" "$WORK/bin/crontab" "$WORK/bin/flock" "$WORK/bin/curl" "$WORK/bin/git" "$WORK/bin/uname"
 export DOCKER_LOG="$WORK/docker.log" CURL_LOG="$WORK/curl.log"
 export FAKE_CRONTAB="$WORK/crontab.txt"
 export PATH="$WORK/bin:$PATH"
@@ -148,8 +191,16 @@ export PATH="$WORK/bin:$PATH"
 # ── Instalação de mentira: repo git + kit + .env ─────────────────────────────
 PROJ="$WORK/deskcommcrm"
 mkdir -p "$PROJ/hostgator-setup-kit" "$PROJ/supabase"
-cp "$REPO_ROOT/hostgator-setup-kit/_common.sh" "$REPO_ROOT/hostgator-setup-kit/update.sh" \
-   "$REPO_ROOT/hostgator-setup-kit/agent.sh" "$PROJ/hostgator-setup-kit/"
+cp "$REPO_ROOT/hostgator-setup-kit/_common.sh" "$REPO_ROOT/hostgator-setup-kit/_i18n.sh" \
+   "$REPO_ROOT/hostgator-setup-kit/update.sh" \
+   "$REPO_ROOT/hostgator-setup-kit/agent.sh" "$REPO_ROOT/hostgator-setup-kit/manutencao.sh" \
+   "$PROJ/hostgator-setup-kit/"
+# O aviso de manutencao entra no fixture porque o `update.sh` o carrega com
+# `source` DURO, como faz com o `_common.sh`. Deixa-lo de fora nao da um vermelho
+# que fale de manutencao: da 22 casos vermelhos espalhados, todos dizendo "a
+# atualizacao nao explicou nada" — porque o script morre na linha 21, antes de
+# qualquer mensagem. Foi exatamente o que aconteceu ao escrever isto.
+cp -R "$REPO_ROOT/hostgator-setup-kit/manutencao" "$PROJ/hostgator-setup-kit/"
 # backup.sh de mentira: deixa um rastro. É o marco "o script já começou a
 # mexer" — a guarda de retrocesso só vale se abortar ANTES dele.
 BACKUP_MARK="$WORK/backup-rodou"
@@ -159,6 +210,10 @@ touch "$BACKUP_MARK"
 STUB
 # shellcheck disable=SC2016  # o ${APP_IMAGE} é literal DENTRO do compose
 printf 'services:\n  app:\n    image: \${APP_IMAGE:-x}\n' > "$PROJ/docker-compose.prod.yml"
+# O overlay de build local existe no repo de verdade e o caminho de recuperação
+# do caso 12 o referencia por nome: sem ele aqui, o caso acusaria um arquivo que
+# existe na máquina do cliente.
+printf 'services:\n  app:\n    pull_policy: never\n    build:\n      context: .\n' > "$PROJ/docker-compose.build.yml"
 printf 'select 1;\n' > "$PROJ/supabase/baseline.sql"
 cat > "$PROJ/.env" <<ENV
 APP_IMAGE=${NS}/deskcommcrm:latest
@@ -172,7 +227,6 @@ chmod 600 "$PROJ/.env"
 
 cd "$PROJ" || exit 1
 git init --quiet
-git config user.email t@t.t; git config user.name t
 git add -A
 git commit --quiet -m "v0.9.0"
 git tag v0.9.0
@@ -182,8 +236,13 @@ echo topo > topo.txt; git add -A; git commit --quiet -m "topo da main"
 OUTFILE="$WORK/saida.txt"
 run_update() {  # run_update <args...> → saída em $OUTFILE, status em $RC
   rm -f "$BACKUP_MARK"
-  bash hostgator-setup-kit/update.sh "$@" > "$OUTFILE" 2>&1
-  RC=$?
+  # `|| RC=$?` em vez de `RC=$?` na linha seguinte: o caso 10 carrega o
+  # _common.sh do kit, que traz `set -e` junto com as funções. Sem este guarda,
+  # um caminho que o teste ESPERA que falhe (o "antes" da issue 1060) derrubava
+  # o harness no meio do caso — a suíte saía 1 sem imprimir QUAL prova falhou,
+  # que é justamente o silêncio que este arquivo existe para caçar.
+  RC=0
+  bash hostgator-setup-kit/update.sh "$@" > "$OUTFILE" 2>&1 || RC=$?
 }
 
 echo "── 1. Alvo anterior ao instalado é recusado antes do backup"
@@ -308,13 +367,13 @@ check "  e a orientação é a ÚLTIMA coisa da saída, depois do passo 7" \
 
 # Lista grande (role sem dono: milhares de "must be owner") com a disputa no topo.
 # `printf | head -20` sob pipefail levava SIGPIPE e o set -e matava o update.sh
-# com 141 — antes do aviso de PERMISSÃO, que existe para este caso, e antes do pull.
+# com 141 — antes do aviso de PERMISSÃO, que existe para este caso e agora o encerra.
 rm -rf "$ROTEIRO_UG"; mkdir -p "$ROTEIRO_UG"
 { printf '%s\n' "$DEADLOCK_UG"; for i in $(seq 1 4000); do printf 'psql:/b.sql:%s: ERROR:  must be owner of table tabela_%s\n' "$i" "$i"; done; } > "$ROTEIRO_UG/passada.1"
 cp "$ROTEIRO_UG/passada.1" "$ROTEIRO_UG/passada.2"; cp "$ROTEIRO_UG/passada.1" "$ROTEIRO_UG/passada.3"
 : > "$DOCKER_LOG"
 BASELINE_ROTEIRO="$ROTEIRO_UG" BASELINE_ESPERA_S=0 run_update --to v1.1.0 --force
-check "lista de erros maior que o buffer do pipe não mata o update.sh" test "$RC" -eq 0
+check "lista de erros maior que o buffer do pipe não mata o update.sh (para com 1)" test "$RC" -eq 1
 check "  a disputa no topo foi reconhecida (3 passadas)" test "$(grep -c -- '-f /b.sql' "$DOCKER_LOG")" -eq 3
 check "  o aviso de PERMISSÃO chegou à tela" grep -q "erros de PERMISSÃO" "$OUTFILE"
 check "  e o fim diz que o banco NÃO terminou limpo" grep -q "banco NÃO terminou limpo" "$OUTFILE"
@@ -332,6 +391,25 @@ BASELINE_ROTEIRO="$ROTEIRO_UG" BASELINE_ESPERA_S=0 run_update --to v1.1.0 --forc
 check "só permissão: uma passada (repetir não cura)" test "$(grep -c -- '-f /b.sql' "$DOCKER_LOG")" -eq 1
 check "  sem a metade de banco ocupado (não houve disputa)" test -z "$(grep 'Parte não aplicou' "$OUTFILE" || true)"
 check "  e o FIM orienta a conexão do dono" test -n "$(tail -n 8 "$OUTFILE" | grep -F 'SUPABASE_DB_ADMIN_URL' || true)"
+check "  e PARA com 1, sem baixar a imagem nova" test "$RC" -eq 1
+check "  (nenhum pull depois do banco)" test -z "$(grep -E ' pull( |$)' "$DOCKER_LOG" || true)"
+
+# Erro que repetir não cura DEPOIS de um `drop policy` que o `create` não refez.
+# A parada por banco incompleto vem DEPOIS da conferência das regras: saindo
+# antes dela, o trap subia app, worker e scheduler sem a regra — tela vazia para
+# todo mundo. Com a ordem certa o CRM fica parado com o aviso vermelho.
+printf 'drop policy if exists "leitura" on public.leads;\ncreate policy "leitura" on public.leads using (true);\n' > "$PROJ/supabase/baseline.sql"
+rm -rf "$ROTEIRO_UG"; mkdir -p "$ROTEIRO_UG"
+printf 'psql:/b.sql:2: ERROR:  column "organization_id" does not exist\n' > "$ROTEIRO_UG/passada.1"
+: > "$DOCKER_LOG"
+BASELINE_ROTEIRO="$ROTEIRO_UG" BASELINE_ESPERA_S=0 run_update --to v1.1.0 --force
+check "regra derrubada + erro não curável: o baseline aplicado tinha a regra (controle)" \
+  grep -q 'create policy "leitura" on public.leads' "$PROJ/supabase/baseline.sql"
+check "  para com 1" test "$RC" -eq 1
+check "  a conferência das regras rodou e acusou a ausente" grep -q "REGRAS DE ISOLAMENTO AUSENTES" "$OUTFILE"
+check "  e o CRM NÃO subiu depois do banco" \
+  test -z "$(awk '/-f \/b.sql/ {b=1} b && / up -d/' "$DOCKER_LOG")"
+git -C "$PROJ" checkout --quiet -- supabase/baseline.sql
 
 # ── Clone RASO: a topologia que o install.sh realmente entrega ───────────────
 # `install.sh` instala com `git clone --depth 1`. Num repositório raso o
@@ -347,7 +425,7 @@ mkdir -p "$SRC/supabase"; printf 'select 1;\n' > "$SRC/supabase/baseline.sql"
 printf 'services:\n  app:\n    image: \${APP_IMAGE:-x}\n' > "$SRC/docker-compose.prod.yml"
 printf '.env\n' > "$SRC/.gitignore"
 cd "$SRC" || exit 1
-git init --quiet; git config user.email t@t.t; git config user.name t
+git init --quiet
 git add -A; git commit --quiet -m "release antiga"; git tag v0.9.0
 echo topo > topo.txt; git add -A; git commit --quiet -m "main, depois da release"
 
@@ -568,6 +646,134 @@ R="$( printf "APP_IMAGE=${NS}/deskcommcrm:1.3.0\n" > "$PIN_DIR/.env"
       cd "$PIN_DIR" && PATH="$PIN_DIR/bin:$PATH" DUBLE_VERSION="<no value>" bash -c \
         ". '$KIT_DIR_TESTE/_common.sh'; completar_pin_ausente .env" 2>/dev/null || true )"
 check "imagem sem label de versão → não inventa pin" test -z "$R"
+
+# ── 11. Conserto que vive numa função do kit vale JÁ NA PRIMEIRA passada ─────
+# O `update.sh` carrega `_common.sh` na linha 16, ANTES do `git checkout` da tag
+# nova. Sem reler o arquivo depois do checkout, o resto da atualização roda com
+# as funções da versão ANTIGA — e um conserto que more numa função do kit só
+# chega na atualização SEGUINTE. Medido em produção com o conserto do segredo no
+# crontab (GHSA-vm36-w42w-rr5v): a linha antiga, com o segredo escrito nela,
+# continuava no crontab depois de atualizar para a versão que a conserta.
+#
+# A instalação deste caso parte do kit ANTIGO — que é a situação de quem já
+# instalou — e a tag de destino tem o kit NOVO. Uma passada só.
+echo "── 11. Conserto em função do kit vale já na primeira passada"
+CASO11="$WORK/caso11"
+cp -R "$PROJ" "$CASO11"
+cd "$CASO11" || exit 1
+NOVO_COMMON="$WORK/common-novo.sh"
+cp hostgator-setup-kit/_common.sh "$NOVO_COMMON"
+# Kit ANTIGO: a linha do cron carrega o segredo, como antes do conserto.
+python3 - "$CASO11/hostgator-setup-kit/_common.sh" <<'PATCH'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+nova = 'local cron_line="* * * * * curl -fsS -H @\\"${cabecalho}\\" \\"${url_drain}\\" >/dev/null 2>&1 ${marcador}"'
+velha = 'local cron_line="* * * * * curl -fsS -H \\"Authorization: Bearer ${secret}\\" \\"${url_drain}\\" >/dev/null 2>&1 ${marcador}"'
+assert s.count(nova) == 1, "a linha nova do cron mudou de forma: %d ocorrência(s)" % s.count(nova)
+s = s.replace(nova, velha)
+# O kit de ANTES do conserto não gravava arquivo de cabeçalho nenhum — tirar só a
+# linha do cron deixaria o fixture mais moderno que a realidade, e a sabotagem
+# deste caso nem alcançaria a prova da permissão 600.
+grava = '''  local cabecalho="${PROJECT_DIR:-$PWD}/.env.cron-drain"
+  gravar_cabecalho_do_cron "$cabecalho" "$secret" \\
+    || { c_ylw "$(t "⚠ não consegui gravar {1} — não ativei o cron das automações." "$cabecalho")"; return 0; }
+'''
+assert s.count(grava) == 1, "o bloco que grava o cabeçalho mudou de forma: %d" % s.count(grava)
+s = s.replace(grava, "")
+open(p, "w", encoding="utf-8").write(s)
+PATCH
+git add -A; git commit --quiet -m "kit antigo (linha do cron com o segredo)"
+# Tag de destino: kit NOVO.
+cp "$NOVO_COMMON" hostgator-setup-kit/_common.sh
+git add -A; git commit --quiet -m "kit novo (linha do cron aponta para o arquivo)"
+git tag v9.9.9
+git checkout --quiet HEAD~1   # a instalação está no kit ANTIGO
+: > "$FAKE_CRONTAB"
+rm -f "$CASO11/.env.cron-drain"
+bash hostgator-setup-kit/update.sh --to v9.9.9 --skip-backup > "$WORK/saida11.txt" 2>&1
+check "a linha do cron aponta para o arquivo de cabeçalho (conserto aplicado nesta passada)" \
+  grep -q -- "-H @" "$FAKE_CRONTAB"
+check "  e o segredo NÃO está escrito na linha do cron" \
+  bash -c '! grep -q "Authorization: Bearer" "$FAKE_CRONTAB"'
+# `stat -c` (GNU) PRIMEIRO e `stat -f` (BSD) como reserva, nesta ordem: no Linux,
+# `stat -f %Lp` NÃO falha — ele responde sobre o SISTEMA DE ARQUIVOS e sai 0 —,
+# então a ordem inversa nunca chega à reserva e a prova reprova no CI dizendo que
+# a permissão está errada quando ela está certa. Medido: reprovou 1 prova no
+# `verify` do #1115, só esta.
+modo_do_arquivo() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null; }
+check "  o arquivo de cabeçalho nasceu com permissão 600" \
+  test "$(modo_do_arquivo "$CASO11/.env.cron-drain")" = "600"
+cd "$PROJ" || exit 1
+
+echo "── 12. VPS de outra arquitetura: atualizar se recupera sozinho (issue 1060)"
+# O defeito: o registro responde "no matching manifest for linux/arm64/v8", o
+# `pull` não traz imagem nenhuma e o `up -d` morre junto — o `app` não tem
+# `build:` ao lado do `image:`, então o Compose não tem o que subir. Antes da
+# guarda o script terminava como se tivesse dado certo: o CRM ficava na versão
+# velha e o dono não era avisado. Pelo botão "Atualizar" nem isso, porque o
+# agente roda sozinho no cron. O desfecho certo é construir aqui a MESMA versão
+# alvo e dizer, em português, o que aconteceu.
+cd "$PROJ" || exit 1
+export DOCKER_BUILD_FEITO="$WORK/build-feito"
+rm -f "$DOCKER_BUILD_FEITO"
+# Instalado numa versão anterior à alvo: sem isto a guarda de retrocesso
+# recusaria antes de chegar ao `up -d`.
+sed -i.bak "s|^APP_IMAGE=.*|APP_IMAGE=${NS}/deskcommcrm:0.9.0|" .env && rm -f .env.bak
+: > "$DOCKER_LOG"
+export ARQ_DIFERENTE=1
+run_update --to v1.1.0
+unset ARQ_DIFERENTE
+check "termina com sucesso, sem intervenção manual" test "$RC" -eq 0
+check "o pull falhou de verdade no meio do caminho" \
+  grep -q "no matching manifest for linux/arm64/v8" "$OUTFILE"
+check "caiu para o build local do overlay de build" \
+  grep -q -- "-f docker-compose.build.yml build" "$DOCKER_LOG"
+check "subiu pelo override (pull_policy: never), sem voltar ao registro" \
+  grep -q -- "-f docker-compose.build.yml up -d" "$DOCKER_LOG"
+check "explica em português o que aconteceu" grep -q "não servem para esta VPS" "$OUTFILE"
+# O que sobra na tela do site é o rabo da saída (agent.sh: tail -40). Explicação
+# que fica só lá em cima não chega a quem clicou em "Atualizar".
+fim_tem() { tail -40 "$OUTFILE" | grep -q "$1"; }
+check "e diz no FIM, que é o que o agente manda para a tela" \
+  fim_tem "construídas aqui nesta VPS"
+
+# O caminho feliz NÃO muda de comportamento: imagem disponível, nada de build
+# local e nenhuma menção a arquitetura.
+sed -i.bak "s|^APP_IMAGE=.*|APP_IMAGE=${NS}/deskcommcrm:0.9.0|" .env && rm -f .env.bak
+: > "$DOCKER_LOG"
+run_update --to v1.1.0
+check "caminho feliz: conclui normalmente" test "$RC" -eq 0
+check "caminho feliz: não constrói nada aqui (não paga o build à toa)" \
+  bash -c "! grep -q 'docker-compose.build.yml' '$DOCKER_LOG'"
+check "caminho feliz: a saída não fala em arquitetura nem em construção local" \
+  bash -c "! grep -qiE 'arquitetura|construídas aqui nesta VPS' '$OUTFILE'"
+
+# O passo 9 do install.sh tinha o MESMO buraco do `up -d` sem guarda, e a saída
+# dele também. A recuperação é a MESMA função de _common.sh, exercitada acima de
+# ponta a ponta pelo update.sh; aqui se prova que o install.sh a chama — e logo
+# depois do `up -d` que pode falhar, não em outro lugar qualquer.
+check "install.sh chama a recuperação depois de um up -d que pode falhar" \
+  bash -c "grep -A1 'if ! dc up -d; then' '$REPO_ROOT/hostgator-setup-kit/install.sh' | grep -q 'construir_aqui_e_subir'"
+
+echo "── 13. \"Nada a atualizar\" derruba o aviso de manutenção preso (PR #1524)"
+# Medido numa VPS real: a atualização morreu depois de subir o aviso, com a tag
+# nova já no disco. Toda execução seguinte caía na saída antecipada e o aviso —
+# que segura o apelido de rede `app` — seguia respondendo 503 por 6h30.
+cd "$PROJ" || exit 1
+: > "$DOCKER_LOG"
+IMAGEM_EM_DIA=1 AVISO_PRESO=1 run_update --to v1.1.0
+check "sai com sucesso pela saída \"nada a atualizar\"" test "$RC" -eq 0
+check "  e a saída é mesmo a antecipada" grep -q "Nada a atualizar" "$OUTFILE"
+check "  não rodou o backup (não virou atualização)" test ! -f "$BACKUP_MARK"
+check "  removeu o contêiner do aviso" grep -q "rm -f deskcomm-manutencao" "$DOCKER_LOG"
+check "  e contou a quem opera" grep -q "aviso de manutenção preso" "$OUTFILE"
+check "  e ensina a concluir com --force" grep -q -- "--to v1.1.0 --force" "$OUTFILE"
+: > "$DOCKER_LOG"
+IMAGEM_EM_DIA=1 run_update --to v1.1.0
+check "sem aviso de pé: não mexe em contêiner nenhum" \
+  bash -c "! grep -q 'rm -f deskcomm-manutencao' '$DOCKER_LOG'"
+check "  e não fala de aviso preso" bash -c "! grep -q 'aviso de manutenção preso' '$OUTFILE'"
 
 if [ "$FAILS" -eq 0 ]; then echo "OK — todas as provas passaram."; else echo "FALHOU — $FAILS prova(s)."; fi
 exit $((FAILS > 0))

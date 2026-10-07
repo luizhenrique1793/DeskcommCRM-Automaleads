@@ -191,7 +191,7 @@ create table public.api_tokens (
   organization_id uuid not null references public.organizations(id) on delete cascade,
   created_by      uuid not null references auth.users(id) on delete restrict,
   name            text not null,
-  prefix          text not null, -- ex: 'tok_live_a3f9' (mostrado na UI; primeiros 12 chars)
+  prefix          text not null, -- ex: 'dsk_a3f9b2c4' (mostrado na UI; primeiros 12 chars)
   token_hash      bytea not null, -- sha256(plaintext) — plaintext NUNCA volta após criação
   scopes          jsonb not null default '[]'::jsonb,
                   -- ex: ["leads:read","leads:write","contacts:read","lgpd:execute"]
@@ -215,7 +215,9 @@ create index idx_api_tokens_org  on public.api_tokens(organization_id) where rev
 comment on table public.api_tokens is 'Bearer tokens. Plaintext mostrado UMA vez na criação; depois apenas hash. Prefix visível na UI.';
 ```
 
-**Formato do plaintext**: `tok_<env>_<base62 random 32 chars>`. Ex: `tok_live_a3f9b2c4d5e6f7g8h9i0j1k2l3m4n5o6`. Os primeiros 12 chars (`tok_live_a3f9`) viram o `prefix`.
+**Formato do plaintext**: `dsk_<8 hex aleatórios>_<segredo base64url de 32 bytes>`. Ex: `dsk_a3f9b2c4_<43 chars>`. Os primeiros 12 chars (`dsk_a3f9b2c4`) viram o `prefix`, que é o que a UI mostra.
+
+**Por que o prefixo NÃO carrega ambiente**: o esquema com `live`/`test` dentro do prefixo nunca chegou ao código — quem emite e quem valida são `app/api/v1/settings/api-tokens/route.ts` e `lib/mcp/auth.ts`, e o prefixo lá é `dsk_` (o `CLAUDE.md` registra, desde 17/09/2026 / PR #1128, que o prefixo antigo nunca existiu no código). O produto também não tem ambiente por token: o que separa uma credencial da outra é a organização (`organization_id`) e o estado vive em `revoked_at`/`expires_at`. O prefixo identifica o TIPO de credencial, e os 12 primeiros chars continuam sendo o que a tela exibe (issue #1129).
 
 ### 2.5 `api_audit_log` (append-only)
 
@@ -720,8 +722,8 @@ $$;
 POST /api/v1/auth/tokens (admin-only)
 Body: { name, scopes: ["leads:read","leads:write"], expires_at: "2026-12-31T00:00:00Z" }
 → Backend:
-  1. Gera plaintext: `tok_live_${randomBase62(32)}`
-  2. prefix = plaintext.slice(0, 12) // "tok_live_a3f9"
+  1. Gera plaintext: `dsk_${randomBytes(4).toString("hex")}_${randomBytes(32).toString("base64url")}`
+  2. prefix = plaintext.slice(0, 12) // "dsk_a3f9b2c4"
   3. token_hash = sha256(plaintext)
   4. INSERT INTO api_tokens (...)
   5. Audit `token.created`
@@ -1071,64 +1073,40 @@ create table public.idempotency_keys (
   key             text not null,
   endpoint        text not null, -- ex: 'POST /api/v1/leads'
   request_hash    bytea not null, -- sha256 do body normalizado
-  status_code     integer not null,
-  response_body   jsonb not null,
+  status_code     integer,        -- null = RESERVA (efeito em curso)
+  response_body   jsonb,          -- null junto com status_code; nunca um só
   created_at      timestamptz not null default now(),
   expires_at      timestamptz not null default now() + interval '24 hours',
-  unique (organization_id, key, endpoint)
+  unique (organization_id, key, endpoint),
+  constraint idempotency_keys_recibo_ou_reserva
+    check ((status_code is null) = (response_body is null))
 );
 ```
 
-**Algoritmo**:
+A linha tem **dois estados** (migration 0321, issue #778). **Reserva** — `status_code` e
+`response_body` nulos, gravada ANTES do efeito, `expires_at` curto (60s); é ela que faz a
+segunda requisição simultânea colidir no índice único em vez de executar de novo.
+**Recibo** — os dois preenchidos, depois do efeito, na mesma linha, com `expires_at` de 24h.
 
-```ts
-async function withIdempotency<T>(
-  req: Request,
-  orgId: string,
-  endpoint: string,
-  handler: () => Promise<{ status: number; body: T }>
-) {
-  const key = req.headers.get('idempotency-key');
-  if (!key) return handler();
+**Algoritmo** (implementado em `lib/api/idempotency.ts`, `comIdempotencia`):
 
-  const body = await req.clone().text();
-  const requestHash = sha256(body);
+1. Lê a linha da chave (`organization_id`, `key`, `endpoint`, `expires_at > now()`).
+   - hash diferente → 409 `idempotency_conflict`;
+   - mesmo hash e `status_code` nulo → 409 `idempotency_in_progress` (retentável: a primeira
+     execução ainda está em curso);
+   - mesmo hash e recibo → replay da resposta gravada, sem reexecutar.
+2. Sem linha viva: **reserva** (`insert` com `status_code`/`response_body` nulos). Quem leva
+   `23505` relê: linha viva é classificada como no passo 1; linha vencida é retomada por
+   `update` otimista (`id` + `expires_at` lido como bilhete) — quem perde a retomada recebe
+   `idempotency_in_progress`.
+3. Executa o efeito. Se ele **lança**, a reserva vence na hora e o erro propaga: a
+   retentativa com a mesma chave executa em vez de receber "em curso".
+4. Grava o **recibo** na mesma linha (filtrada por `request_hash`), `expires_at` = 24h.
+   Falha ao gravar o recibo não vira erro: o efeito já aconteceu, e erro faria o cliente
+   retentar e duplicar.
 
-  // Lookup
-  const existing = await db
-    .from('idempotency_keys')
-    .select('*')
-    .eq('organization_id', orgId)
-    .eq('key', key)
-    .eq('endpoint', endpoint)
-    .gt('expires_at', new Date().toISOString())
-    .maybeSingle();
-
-  if (existing.data) {
-    if (!constantTimeEq(existing.data.request_hash, requestHash)) {
-      throw new ApiError(409, 'idempotency_conflict', {
-        message: 'Idempotency-Key reused with different body',
-      });
-    }
-    return new Response(JSON.stringify(existing.data.response_body), {
-      status: existing.data.status_code,
-      headers: { 'X-Idempotent-Replay': 'true' },
-    });
-  }
-
-  // Execute + persist
-  const result = await handler();
-  await db.from('idempotency_keys').insert({
-    organization_id: orgId,
-    key,
-    endpoint,
-    request_hash: requestHash,
-    status_code: result.status,
-    response_body: result.body,
-  });
-  return result;
-}
-```
+`request_hash` é `bytea`: gravado como o literal `\x<hex>` e normalizado na leitura
+(`\x…` do PostgREST, `Buffer` do driver `pg`).
 
 **Cron de limpeza**: `DELETE FROM idempotency_keys WHERE expires_at < now()` diário.
 
@@ -1217,6 +1195,7 @@ export async function rateLimitMiddleware(req: Request, orgId: string) {
 | `tenant_not_found` | 404 | Org inexistente ou não acessível |
 | `resource_not_found` | 404 | UUID não encontrado |
 | `idempotency_conflict` | 409 | Mesma key, body diferente |
+| `idempotency_in_progress` | 409 | Mesma key, mesmo body, primeira execução ainda em curso — retentável |
 | `tenant_already_exists` | 409 | CNPJ duplicado |
 | `cursor_malformed` | 400 | Cursor estrutura inválida |
 | `cursor_invalid_signature` | 400 | HMAC não bate (tampering) |

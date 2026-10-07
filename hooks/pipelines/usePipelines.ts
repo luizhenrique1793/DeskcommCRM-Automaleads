@@ -36,6 +36,12 @@ export interface PatchDeFunil {
   is_default?: boolean;
   /** Onde nasce o lead de quem já é cliente. `false` desliga, e é aceito. */
   is_client_pipeline?: boolean;
+  /**
+   * SÓ `false` — tirar o funil do arquivo (#979), e só sozinho no pedido. A rota
+   * recusa `true` (arquivar é do DELETE, que confere as dependências antes) e
+   * recusa com 409 o pedido que mistura desarquivar com outra mudança.
+   */
+  is_archived?: false;
   depois_de?: string | null;
 }
 
@@ -50,7 +56,12 @@ export interface FunilDaResposta {
   is_client_pipeline: boolean;
 }
 
-type Resposta = { data: { pipelines: FunilDaResposta[] } };
+/**
+ * `arquivados` vem SEPARADO dos vivos, e quem consome precisa manter assim: é
+ * `pipelines` que alimenta os seletores de funil do produto, e funil arquivado
+ * ali seria destino que não existe mais.
+ */
+type Resposta = { data: { pipelines: FunilDaResposta[]; arquivados: FunilDaResposta[] } };
 
 function useReler() {
   const router = useRouter();

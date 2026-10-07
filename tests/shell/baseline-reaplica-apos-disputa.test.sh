@@ -86,11 +86,17 @@ rodar() {
     export PATH="$1/bin:$PATH" DOCKER_LOG="$1/docker.log" ROTEIRO="$2"
     export SUPABASE_DB_URL="postgresql://postgres:x@db.exemplo:5432/postgres"
     export BASELINE_ESPERA_S=0
+    # O arquivo da rodada do banco ganha caminho fixo aqui: sem isto ele sai com
+    # o PID do bash filho, e a prova não teria como ler o que o kit registrou.
+    export RODADA_DO_BANCO_ARQUIVO="$1/rodada.txt"
+    rm -f "$1/rodada.txt"
     source "$3/hostgator-setup-kit/_common.sh" >/dev/null 2>&1
     if reaplicar_baseline "$1/baseline.sql" "$1/apply.log"; then rc=0; else rc=1; fi
     printf "%s" "$rc" > "$1/rc"
     printf "%s" "${BASELINE_INESPERADO-<nunca definido>}" > "$1/inesperado"
     printf "%s" "${BASELINE_PASSADAS-<nunca definido>}" > "$1/passadas-declaradas"
+    # O JSON que vai no corpo do `run_result` (é o que o `agent.sh` interpola).
+    printf "%s" "$(ler_rodada_do_banco)" > "$1/rodada-json"
   ' _ "$WORK" "$ROTEIRO" "$RAIZ" > "$WORK/tela" 2>&1
 }
 
@@ -257,6 +263,39 @@ roteiro 2 ""
 rodar
 check "a linha do deadlock aparece na tela mesmo sendo a 16ª" grep -q "psql:/b.sql:16766: ERROR:  deadlock detected" "$WORK/tela"
 check "  e a listagem diz quantas ficaram de fora" grep -q "(e mais 6 linhas)" "$WORK/tela"
+
+echo "── 10. A rodada do banco: o kit só registra o que FECHOU (é o que a frase da tela afirma)"
+# O que o `agent.sh` manda para a rota sai daqui, e a tela transforma isto numa
+# frase que diz "…até a atualização do banco fechar". Rodada que não fechou não
+# pode registrar nada: antes deste conserto, o esgotamento gravava os MESMOS três
+# números do sucesso, e o erro fatal gravava um `0 0 1` literal (não medido).
+novo_caso rodada-fechou
+roteiro 1 "$BENIGNO"
+rodar
+check "fechou de primeira: o arquivo diz sem disputa" grep -q '^disputa=0$' "$WORK/rodada.txt"
+check "  zero retentativa" grep -q '^retentativas=0$' "$WORK/rodada.txt"
+check "  fechou na passada 1" grep -q '^passada=1$' "$WORK/rodada.txt"
+check "  e o que vai à rota já sai com os nomes PLANOS dela" e_igual "$(cat "$WORK/rodada-json")" '"disputa_de_banco":false,"retentativas_do_banco":0,"passada_do_banco":1'
+
+novo_caso rodada-com-disputa
+roteiro 1 "$DEADLOCK"; roteiro 2 "$BENIGNO"
+rodar
+check "com disputa: diz que houve e em qual passada fechou" e_igual "$(cat "$WORK/rodada-json")" '"disputa_de_banco":true,"retentativas_do_banco":1,"passada_do_banco":2'
+
+novo_caso rodada-esgotou
+roteiro 1 "$DEADLOCK"; roteiro 2 "$DEADLOCK"; roteiro 3 "$DEADLOCK"
+rodar
+# `passadas` é o controle positivo: o caso só vale se a rodada REALMENTE aconteceu
+# (3 passadas) e, mesmo assim, nada foi registrado.
+check "esgotou depois de 3 passadas sem fechar o banco" e_igual "$(passadas)" 3
+check "  e não registra nada: a frase da tela afirma fechamento" e_igual "$(cat "$WORK/rodada.txt" 2>/dev/null)" ""
+check "  nada a mandar à rota também" e_igual "$(cat "$WORK/rodada-json")" ""
+
+novo_caso rodada-erro-fatal
+roteiro 1 'psql:/b.sql:88: ERROR:  permission denied for schema public'
+rodar
+check "erro que retentativa não cura: uma passada só" e_igual "$(passadas)" 1
+check "  e silêncio — nada do antigo '0 0 1' literal" e_igual "$(cat "$WORK/rodada.txt" 2>/dev/null)" ""
 
 if [ "$FAILS" -gt 0 ]; then printf '\n%d falha(s)\n' "$FAILS"; exit 1; fi
 printf '\ntudo verde\n'

@@ -5,11 +5,11 @@ import { headers } from "next/headers";
 import { revalidatePath } from "next/cache";
 
 import { createAdminClient } from "@/lib/supabase/admin";
-import { createClient } from "@/lib/supabase/server";
 import { audit } from "@/lib/audit";
 import { tenantSchema, type TenantInput } from "@/lib/schemas/settings";
 import { loadAuthUser, resolveActiveOrg } from "@/lib/auth/server";
-import { ROLE_RANK } from "@/lib/auth/types";
+import { podeAdministrarEmpresa } from "@/lib/auth/pode-administrar-empresa";
+import { paisesOferecidos } from "@/lib/legal/perfil-do-pais";
 
 export type UpdateTenantResult =
   | { ok: true }
@@ -26,7 +26,7 @@ export async function updateTenant(input: TenantInput): Promise<UpdateTenantResu
   if (supportWriteError(authUser.support)) return { ok: false, error: "forbidden" };
   const activeOrg = await resolveActiveOrg(authUser);
   if (!activeOrg) return { ok: false, error: "forbidden_tenant" };
-  if (!authUser.is_platform_admin && ROLE_RANK[activeOrg.role] < ROLE_RANK.admin) {
+  if (!podeAdministrarEmpresa(authUser, activeOrg)) {
     return { ok: false, error: "forbidden_role" };
   }
 
@@ -55,19 +55,15 @@ export async function updateTenant(input: TenantInput): Promise<UpdateTenantResu
   const ip = hdrs.get("x-forwarded-for")?.split(",")[0]?.trim() ?? null;
   const userAgent = hdrs.get("user-agent") ?? null;
 
-  // Read current settings jsonb to merge `lost_reasons_extra` non-destructively.
-  const { data: orgRow, error: readErr } = await supabase
-    .from("organizations")
-    .select("settings")
-    .eq("id", activeOrg.orgId)
-    .maybeSingle();
-  if (readErr) return { ok: false, error: readErr.message };
-
-  const currentSettings = (orgRow?.settings as Record<string, unknown> | null) ?? {};
-  const nextSettings = {
-    ...currentSettings,
-    lost_reasons_extra: parsed.data.lost_reasons_extra,
-  };
+  // O país só entra se tiver PERFIL REVISADO (issue #1033): `paisesOferecidos()`
+  // é a lista que o seletor mostra, e é ela que a gravação confere. Sem esta
+  // guarda, um PATCH à mão gravaria um país cujo documento legal ninguém
+  // revisou, e o PDF de acesso passaria a não citar lei nenhuma — ou, pior,
+  // citaria a brasileira para um titular de outro país.
+  const pais = parsed.data.country ?? null;
+  if (pais !== null && !paisesOferecidos().some((p) => p.codigo === pais)) {
+    return { ok: false, error: `País sem perfil revisado: ${pais}` };
+  }
 
   const { error } = await supabase
     .from("organizations")
@@ -75,13 +71,14 @@ export async function updateTenant(input: TenantInput): Promise<UpdateTenantResu
       display_name: parsed.data.display_name,
       legal_name: parsed.data.legal_name,
       cnpj: parsed.data.cnpj ?? null,
+      country: pais,
       timezone: parsed.data.timezone,
       locale: parsed.data.locale,
       currency: parsed.data.currency,
       media_retention_days: parsed.data.media_retention_days,
+      media_retention_enforced: parsed.data.media_retention_enforced,
       dpo_email: parsed.data.dpo_email ?? null,
       privacy_policy_url: parsed.data.privacy_policy_url ?? null,
-      settings: nextSettings,
     })
     .eq("id", activeOrg.orgId);
   if (error) return { ok: false, error: error.message };

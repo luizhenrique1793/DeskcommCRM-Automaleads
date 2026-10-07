@@ -17,11 +17,15 @@ import type * as LibChannels from "@/lib/channels";
 
 const loadAuthUserMock = vi.fn();
 const resolveActiveOrgMock = vi.fn();
+const orgAtivaDaApiMock = vi.fn();
 vi.mock("@/lib/auth/server", () => ({
   loadAuthUser: (...a: unknown[]) => loadAuthUserMock(...a),
   resolveActiveOrg: (...a: unknown[]) => resolveActiveOrgMock(...a),
 }));
-vi.mock("@/lib/auth/require-role", () => ({ requireRole: vi.fn() }));
+vi.mock("@/lib/auth/require-role", () => ({
+  requireRole: vi.fn(),
+  orgAtivaDaApi: (...a: unknown[]) => orgAtivaDaApiMock(...a),
+}));
 vi.mock("@/lib/audit", () => ({ audit: vi.fn(async () => undefined) }));
 
 const getWahaClientMock = vi.fn(() => null);
@@ -82,6 +86,7 @@ beforeEach(() => {
   updates = [];
   loadAuthUserMock.mockResolvedValue({ id: "user-1" });
   resolveActiveOrgMock.mockResolvedValue({ orgId: ORG, role: "admin" });
+  orgAtivaDaApiMock.mockResolvedValue({ ok: true, org: { orgId: ORG, role: "admin" } });
   getWahaClientMock.mockReturnValue(null);
   (createClient as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(fakeSupabase());
 });

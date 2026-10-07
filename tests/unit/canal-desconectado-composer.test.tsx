@@ -65,7 +65,7 @@ describe("os elos que somem sem barulho", () => {
   it("a coluna status chega no embed — sem ela todo canal pareceria saudável", () => {
     const fonte = readFileSync("app/api/v1/conversations/_handler.ts", "utf8");
     expect(fonte).toMatch(
-      /channel_sessions:channel_session_id \(phone_number, display_name, provider, status\)/,
+      /channel_sessions:channel_session_id \(phone_number, display_name, provider, status[,)]/,
     );
   });
 

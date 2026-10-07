@@ -21,7 +21,9 @@ const PROVIDERS = [
   "waha",
   "meta_cloud",
   "zernio",
+  "zernio_social",
   "uazapi",
+  "datafy",
 ] as const satisfies readonly ProviderDeMensagem[];
 
 /**
@@ -47,6 +49,7 @@ const CAPABILITIES = [
   "canSaveContact",
   "canShowTyping",
   "canSendButtons",
+  "alteraMensagemEnviada",
 ] as const;
 
 describe("matriz capability × provider é exaustiva", () => {

@@ -29,18 +29,19 @@ interface AgentInboxResponse {
 }
 
 /**
- * Central de avisos do runtime (F1). Polling 60s — avisos nascem no worker.
- * Paginado por cursor: cada página vem com até 50 itens; `fetchNextPage`
- * busca a próxima. Antes disto o limite era 200 itens carregados de uma vez
- * só, sem jeito de ver o resto — achado ao vivo com 142 avisos acumulados de
- * teste (2026-08-18).
+ * Central de avisos do runtime (F1). Polling 30 s — é esta leitura que toca o
+ * som da etapa que avisa e do pedido de pessoa (`useSonsDaCentral`); um minuto
+ * de atraso num pedido de pessoa pesa. Paginado por cursor: cada página vem
+ * com até 50 itens; `fetchNextPage` busca a próxima. Antes disto o limite era
+ * 200 itens carregados de uma vez só, sem jeito de ver o resto — achado ao
+ * vivo com 142 avisos acumulados de teste (2026-08-18).
  */
 export function useAgentInbox(status: "open" | "resolved" = "open") {
   const podeConsultar = usePermission("ai.inbox.view");
   return useInfiniteQuery({
     enabled: podeConsultar,
     queryKey: ["agent-inbox", status],
-    refetchInterval: 60_000,
+    refetchInterval: 30_000,
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam }) =>
       apiClient.get<AgentInboxResponse>(

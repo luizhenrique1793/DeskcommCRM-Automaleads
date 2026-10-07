@@ -1,8 +1,9 @@
 "use client";
 
 import { useT } from "@/hooks/i18n/useT";
+import { useTagDeIdioma } from "@/hooks/i18n/useLocaleDeData";
 import { useMemo, useState } from "react";
-import { FUSOS_OFERECIDOS } from "@/lib/tempo/fusos";
+import { FUSOS_OFERECIDOS, fusoOferecidoOuPadrao } from "@/lib/tempo/fusos";
 
 import {
   useAttendants,
@@ -60,6 +61,7 @@ const DOW_LABELS = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"];
 const MODE_LABELS: Record<(typeof ROUTING_MODES)[number], string> = {
   manual: "Manual (atendente puxa da fila)",
   round_robin: "Rodízio (distribui automático)",
+  load: "Menor carga (quem tem menos conversas na mão)",
 };
 
 interface Attendant {
@@ -126,6 +128,59 @@ function StatusBadge({ attendant, now }: { attendant: Attendant; now: Date }) {
   );
 }
 
+/**
+ * O SEGUNDO SELO DA MESMA CÉLULA: "tem alguém aí?" (issue #996).
+ *
+ * O selo de cima diz se a pessoa ESTÁ DE PLANTÃO — decisão dela, limitada pela
+ * jornada. Este diz se o NAVEGADOR dela está aberto agora, que é outra coisa e
+ * mora em outra coluna (`last_heartbeat_at`). Os dois lado a lado é o ponto: o
+ * operador que via "De plantão" e ligava para a pessoa sem resposta passa a
+ * enxergar as duas metades na mesma linha, sem que uma apague a outra.
+ *
+ * O valor vem do SERVIDOR (`present`, derivado com o prazo de
+ * `lib/atendimento/presenca.ts`), e não de uma conta feita aqui: recalculá-lo
+ * nesta tela criaria a segunda régua do mesmo número — exatamente o defeito que
+ * o #720 mediu entre esta tela e o roteador. O carimbo exato vai no `title`
+ * para quem precisa do "quando", e a hora aparece ao lado do selo.
+ *
+ * ⚠️ Presença NÃO é plantão e não desliga plantão: este selo é leitura pura.
+ */
+function PresenceBadge({ attendant }: { attendant: Attendant }) {
+  const t = useT();
+  const tagDoIdioma = useTagDeIdioma();
+  const carimbo = attendant.availability?.last_heartbeat_at ?? null;
+  const presente = !!attendant.availability?.present;
+  const hora =
+    carimbo === null
+      ? null
+      : new Date(carimbo).toLocaleTimeString(tagDoIdioma, { hour: "2-digit", minute: "2-digit" });
+
+  if (hora === null) {
+    return (
+      <Badge variant="neutral" data-testid="presenca" data-presente="nao">
+        {t("Sem sinal de tela")}
+      </Badge>
+    );
+  }
+
+  return (
+    <span className="inline-flex items-center gap-2">
+      {presente ? (
+        <Badge variant="success" data-testid="presenca" data-presente="sim" title={carimbo ?? ""}>
+          {t("Com a tela aberta")}
+        </Badge>
+      ) : (
+        <Badge variant="neutral" data-testid="presenca" data-presente="nao" title={carimbo ?? ""}>
+          {t("Sem sinal de tela")}
+        </Badge>
+      )}
+      <span className="text-xs text-muted-foreground">
+        {t("último sinal às")} {hora}
+      </span>
+    </span>
+  );
+}
+
 /** Editor de janela de horário (schedule tz-aware) de um atendente. */
 function ScheduleDialog({
   attendant,
@@ -133,16 +188,19 @@ function ScheduleDialog({
   onOpenChange,
   onSave,
   isPending,
+  organizationTimezone,
 }: {
   attendant: Attendant;
   open: boolean;
   onOpenChange: (o: boolean) => void;
   onSave: (windows: ScheduleWindow[], timezone: string) => void;
   isPending: boolean;
+  organizationTimezone?: string;
 }) {
   const t = useT();
   const initial = attendant.availability?.schedule;
-  const [timezone, setTimezone] = useState(initial?.timezone || "America/Sao_Paulo");
+  const defaultTimezone = fusoOferecidoOuPadrao(organizationTimezone);
+  const [timezone, setTimezone] = useState(initial?.timezone || defaultTimezone);
   const [windows, setWindows] = useState<ScheduleWindow[]>(initial?.windows ?? []);
 
   return (
@@ -326,10 +384,6 @@ function RoutingCard({ canManage }: { canManage: boolean }) {
                     {MODE_LABELS[m]}
                   </SelectItem>
                 ))}
-                {/* 'load' (balanceamento por carga) é pós-MVP: a API rejeita — desabilitado. */}
-                <SelectItem value="load" disabled>
-                  Balanceamento por carga (em breve)
-                </SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -376,9 +430,10 @@ function RoutingCard({ canManage }: { canManage: boolean }) {
 
 interface Props {
   canManage: boolean;
+  organizationTimezone?: string;
 }
 
-export function AttendantsClient({ canManage }: Props) {
+export function AttendantsClient({ canManage, organizationTimezone }: Props) {
   const t = useT();
   const avail = useAttendants();
   const patch = useUpdateAvailability();
@@ -459,7 +514,10 @@ export function AttendantsClient({ canManage }: Props) {
                       ) : null}
                     </TableCell>
                     <TableCell>
-                      <StatusBadge attendant={a} now={now} />
+                      <div className="flex flex-col items-start gap-1.5">
+                        <StatusBadge attendant={a} now={now} />
+                        <PresenceBadge attendant={a} />
+                      </div>
                     </TableCell>
                     <TableCell>
                       <span className={load >= capacity ? "font-medium text-destructive" : ""}>
@@ -527,6 +585,7 @@ export function AttendantsClient({ canManage }: Props) {
           open={!!scheduleFor}
           onOpenChange={(o) => !o && setScheduleFor(null)}
           isPending={patch.isPending}
+          organizationTimezone={organizationTimezone}
           onSave={(windows, timezone) =>
             patch.mutate(
               { userId: scheduleFor.userId, patch: { schedule: { timezone, windows } } },
