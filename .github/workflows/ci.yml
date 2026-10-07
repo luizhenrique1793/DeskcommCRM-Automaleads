@@ -127,6 +127,13 @@ jobs:
   # `--shard` corta por contagem, e o terço de cada um só se sabe rodando. O
   # custo é um job a mais por rodada na fila de runners (~25 s de preâmbulo), NÃO
   # MEDIDO quanto à espera.
+  #
+  # A QUARTA PARTE ENTROU EM 07/10/2026, pelo mesmo gatilho das anteriores: o
+  # merge com upstream/main (melgarafael/DeskcommCRM) somou arquivo de teste
+  # suficiente para as três partes passarem de 12 min (parte 2 e 3 em 14-15 min
+  # no PR #16). Nenhum passo fixo foi movido para a parte 4 — ela só roda
+  # `Unit tests` e o passo de orçamento, igual à lição de 22/09: reequilibrar
+  # os fixos não sobrava quando só a fatia de unit cresceu.
   verify-parte:
     # Guarda de travamento. O DETECTOR de crescimento é o passo `Orçamento de
     # tempo` no fim de cada parte; a medição que justifica o número está em
@@ -142,7 +149,7 @@ jobs:
       # Sem fail-fast: um vermelho numa parte não esconde o da outra.
       fail-fast: false
       matrix:
-        parte: [1, 2, 3]
+        parte: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v7
 
@@ -329,8 +336,8 @@ jobs:
       # rodaram acima; `--shard` divide os arquivos entre as três partes. Juntos
       # são a suíte inteira, uma vez só. Localmente o comando continua sendo
       # `pnpm test:unit`, sem recorte.
-      - name: Unit tests (parte ${{ matrix.parte }}/3)
-        run: pnpm test:unit --project produto --shard=${{ matrix.parte }}/3
+      - name: Unit tests (parte ${{ matrix.parte }}/4)
+        run: pnpm test:unit --project produto --shard=${{ matrix.parte }}/4
 
       # O ACERVO DE `.changes/` CABE NA TELA DA VPS? — e por que fora de PR.
       #
@@ -445,11 +452,11 @@ jobs:
             exit 0
           fi
           decorrido=$(( ($(date +%s) - VERIFY_INICIO) / 60 ))
-          echo "verify parte ${{ matrix.parte }}/3: ${decorrido} min (orçamento ${ORCAMENTO_MIN} min, teto de travamento 15 min)"
+          echo "verify parte ${{ matrix.parte }}/4: ${decorrido} min (orçamento ${ORCAMENTO_MIN} min, teto de travamento 15 min)"
           if [ "$decorrido" -le "${ORCAMENTO_MIN}" ]; then
             exit 0
           fi
-          echo "::error::A parte ${{ matrix.parte }}/3 do verify levou ${decorrido} min contra um orçamento de ${ORCAMENTO_MIN} min."
+          echo "::error::A parte ${{ matrix.parte }}/4 do verify levou ${decorrido} min contra um orçamento de ${ORCAMENTO_MIN} min."
           echo "::error::Isto NÃO é defeito do seu PR: a suíte unitária cresceu. Em 18/09/2026, \`Unit tests\` já era 10,3 dos 13,2 min do job."
           echo "::error::O conserto é mais uma parte em \`verify-parte\` (matrix + --shard), não subir este número."
           exit 1
@@ -590,8 +597,19 @@ jobs:
         # O token é só para `gh release view`: o test:db confere o update.sh da
         # última release publicada (issue #1909), e a API anônima tem teto de 60
         # consultas/hora por IP — o executor próprio é um IP só.
+        #
+        # CONFERENCIA_KIT_RELEASE: este fork (Automaleads) nunca publicou uma
+        # Release no GitHub — `gh release view` e `/releases/latest` sempre
+        # voltam vazios aqui, e o passo reprova sempre, para qualquer PR (achado
+        # do PR #16). A variável do repo (vars.CONFERENCIA_KIT_RELEASE) aponta
+        # pra a tag `v1.74.0`, criada em 07/10/2026 sobre o HEAD da main de
+        # ANTES do merge com upstream/main — é a melhor aproximação disponível
+        # de "última release publicada" até que o fork corte uma release de
+        # verdade (release.yml, que exige um GitHub App próprio, não configurado
+        # ainda). Remova esta linha quando isso acontecer.
         env:
           GH_TOKEN: ${{ github.token }}
+          CONFERENCIA_KIT_RELEASE: ${{ vars.CONFERENCIA_KIT_RELEASE }}
         run: pnpm test:db
 
       # O `update.sh` do cliente roda sobre um banco COM DADOS, e nenhum gate

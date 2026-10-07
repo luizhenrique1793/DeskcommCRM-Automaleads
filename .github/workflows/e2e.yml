@@ -1681,6 +1681,12 @@ jobs:
           # Medido em 2026-08-10 capturando a URL: /monitoring?o=4509908078559232,
           # que é o org id do DEFAULT_SENTRY_DSN (lib/sentry/dsn.ts:17).
           SENTRY_DSN: "off"
+          # `next build` roda o próprio `tsc` interno ("Running TypeScript
+          # ...") e esse passo também encosta no teto padrão do V8 — mesma
+          # causa e mesmo remédio do passo `Typecheck` em ci.yml (ver o
+          # comentário lá): 6 GB dá folga sem esconder crescimento, nos 16 GB
+          # do runner público.
+          NODE_OPTIONS: --max-old-space-size=6144
 
       # ─── O browser não pesa; o espelho do apt é que pesa ───────────────────
       #

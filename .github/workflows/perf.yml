@@ -43,6 +43,12 @@ jobs:
           # com aspas vazias ela não era alcançada — o build seguia com o DSN
           # padrão embutido.
           SENTRY_DSN: "off"
+          # O `next build` roda o próprio `tsc` interno ("Running TypeScript
+          # ...") na etapa de typecheck, e esse passo também encosta no teto
+          # padrão do V8 — mesma causa e mesmo remédio do passo `Typecheck` em
+          # ci.yml (ver o comentário lá): 6 GB dá folga sem esconder
+          # crescimento, nos 16 GB do runner público.
+          NODE_OPTIONS: --max-old-space-size=6144
 
       - name: Report bundle sizes
         run: |
