@@ -7338,6 +7338,13 @@ export const DICIONARIO: Traducoes = {
   "Resposta segurada pela proteção do número": { es: "Respuesta retenida por la protección del número" },
   "Resposta bloqueada por conformidade": { es: "Respuesta bloqueada por cumplimiento normativo" },
   "Resposta retida para correção": { es: "Respuesta retenida para corrección" },
+  "Resposta retida — não é opt-out": { es: "Respuesta retenida — no es opt-out" },
+  "Esta conversa está em atendimento humano. Isto NÃO é um pedido de opt-out — o contato não pediu para parar de receber mensagens; a IA só está pausada aqui porque alguém da equipe assumiu.": {
+    es: "Esta conversación está en atención humana. Esto NO es un pedido de opt-out — el contacto no pidió dejar de recibir mensajes; la IA solo está pausada aquí porque alguien del equipo asumió la conversación.",
+  },
+  "Este contato está marcado como pessoal. Isto NÃO é um pedido de opt-out — é uma marcação administrativa para que a IA nunca envie mensagem automática a ele.": {
+    es: "Este contacto está marcado como personal. Esto NO es un pedido de opt-out — es una marca administrativa para que la IA nunca le envíe un mensaje automático.",
+  },
 
   // ─── Inbox: gaps achados na varredura completa (ambas as aspas) ───
   "Você não tem nenhuma organização ativa. Aceite um convite ou contate o admin.": {
